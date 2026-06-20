@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 
+use crate::acquisition::AcquisitionSource;
 use crate::capability::{
     ElectronicLoad, LogicAnalyzer, Multimeter, Oscilloscope, PowerSupply, SdrReceiver,
     SpectrumAnalyzer, WaveformGenerator,
@@ -145,6 +146,15 @@ pub trait Device {
     }
     /// Mutable electronic-load capability, if supported.
     fn as_electronic_load_mut(&mut self) -> Option<&mut dyn ElectronicLoad> {
+        None
+    }
+
+    /// Mutable access to this device's bulk [`AcquisitionSource`], once it is
+    /// capturing. Returns `None` for devices that produce no streamed samples
+    /// (e.g. a bare power supply). The session's acquisition loop pulls
+    /// [`SampleChunk`](rb_model::SampleChunk)s from here into the per-device
+    /// stores.
+    fn as_acquisition_source_mut(&mut self) -> Option<&mut dyn AcquisitionSource> {
         None
     }
 }

@@ -13,7 +13,25 @@ rb-device.workspace = true
 rb-transport.workspace = true
 rb-decode.workspace = true
 rb-drivers.workspace = true
+thiserror.workspace = true
+# `futures` (channels/streams/select) is the only runtime glue the *default*
+# build needs; it is wasm-safe, so rb-core compiles to wasm32 with no features.
+futures.workspace = true
 
-# Native-only async runtime will be added behind a feature in M3, e.g.
-# [features]
-# native = ["dep:tokio"]
+# Optional, platform-specific spawners. Neither is enabled by default, so the
+# default build stays pure and wasm-safe.
+tokio = { workspace = true, optional = true, features = ["rt", "time"] }
+wasm-bindgen-futures = { workspace = true, optional = true }
+
+[features]
+default = []
+# Native acquisition spawner (current-thread tokio + `LocalSet` for the `?Send`
+# device futures, interval-driven ticks).
+native = ["dep:tokio"]
+# Web acquisition spawner (`wasm-bindgen-futures::spawn_local`).
+web = ["dep:wasm-bindgen-futures"]
+
+[dev-dependencies]
+async-trait.workspace = true
+tokio = { workspace = true, features = ["rt", "time", "macros"] }
+

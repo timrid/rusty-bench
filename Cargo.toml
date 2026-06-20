@@ -40,6 +40,8 @@ async-trait = "0.1"
 futures = "0.3"
 log = "0.4"
 clap = { version = "4", features = ["derive"] }
+# Native async runtime (NOT wasm-safe): only pulled in behind a `native` feature.
+tokio = { version = "1", default-features = false }
 eframe = { version = "0.34", default-features = false, features = [
     "glow",
     "default_fonts",

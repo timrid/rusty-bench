@@ -32,6 +32,8 @@ jobs:
         run: cargo clippy --workspace --all-targets --exclude rb-gui-web
       - name: Test
         run: cargo test --workspace --exclude rb-gui-web
+      - name: Test native acquisition runtime (rb-core `native` feature)
+        run: cargo test -p rb-core --features native
 
   wasm:
     name: Web (WASM) build
@@ -43,7 +45,9 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - name: Assert pure crates compile to wasm with no features
-        run: cargo build -p rb-model -p rb-device -p rb-transport --target wasm32-unknown-unknown
+        run: cargo build -p rb-model -p rb-device -p rb-transport -p rb-core --target wasm32-unknown-unknown
+      - name: Assert rb-core web spawner compiles to wasm
+        run: cargo build -p rb-core --features web --target wasm32-unknown-unknown
       - name: Install trunk
         uses: jetli/trunk-action@v0.5.0
         with:

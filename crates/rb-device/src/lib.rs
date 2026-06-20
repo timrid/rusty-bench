@@ -17,11 +17,13 @@
 
 #![forbid(unsafe_code)]
 
+mod acquisition;
 mod capability;
 mod device;
 mod error;
 mod identity;
 
+pub use acquisition::AcquisitionSource;
 pub use capability::{
     ElectronicLoad, LoadMode, LogicAnalyzer, Multimeter, Oscilloscope, PowerSupply, SdrReceiver,
     SpectrumAnalyzer, WaveformGenerator,

@@ -9,6 +9,10 @@ struct Cli {}
 
 fn main() -> anyhow::Result<()> {
     let _cli = Cli::parse();
-    println!("RustyBench CLI — {} (M0 skeleton)", rb_core::CRATE);
+    let registry = rb_core::DriverRegistry::with_default_factories();
+    println!(
+        "RustyBench CLI — {} driver(s) available (M3 skeleton)",
+        registry.len()
+    );
     Ok(())
 }
