@@ -9,5 +9,11 @@ authors.workspace = true
 
 # NOTE: rb-device must stay free of I/O and async-runtime dependencies.
 # It must compile to wasm32-unknown-unknown with no feature flags.
+# `async-trait` and `thiserror` are proc-macro / no-std-friendly and bind no runtime.
 [dependencies]
 rb-model.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+futures.workspace = true

@@ -43,7 +43,7 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - name: Assert pure crates compile to wasm with no features
-        run: cargo build -p rb-model -p rb-device --target wasm32-unknown-unknown
+        run: cargo build -p rb-model -p rb-device -p rb-transport --target wasm32-unknown-unknown
       - name: Install trunk
         uses: jetli/trunk-action@v0.5.0
         with:
