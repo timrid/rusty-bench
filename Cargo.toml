@@ -43,6 +43,9 @@ clap = { version = "4", features = ["derive"] }
 eframe = { version = "0.34", default-features = false, features = [
     "glow",
     "default_fonts",
+    # needed on Linux for winit to pick a display backend
+    "x11",
+    "wayland",
 ] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"

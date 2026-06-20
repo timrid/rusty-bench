@@ -28,9 +28,10 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
-        run: cargo clippy --workspace --all-targets
+        # rb-gui-web is wasm-only; exclude it from native compilation
+        run: cargo clippy --workspace --all-targets --exclude rb-gui-web
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --exclude rb-gui-web
 
   wasm:
     name: Web (WASM) build
