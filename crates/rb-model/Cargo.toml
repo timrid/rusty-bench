@@ -10,3 +10,6 @@ authors.workspace = true
 # NOTE: rb-model must stay free of I/O and async-runtime dependencies.
 # It must compile to wasm32-unknown-unknown with no feature flags.
 [dependencies]
+
+[dev-dependencies]
+proptest = { workspace = true }

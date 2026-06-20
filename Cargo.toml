@@ -48,5 +48,8 @@ wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 web-sys = "0.3"
 
+# Dev-only (tests/benches; never shipped to the wasm runtime)
+proptest = { version = "1", default-features = false, features = ["std", "bit-set"] }
+
 [profile.release]
 opt-level = 2

@@ -1,18 +1,26 @@
 //! Core data model for RustyBench: sample types, channels, timebase, the sample
-//! store and its multi-resolution mip-map.
+//! stores and their multi-resolution mip-maps.
 //!
 //! This crate is intentionally free of I/O and async-runtime dependencies so it
 //! compiles unchanged to native and `wasm32-unknown-unknown`.
+//!
+//! # Layers
+//! - [`Timebase`] maps base-sample indices to time.
+//! - [`AnalogChannel`] / [`DigitalChannel`] carry per-channel metadata.
+//! - [`AnalogStore`] / [`DigitalStore`] hold append-only base samples.
+//! - [`AnalogMipMap`] (min/max pyramid) and [`DigitalMipMap`] (transition index)
+//!   provide constant-cost reads at any zoom.
+//! - [`AnalogTrace`] / [`DigitalTrace`] bundle the above into a display-facing
+//!   surface: push samples, then request draw [`Bucket`]s or edges over a range.
 
-/// Crate name, used as a placeholder until real types land in M1.
-pub const CRATE: &str = "rb-model";
+#![forbid(unsafe_code)]
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+mod analog;
+mod channel;
+mod digital;
+mod timebase;
 
-    #[test]
-    fn crate_name_is_set() {
-        assert_eq!(CRATE, "rb-model");
-    }
-}
+pub use analog::{AnalogMipMap, AnalogStore, AnalogTrace, Bucket, DEFAULT_RADIX, MinMax};
+pub use channel::{AnalogChannel, AnalogFormat, ChannelId, DigitalChannel};
+pub use digital::{DigitalMipMap, DigitalStore, DigitalTrace, LogicWord, MAX_DIGITAL_CHANNELS};
+pub use timebase::Timebase;
