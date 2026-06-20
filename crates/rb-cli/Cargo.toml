@@ -7,11 +7,18 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[lib]
+name = "rb_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "rusty-bench"
 path = "src/main.rs"
 
 [dependencies]
 rb-core.workspace = true
+rb-model.workspace = true
+rb-device.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+futures.workspace = true

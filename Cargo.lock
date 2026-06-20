@@ -2125,7 +2125,10 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "clap",
+ "futures",
  "rb-core",
+ "rb-device",
+ "rb-model",
 ]
 
 [[package]]
