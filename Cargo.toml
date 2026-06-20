@@ -8,6 +8,7 @@ members = [
     "crates/rb-scpi",
     "crates/rb-core",
     "crates/rb-drivers",
+    "crates/rb-io",
     "crates/rb-cli",
     "crates/rb-gui",
     "crates/rb-gui-native",
@@ -31,6 +32,7 @@ rb-decode = { path = "crates/rb-decode" }
 rb-scpi = { path = "crates/rb-scpi" }
 rb-core = { path = "crates/rb-core" }
 rb-drivers = { path = "crates/rb-drivers" }
+rb-io = { path = "crates/rb-io" }
 rb-gui = { path = "crates/rb-gui" }
 
 # Shared third-party (wasm-safe unless noted)
@@ -40,6 +42,9 @@ async-trait = "0.1"
 futures = "0.3"
 log = "0.4"
 clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zip = "2"
 # Native async runtime (NOT wasm-safe): only pulled in behind a `native` feature.
 tokio = { version = "1", default-features = false }
 eframe = { version = "0.34", default-features = false, features = [

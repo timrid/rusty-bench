@@ -2,6 +2,9 @@
 //!
 //! All public functions write their output to a `&mut dyn io::Write`, so tests
 //! can capture the output in a `Vec<u8>` without spawning a subprocess.
+//!
+//! Output is delegated to [`rb_io`] for all capture formats; this module only
+//! handles the CLI plumbing (scanning, connecting, acquisition loop).
 
 #![forbid(unsafe_code)]
 
@@ -11,6 +14,7 @@ use anyhow::Context as _;
 use futures::executor::block_on;
 use rb_core::{AcquisitionCommand, DeviceHandle, DriverRegistry};
 use rb_device::Device;
+use rb_io::{AnalogCapture, DeviceCapture, DigitalCapture};
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -21,6 +25,8 @@ pub enum OutputFormat {
     Csv,
     /// Value Change Dump (IEEE 1364) — digital channels only.
     Vcd,
+    /// Native RustyBench capture (`.rbc`) — versioned ZIP archive.
+    Native,
 }
 
 /// Options forwarded from the `acquire` subcommand.
@@ -146,16 +152,26 @@ pub fn run_acquire(opts: AcquireOpts, writer: &mut dyn io::Write) -> anyhow::Res
             let remaining = opts.samples - handle.sample_count();
             let pumped = handle.pump(remaining.min(4096));
             if pumped == 0 {
-                break; // source exhausted (unexpected for demo; guard for real devices)
+                break; // source exhausted (guard for real devices)
             }
         }
         block_on(handle.apply(AcquisitionCommand::Stop))?;
     }
 
+    let capture = capture_from_handle(&handle);
+
     match opts.format {
-        OutputFormat::Csv => write_csv(&handle, writer),
-        OutputFormat::Vcd => write_vcd(&handle, writer),
+        OutputFormat::Csv => rb_io::write_csv(&capture, writer)?,
+        OutputFormat::Vcd => rb_io::write_vcd(&capture, writer)?,
+        OutputFormat::Native => {
+            // Native format (ZIP) requires Write + Seek; buffer to memory first
+            // so we can stream to any writer including stdout.
+            let mut buf = std::io::Cursor::new(Vec::new());
+            capture.write_to(&mut buf)?;
+            writer.write_all(&buf.into_inner())?;
+        }
     }
+    Ok(())
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -172,115 +188,29 @@ fn find_and_connect(address: &str) -> anyhow::Result<Box<dyn Device>> {
     Ok(device)
 }
 
-/// Writes all acquired samples as CSV.
-///
-/// Header: `sample_index,time_s,<analog_names...>,<digital_names...>`
-/// Each data row: sample index, time in seconds (9 dp), analog physical values,
-/// digital channel bit values (0/1).
-fn write_csv(handle: &DeviceHandle, writer: &mut dyn io::Write) -> anyhow::Result<()> {
-    // Derive the per-sample time step from the first available timebase.
-    let sample_period_s = handle
+/// Snapshots a [`DeviceHandle`]'s stores into a [`DeviceCapture`] for export.
+fn capture_from_handle(handle: &DeviceHandle) -> DeviceCapture {
+    let info = handle.device().info().clone();
+
+    let analog = handle
         .analog_traces()
-        .first()
-        .map(|t| t.timebase().sample_period_s())
-        .or_else(|| {
-            handle
-                .digital_trace()
-                .map(|t| t.timebase().sample_period_s())
+        .iter()
+        .map(|t| AnalogCapture {
+            channel: t.channel().clone(),
+            timebase: *t.timebase(),
+            samples: t.store().raw().to_vec(),
         })
-        .unwrap_or(1.0);
-
-    // Header row.
-    write!(writer, "sample_index,time_s")?;
-    for trace in handle.analog_traces() {
-        write!(writer, ",{}", trace.channel().name)?;
-    }
-    if let Some(dt) = handle.digital_trace() {
-        for ch in dt.channels() {
-            write!(writer, ",{}", ch.name)?;
-        }
-    }
-    writeln!(writer)?;
-
-    // Data rows.
-    let n = handle.sample_count();
-    for i in 0..n {
-        let t = i as f64 * sample_period_s;
-        write!(writer, "{i},{t:.9}")?;
-
-        for trace in handle.analog_traces() {
-            let raw = trace.store().raw()[i];
-            let phys = trace.to_physical(raw);
-            write!(writer, ",{phys:.9}")?;
-        }
-        if let Some(dt) = handle.digital_trace() {
-            let word = dt.store().words()[i];
-            for ch in dt.channels() {
-                let bit = (word >> ch.bit) & 1;
-                write!(writer, ",{bit}")?;
-            }
-        }
-        writeln!(writer)?;
-    }
-
-    Ok(())
-}
-
-/// Writes all acquired digital samples as VCD (Value Change Dump, IEEE 1364).
-///
-/// Only changes are emitted; timestamps are in nanoseconds.  Analog channels
-/// are omitted (VCD is a digital format).
-fn write_vcd(handle: &DeviceHandle, writer: &mut dyn io::Write) -> anyhow::Result<()> {
-    let dt = handle
-        .digital_trace()
-        .ok_or_else(|| anyhow::anyhow!("device has no digital channels"))?;
-
-    let rate = dt.timebase().sample_rate_hz();
-    let period_ns = (1e9 / rate).round() as u64;
-    let channels = dt.channels();
-
-    // VCD identifiers: printable ASCII starting at '!' (33).
-    let ids: Vec<char> = (0..channels.len())
-        .map(|i| char::from_u32(33 + i as u32).expect("at most 94 digital channels in VCD"))
         .collect();
 
-    // Header.
-    writeln!(writer, "$timescale 1 ns $end")?;
-    writeln!(writer, "$version RustyBench-CLI $end")?;
-    writeln!(writer, "$scope module top $end")?;
-    for (ch, id) in channels.iter().zip(ids.iter()) {
-        writeln!(writer, "$var wire 1 {id} {} $end", ch.name)?;
-    }
-    writeln!(writer, "$upscope $end")?;
-    writeln!(writer, "$enddefinitions $end")?;
+    let digital = handle.digital_trace().map(|dt| DigitalCapture {
+        channels: dt.channels().to_vec(),
+        timebase: *dt.timebase(),
+        words: dt.store().words().to_vec(),
+    });
 
-    // Initial values at t=0.
-    let words = dt.store().words();
-    writeln!(writer, "#0")?;
-    writeln!(writer, "$dumpvars")?;
-    if !words.is_empty() {
-        for (ch, id) in channels.iter().zip(ids.iter()) {
-            let bit = (words[0] >> ch.bit) & 1;
-            writeln!(writer, "{bit}{id}")?;
-        }
+    DeviceCapture {
+        info,
+        analog,
+        digital,
     }
-    writeln!(writer, "$end")?;
-
-    // Value changes (only emit when a channel transitions).
-    let mut prev = words.first().copied().unwrap_or(0);
-    for (i, &word) in words.iter().enumerate().skip(1) {
-        if word != prev {
-            writeln!(writer, "#{}", i as u64 * period_ns)?;
-            for (ch, id) in channels.iter().zip(ids.iter()) {
-                let prev_bit = (prev >> ch.bit) & 1;
-                let curr_bit = (word >> ch.bit) & 1;
-                if prev_bit != curr_bit {
-                    writeln!(writer, "{curr_bit}{id}")?;
-                }
-            }
-            prev = word;
-        }
-    }
-
-    Ok(())
 }
