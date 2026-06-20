@@ -1,0 +1,12 @@
+[package]
+name = "rb-model"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# NOTE: rb-model must stay free of I/O and async-runtime dependencies.
+# It must compile to wasm32-unknown-unknown with no feature flags.
+[dependencies]

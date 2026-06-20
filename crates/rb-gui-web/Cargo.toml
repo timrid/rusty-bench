@@ -1,0 +1,26 @@
+[package]
+name = "rb-gui-web"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "rb-gui-web"
+path = "src/main.rs"
+
+[dependencies]
+rb-gui.workspace = true
+eframe.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+web-sys = { workspace = true, features = [
+    "Document",
+    "Element",
+    "HtmlCanvasElement",
+    "Window",
+] }

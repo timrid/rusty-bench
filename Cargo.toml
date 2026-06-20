@@ -1,0 +1,52 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/rb-model",
+    "crates/rb-device",
+    "crates/rb-transport",
+    "crates/rb-decode",
+    "crates/rb-scpi",
+    "crates/rb-core",
+    "crates/rb-drivers",
+    "crates/rb-cli",
+    "crates/rb-gui",
+    "crates/rb-gui-native",
+    "crates/rb-gui-web",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/timri/rusty-bench"
+authors = ["RustyBench contributors"]
+
+[workspace.dependencies]
+# Internal crates
+rb-model = { path = "crates/rb-model" }
+rb-device = { path = "crates/rb-device" }
+rb-transport = { path = "crates/rb-transport" }
+rb-decode = { path = "crates/rb-decode" }
+rb-scpi = { path = "crates/rb-scpi" }
+rb-core = { path = "crates/rb-core" }
+rb-drivers = { path = "crates/rb-drivers" }
+rb-gui = { path = "crates/rb-gui" }
+
+# Shared third-party (wasm-safe unless noted)
+thiserror = "2"
+anyhow = "1"
+async-trait = "0.1"
+futures = "0.3"
+log = "0.4"
+clap = { version = "4", features = ["derive"] }
+eframe = { version = "0.34", default-features = false, features = [
+    "glow",
+    "default_fonts",
+] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = "0.3"
+
+[profile.release]
+opt-level = 2

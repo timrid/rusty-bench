@@ -1,0 +1,17 @@
+[package]
+name = "rb-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "rusty-bench"
+path = "src/main.rs"
+
+[dependencies]
+rb-core.workspace = true
+anyhow.workspace = true
+clap.workspace = true

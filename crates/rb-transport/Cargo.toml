@@ -1,0 +1,17 @@
+[package]
+name = "rb-transport"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+rb-model.workspace = true
+rb-device.workspace = true
+
+# Platform transports will be added behind features in later milestones, e.g.
+# [features]
+# usb = ["dep:nusb"]
+# serial = ["dep:serialport"]

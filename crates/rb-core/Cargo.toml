@@ -1,0 +1,19 @@
+[package]
+name = "rb-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+rb-model.workspace = true
+rb-device.workspace = true
+rb-transport.workspace = true
+rb-decode.workspace = true
+rb-drivers.workspace = true
+
+# Native-only async runtime will be added behind a feature in M3, e.g.
+# [features]
+# native = ["dep:tokio"]
