@@ -2403,7 +2403,10 @@ name = "rb-gui"
 version = "0.0.0"
 dependencies = [
  "eframe",
+ "futures",
  "rb-core",
+ "rb-device",
+ "rb-model",
 ]
 
 [[package]]
