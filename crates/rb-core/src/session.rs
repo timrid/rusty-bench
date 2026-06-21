@@ -67,11 +67,12 @@ impl Session {
     }
 
     /// Pumps every running device once, returning the total samples appended.
-    pub fn pump_all(&mut self, max_samples: usize) -> usize {
-        self.devices
-            .values_mut()
-            .map(|handle| handle.pump(max_samples))
-            .sum()
+    pub async fn pump_all(&mut self, max_samples: usize) -> usize {
+        let mut total = 0;
+        for handle in self.devices.values_mut() {
+            total += handle.pump(max_samples).await;
+        }
+        total
     }
 }
 
@@ -105,7 +106,7 @@ mod tests {
         let _idle = add_demo(&mut session, "demo:1");
 
         block_on(session.device_mut(&running).unwrap().start()).unwrap();
-        let appended = session.pump_all(32);
+        let appended = block_on(session.pump_all(32));
         assert_eq!(appended, 32);
         assert_eq!(session.device(&running).unwrap().sample_count(), 32);
     }

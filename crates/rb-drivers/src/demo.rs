@@ -79,8 +79,9 @@ impl DemoSource {
     }
 }
 
+#[async_trait(?Send)]
 impl AcquisitionSource for DemoSource {
-    fn next_chunk(&mut self, max_samples: usize) -> SampleChunk {
+    async fn next_chunk(&mut self, max_samples: usize) -> SampleChunk {
         let cfg = self.config;
         let mask = self.logic_mask();
         let mut analog: Vec<Vec<i32>> = (0..cfg.analog_channels)
@@ -309,7 +310,7 @@ mod tests {
     #[test]
     fn source_generates_consistent_deterministic_chunks() {
         let mut source = DemoSource::new(DemoConfig::default());
-        let chunk = source.next_chunk(8);
+        let chunk = block_on(source.next_chunk(8));
 
         assert_eq!(chunk.sample_count(), 8);
         assert!(chunk.is_consistent());
@@ -325,8 +326,8 @@ mod tests {
     #[test]
     fn source_advances_position_across_calls() {
         let mut source = DemoSource::new(DemoConfig::default());
-        let _ = source.next_chunk(8);
-        let chunk = source.next_chunk(4);
+        let _ = block_on(source.next_chunk(8));
+        let chunk = block_on(source.next_chunk(4));
         // Counter continues from sample 8.
         assert_eq!(chunk.logic(), [8, 9, 10, 11].map(|i| i & 0b1111));
         assert_eq!(source.produced(), 12);

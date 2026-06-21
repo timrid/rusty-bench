@@ -24,7 +24,6 @@
 //! [`MockTransport`]: rb_transport::MockTransport
 
 use async_trait::async_trait;
-use futures::executor::block_on;
 
 use rb_device::{
     AcquisitionSource, Device, DeviceClass, DeviceError, DeviceId, DeviceInfo, DeviceResult,
@@ -98,9 +97,6 @@ const REQUIRED_FW_MAJOR: u8 = 1;
 const MAX_RENUM_DELAY_MS: u64 = 3000;
 /// Poll interval during renumeration wait.
 const RENUM_POLL_MS: u64 = 100;
-
-/// Maximum chunks to pull per `next_chunk` call (to bound latency).
-const MAX_PUMP_CHUNKS: usize = 16;
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -416,31 +412,32 @@ impl LogicAnalyzer for Fx2lafwDevice {
     }
 }
 
+#[async_trait(?Send)]
 impl AcquisitionSource for Fx2lafwDevice {
-    fn next_chunk(&mut self, max_samples: usize) -> SampleChunk {
+    async fn next_chunk(&mut self, max_samples: usize) -> SampleChunk {
         let sample_bytes = if self.sample_wide { 2 } else { 1 };
 
         if !self.running {
-            let _n = self.sample_buf.len();
+            // Final drain: decode everything left in sample_buf.
             let samples = decode_samples(&self.sample_buf, self.sample_wide, max_samples);
-            self.sample_buf.clear();
+            let consumed = samples.logic().len() * sample_bytes;
+            self.sample_buf.drain(..consumed.min(self.sample_buf.len()));
             return samples;
         }
 
-        // Read up to (max_samples * sample_bytes) bytes from EP2 IN.
-        let want_bytes = max_samples * sample_bytes;
-        let mut read_buf = vec![0u8; want_bytes.min(4096)];
-
-        for _ in 0..MAX_PUMP_CHUNKS {
-            match block_on(self.transport.read(&mut read_buf)) {
-                Ok(0) => break, // End of stream.
-                Ok(n) => {
-                    self.sample_buf.extend_from_slice(&read_buf[..n]);
-                    if self.sample_buf.len() >= want_bytes {
-                        break;
-                    }
-                }
-                Err(_) => break, // Transport error → stop reading.
+        // Read one chunk from EP2 IN into sample_buf.
+        let mut read_buf = vec![0u8; 4096];
+        match self.transport.read(&mut read_buf).await {
+            Ok(0) => {
+                // EOF — firmware stopped sending.
+                self.running = false;
+            }
+            Err(_) => {
+                // Transport error — stop reading.
+                self.running = false;
+            }
+            Ok(n) => {
+                self.sample_buf.extend_from_slice(&read_buf[..n]);
             }
         }
 
@@ -1361,6 +1358,23 @@ mod tests {
 
     // ── next_chunk integration (MockTransport) ───────────────────────────────
 
+    /// Helper: create a device with firmware validated and acquisition armed,
+    /// ready for next_chunk() calls.
+    fn armed_device(transport: MockTransport, channels: u8) -> Fx2lafwDevice {
+        let mut dev = Fx2lafwDevice::new(
+            DeviceId::new("test"),
+            DeviceInfo::new("X", "Y"),
+            Box::new(transport),
+            Fx2lafwConfig {
+                channels,
+                sample_rate_hz: 1_000_000.0,
+            },
+        );
+        block_on(dev.open()).unwrap();
+        block_on(dev.arm()).unwrap();
+        dev
+    }
+
     #[test]
     fn next_chunk_when_stopped_drains_buffer() {
         let transport = MockTransport::new();
@@ -1376,7 +1390,7 @@ mod tests {
         dev.sample_buf = vec![0x01, 0x02, 0x03];
         dev.running = false;
 
-        let chunk = dev.next_chunk(10);
+        let chunk = block_on(dev.next_chunk(10));
         assert_eq!(chunk.logic(), &[0x01, 0x02, 0x03]);
         assert!(dev.sample_buf.is_empty(), "buffer should be drained after stopped read");
     }
@@ -1384,37 +1398,30 @@ mod tests {
     #[test]
     fn next_chunk_reads_8bit_from_transport() {
         let mut transport = MockTransport::new();
+        transport.queue_control_response([1, 4]); // fw
+        transport.queue_control_response([1]); // revid
+        transport.queue_control_response([]); // start_acq
         transport.queue_read([0x0F, 0xF0, 0x55]);
 
-        let mut dev = Fx2lafwDevice::new(
-            DeviceId::new("test"),
-            DeviceInfo::new("X", "Y"),
-            Box::new(transport),
-            Fx2lafwConfig { channels: 8, sample_rate_hz: 1_000_000.0 },
-        );
-        dev.running = true;
+        let mut dev = armed_device(transport, 8);
 
-        let chunk = dev.next_chunk(10);
+        let chunk = block_on(dev.next_chunk(10));
         assert_eq!(chunk.logic(), &[0x0F, 0xF0, 0x55]);
     }
 
     #[test]
     fn next_chunk_reads_16bit_from_transport() {
         let mut transport = MockTransport::new();
+        transport.queue_control_response([1, 4]);
+        transport.queue_control_response([1]);
+        transport.queue_control_response([]);
         // 16-bit samples: 3 samples = 6 bytes (little-endian)
         transport.queue_read([0x34, 0x12, 0x78, 0x56, 0xBC, 0x9A]);
-        // → 0x1234, 0x5678, 0x9ABC
 
-        let mut dev = Fx2lafwDevice::new(
-            DeviceId::new("test"),
-            DeviceInfo::new("X", "Y"),
-            Box::new(transport),
-            Fx2lafwConfig { channels: 16, sample_rate_hz: 1_000_000.0 },
-        );
+        let mut dev = armed_device(transport, 16);
         assert!(dev.sample_wide, "16-channel device must be in wide mode");
-        dev.running = true;
 
-        let chunk = dev.next_chunk(3);
+        let chunk = block_on(dev.next_chunk(3));
         assert_eq!(chunk.logic().len(), 3);
         assert_eq!(chunk.logic()[0], 0x1234);
         assert_eq!(chunk.logic()[1], 0x5678);
@@ -1424,18 +1431,15 @@ mod tests {
     #[test]
     fn next_chunk_handles_partial_16bit_sample() {
         let mut transport = MockTransport::new();
+        transport.queue_control_response([1, 4]);
+        transport.queue_control_response([1]);
+        transport.queue_control_response([]);
         // 5 bytes = 2 complete samples + 1 leftover byte
         transport.queue_read([0x01, 0x00, 0x02, 0x00, 0x03]);
 
-        let mut dev = Fx2lafwDevice::new(
-            DeviceId::new("test"),
-            DeviceInfo::new("X", "Y"),
-            Box::new(transport),
-            Fx2lafwConfig { channels: 16, sample_rate_hz: 1_000_000.0 },
-        );
-        dev.running = true;
+        let mut dev = armed_device(transport, 16);
 
-        let chunk = dev.next_chunk(10);
+        let chunk = block_on(dev.next_chunk(10));
         // 2 complete 16-bit samples decoded, 1 byte buffered for next call.
         assert_eq!(chunk.logic().len(), 2);
         assert_eq!(chunk.logic()[0], 0x0001);
@@ -1446,40 +1450,33 @@ mod tests {
     #[test]
     fn next_chunk_respects_max_samples() {
         let mut transport = MockTransport::new();
-        // Queue more data than we'll consume.
+        transport.queue_control_response([1, 4]);
+        transport.queue_control_response([1]);
+        transport.queue_control_response([]);
         transport.queue_read([0x01, 0x02, 0x03, 0x04, 0x05, 0x06]);
 
-        let mut dev = Fx2lafwDevice::new(
-            DeviceId::new("test"),
-            DeviceInfo::new("X", "Y"),
-            Box::new(transport),
-            Fx2lafwConfig { channels: 8, sample_rate_hz: 1_000_000.0 },
-        );
-        dev.running = true;
+        let mut dev = armed_device(transport, 8);
 
         // Only request 2 samples.
-        let chunk = dev.next_chunk(2);
+        let chunk = block_on(dev.next_chunk(2));
         assert_eq!(chunk.logic().len(), 2);
         assert_eq!(chunk.logic()[0], 0x01);
         assert_eq!(chunk.logic()[1], 0x02);
-        // Transport may still have unread data, but device buffer should be cleanly consumed.
-        assert!(dev.sample_buf.is_empty(), "only 2 bytes read → buffer empty");
+        // Extra bytes remain in sample_buf.
+        assert_eq!(dev.sample_buf.len(), 4);
     }
 
     #[test]
     fn next_chunk_handles_empty_transport_read() {
-        let transport = MockTransport::new();
-        // queue_read empty → read returns 0 → end-of-stream
+        let mut transport = MockTransport::new();
+        transport.queue_control_response([1, 4]);
+        transport.queue_control_response([1]);
+        transport.queue_control_response([]);
+        // No queued read → reader exits with EOF.
 
-        let mut dev = Fx2lafwDevice::new(
-            DeviceId::new("test"),
-            DeviceInfo::new("X", "Y"),
-            Box::new(transport),
-            Fx2lafwConfig::default(),
-        );
-        dev.running = true;
+        let mut dev = armed_device(transport, 8);
 
-        let chunk = dev.next_chunk(10);
+        let chunk = block_on(dev.next_chunk(10));
         assert_eq!(chunk.logic().len(), 0, "empty transport → empty chunk");
     }
 
@@ -1566,5 +1563,175 @@ mod tests {
     fn is_bootloader_detects_cypress() {
         assert!(is_bootloader(0x04B4, 0x8613));
         assert!(!is_bootloader(0x1D50, 0x608C));
+    }
+
+    // ── Async next_chunk (direct transport.read, WASM-safe) ──────────────────
+
+    /// next_chunk reads one USB transfer per call and decodes buffered data.
+    /// With MockTransport, each call drains one queued read chunk.
+    #[test]
+    fn async_next_chunk_reads_one_transfer_per_call() {
+        let mut transport = MockTransport::new();
+        transport.queue_control_response([1, 4]);
+        transport.queue_control_response([1]);
+        transport.queue_control_response([]);
+        transport.queue_read([0x01, 0x02, 0x03]);
+
+        let mut dev = Fx2lafwDevice::new(
+            DeviceId::new("test"),
+            DeviceInfo::new("T", "FX2"),
+            Box::new(transport),
+            Fx2lafwConfig::default(),
+        );
+        block_on(dev.open()).unwrap();
+        block_on(dev.arm()).unwrap();
+
+        let chunk = block_on(dev.next_chunk(10));
+        assert_eq!(chunk.logic(), &[0x01, 0x02, 0x03]);
+    }
+
+    /// After stop(), remaining sample_buf data is drainable.
+    #[test]
+    fn stop_flushes_remaining_data() {
+        let mut transport = MockTransport::new();
+        transport.queue_control_response([1, 4]);
+        transport.queue_control_response([1]);
+        transport.queue_control_response([]);
+        transport.queue_read([0xAA, 0xBB, 0xCC]);
+
+        let mut dev = Fx2lafwDevice::new(
+            DeviceId::new("test"),
+            DeviceInfo::new("T", "M"),
+            Box::new(transport),
+            Fx2lafwConfig::default(),
+        );
+        block_on(dev.open()).unwrap();
+        block_on(dev.arm()).unwrap();
+
+        // Read one chunk.
+        let chunk = block_on(dev.next_chunk(10));
+        assert_eq!(chunk.logic(), &[0xAA, 0xBB, 0xCC]);
+
+        // Stop acquisition.
+        block_on(dev.stop()).unwrap();
+        assert!(!dev.running);
+
+        // No more data queued → empty chunk.
+        let chunk = block_on(dev.next_chunk(10));
+        assert_eq!(chunk.logic().len(), 0);
+    }
+
+    /// 16-bit wide mode works with async next_chunk.
+    #[test]
+    fn async_next_chunk_16bit() {
+        let mut transport = MockTransport::new();
+        transport.queue_control_response([1, 4]);
+        transport.queue_control_response([1]);
+        transport.queue_control_response([]);
+        transport.queue_read([0x34, 0x12, 0x78, 0x56]);
+
+        let mut dev = Fx2lafwDevice::new(
+            DeviceId::new("test"),
+            DeviceInfo::new("T", "M"),
+            Box::new(transport),
+            Fx2lafwConfig { channels: 16, sample_rate_hz: 1_000_000.0 },
+        );
+        block_on(dev.open()).unwrap();
+        block_on(dev.arm()).unwrap();
+
+        let chunk = block_on(dev.next_chunk(2));
+        assert_eq!(chunk.logic().len(), 2);
+        assert_eq!(chunk.logic()[0], 0x1234);
+        assert_eq!(chunk.logic()[1], 0x5678);
+    }
+
+    /// next_chunk reads one transfer → buffers data → max_samples bounds apply.
+    #[test]
+    fn async_next_chunk_respects_max_samples() {
+        let mut transport = MockTransport::new();
+        transport.queue_control_response([1, 4]);
+        transport.queue_control_response([1]);
+        transport.queue_control_response([]);
+        // One large read — MockTransport returns all at once.
+        transport.queue_read([0x01, 0x02, 0x03, 0x04, 0x05, 0x06]);
+
+        let mut dev = Fx2lafwDevice::new(
+            DeviceId::new("test"),
+            DeviceInfo::new("T", "M"),
+            Box::new(transport),
+            Fx2lafwConfig::default(),
+        );
+        block_on(dev.open()).unwrap();
+        block_on(dev.arm()).unwrap();
+
+        // Only request 2 samples.
+        let chunk = block_on(dev.next_chunk(2));
+        assert_eq!(chunk.logic().len(), 2);
+        assert_eq!(chunk.logic()[0], 0x01);
+        // Remaining 4 bytes still in sample_buf.
+        assert_eq!(dev.sample_buf.len(), 4);
+    }
+
+    /// Transport read error → running=false, buffered data drained.
+    #[test]
+    fn async_next_chunk_exits_on_transport_error() {
+        let mut transport = MockTransport::new();
+        transport.queue_control_response([1, 4]);
+        transport.queue_control_response([1]);
+        transport.queue_control_response([]);
+        transport.queue_read([0x01]);
+        transport.queue_read_error("USB disconnect");
+
+        let mut dev = Fx2lafwDevice::new(
+            DeviceId::new("test"),
+            DeviceInfo::new("T", "M"),
+            Box::new(transport),
+            Fx2lafwConfig::default(),
+        );
+        block_on(dev.open()).unwrap();
+        block_on(dev.arm()).unwrap();
+
+        // First call gets the queued data.
+        let chunk = block_on(dev.next_chunk(10));
+        assert_eq!(chunk.logic().len(), 1);
+        assert_eq!(chunk.logic()[0], 0x01);
+
+        // Second call hits error → running=false → empty.
+        let chunk = block_on(dev.next_chunk(10));
+        assert_eq!(chunk.logic().len(), 0);
+        assert!(!dev.running);
+    }
+
+    /// After stop(), re-arm works (transport is still owned by device).
+    #[test]
+    fn re_arm_after_stop_works() {
+        let mut transport = MockTransport::new();
+        transport.queue_control_response([1, 4]); // fw
+        transport.queue_control_response([1]); // revid
+        transport.queue_control_response([]); // start_acq #1
+        transport.queue_read([0x01]);
+        // All data qued before first next_chunk — MockTransport is sequential.
+        transport.queue_control_response([]); // start_acq #2
+        transport.queue_read([0x02, 0x03]);
+
+        let mut dev = Fx2lafwDevice::new(
+            DeviceId::new("test"),
+            DeviceInfo::new("T", "M"),
+            Box::new(transport),
+            Fx2lafwConfig::default(),
+        );
+        block_on(dev.open()).unwrap();
+
+        // First run: reads first queued chunk (both reads qued, gets all 3 bytes).
+        block_on(dev.arm()).unwrap();
+        let chunk = block_on(dev.next_chunk(10));
+        assert_eq!(chunk.logic(), &[0x01, 0x02, 0x03]);
+        block_on(dev.stop()).unwrap();
+
+        // Second run — re-arm succeeds, but transport queue is drained.
+        block_on(dev.arm()).unwrap();
+        assert!(dev.running);
+        let chunk = block_on(dev.next_chunk(10));
+        assert_eq!(chunk.logic().len(), 0);
     }
 }

@@ -48,7 +48,7 @@ mod tests {
 
         let handle = session.device_mut(&id).unwrap();
         block_on(handle.apply(AcquisitionCommand::Start)).unwrap();
-        handle.pump(256);
+        block_on(handle.pump(256));
 
         let handle = session.device(&id).unwrap();
         assert_eq!(handle.state(), &AcquisitionState::Running);

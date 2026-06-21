@@ -1,12 +1,12 @@
 //! The bulk-data seam: [`AcquisitionSource`].
 //!
 //! Control-plane operations (arming, configuring) flow through the `async`
-//! capability traits, but **bulk samples never do**. Instead, a device that is
-//! capturing exposes a synchronous, pull-based [`AcquisitionSource`]: the session's
-//! acquisition loop repeatedly asks it for the next [`SampleChunk`] and appends the
-//! result to the per-device stores. Keeping this path synchronous and free of
-//! `async-trait` boxing matches the decision that mass data rides the sample-store
-//! pipeline rather than per-call futures, and keeps it trivially testable.
+//! capability traits.  The bulk path ([`next_chunk`](AcquisitionSource::next_chunk))
+//! is also `async` so that drivers can await USB / network I/O directly without
+//! `block_on` or manual polling — the acquisition loop is already async and
+//! simply `await`s each pump.
+
+use async_trait::async_trait;
 
 use rb_model::SampleChunk;
 
@@ -17,7 +17,8 @@ use rb_model::SampleChunk;
 /// device (e.g. the demo driver) generates them. The returned chunk should be
 /// [consistent](SampleChunk::is_consistent) and carry at most `max_samples`
 /// samples; an exhausted or idle source returns an empty chunk.
+#[async_trait(?Send)]
 pub trait AcquisitionSource {
     /// Produces the next block of up to `max_samples` samples.
-    fn next_chunk(&mut self, max_samples: usize) -> SampleChunk;
+    async fn next_chunk(&mut self, max_samples: usize) -> SampleChunk;
 }

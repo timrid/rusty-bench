@@ -203,12 +203,12 @@ impl DeviceHandle {
     ///
     /// A no-op (returns `0`) unless the device is [`Running`](AcquisitionState::Running)
     /// and exposes an acquisition source.
-    pub fn pump(&mut self, max_samples: usize) -> usize {
+    pub async fn pump(&mut self, max_samples: usize) -> usize {
         if self.state != AcquisitionState::Running || max_samples == 0 {
             return 0;
         }
         let chunk = match self.device.as_acquisition_source_mut() {
-            Some(source) => source.next_chunk(max_samples),
+            Some(source) => source.next_chunk(max_samples).await,
             None => return 0,
         };
         let count = chunk.sample_count();
@@ -262,7 +262,7 @@ mod tests {
     #[test]
     fn pump_is_a_noop_until_started() {
         let mut handle = demo_handle();
-        assert_eq!(handle.pump(64), 0);
+        assert_eq!(block_on(handle.pump(64)), 0);
         assert_eq!(handle.sample_count(), 0);
     }
 
@@ -272,7 +272,7 @@ mod tests {
         block_on(handle.apply(AcquisitionCommand::Start)).unwrap();
         assert_eq!(handle.state(), &AcquisitionState::Running);
 
-        let appended = handle.pump(100);
+        let appended = block_on(handle.pump(100));
         assert_eq!(appended, 100);
         assert_eq!(handle.sample_count(), 100);
         assert_eq!(handle.analog_traces()[0].len(), 100);
@@ -283,10 +283,10 @@ mod tests {
     fn stop_halts_acquisition() {
         let mut handle = demo_handle();
         block_on(handle.apply(AcquisitionCommand::Start)).unwrap();
-        handle.pump(50);
+        block_on(handle.pump(50));
         block_on(handle.apply(AcquisitionCommand::Stop)).unwrap();
         assert_eq!(handle.state(), &AcquisitionState::Stopped);
-        assert_eq!(handle.pump(50), 0);
+        assert_eq!(block_on(handle.pump(50)), 0);
         assert_eq!(handle.sample_count(), 50);
     }
 

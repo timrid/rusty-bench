@@ -48,7 +48,7 @@ where
             },
             tick = ticks.next().fuse() => match tick {
                 Some(()) => {
-                    handle.pump(chunk_samples);
+                    handle.pump(chunk_samples).await;
                 }
                 None => break,
             },

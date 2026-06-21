@@ -150,7 +150,7 @@ pub fn run_acquire(opts: AcquireOpts, writer: &mut dyn io::Write) -> anyhow::Res
         block_on(handle.apply(AcquisitionCommand::Start))?;
         while handle.sample_count() < opts.samples {
             let remaining = opts.samples - handle.sample_count();
-            let pumped = handle.pump(remaining.min(4096));
+            let pumped = block_on(handle.pump(remaining.min(4096)));
             if pumped == 0 {
                 break; // source exhausted (guard for real devices)
             }

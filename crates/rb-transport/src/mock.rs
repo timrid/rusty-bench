@@ -34,6 +34,8 @@ pub struct MockTransport {
     control_responses: VecDeque<Vec<u8>>,
     /// All control transfers issued so far.
     control_transfers: Vec<ControlTransferRecord>,
+    /// Queued read errors (each consumed by one read call).
+    read_errors: VecDeque<String>,
 }
 
 impl MockTransport {
@@ -51,6 +53,7 @@ impl MockTransport {
             closed: false,
             control_responses: VecDeque::new(),
             control_transfers: Vec::new(),
+            read_errors: VecDeque::new(),
         }
     }
 
@@ -78,6 +81,12 @@ impl MockTransport {
     /// Appends more bytes to the replay queue.
     pub fn queue_read(&mut self, data: impl AsRef<[u8]>) {
         self.to_read.extend(data.as_ref().iter().copied());
+    }
+
+    /// Queues an I/O error for the next [`read`](Transport::read) call.
+    /// The error message is preserved in the returned [`TransportError::Io`].
+    pub fn queue_read_error(&mut self, msg: impl Into<String>) {
+        self.read_errors.push_back(msg.into());
     }
 
     /// All bytes written so far, in order.
@@ -158,11 +167,18 @@ impl Transport for MockTransport {
         if self.closed {
             return Err(TransportError::Closed);
         }
+        // Drain queued data first; only report error when out of data.
         let n = buf.len().min(self.to_read.len()).min(self.transfer_cap());
-        for slot in buf.iter_mut().take(n) {
-            *slot = self.to_read.pop_front().expect("checked length above");
+        if n > 0 {
+            for slot in buf.iter_mut().take(n) {
+                *slot = self.to_read.pop_front().expect("checked length above");
+            }
+            return Ok(n);
         }
-        Ok(n)
+        if let Some(msg) = self.read_errors.pop_front() {
+            return Err(TransportError::Io(msg));
+        }
+        Ok(0)
     }
 
     async fn close(&mut self) -> TransportResult<()> {
