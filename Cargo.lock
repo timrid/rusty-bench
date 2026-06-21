@@ -2389,6 +2389,8 @@ dependencies = [
  "rb-drivers",
  "rb-io",
  "rb-model",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

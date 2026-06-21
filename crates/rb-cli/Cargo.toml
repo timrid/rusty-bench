@@ -24,3 +24,5 @@ rb-drivers = { workspace = true, features = ["fx2lafw"] }
 anyhow.workspace = true
 clap.workspace = true
 futures.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
