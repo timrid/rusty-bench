@@ -2373,6 +2373,9 @@ name = "rb-decode"
 version = "0.0.0"
 dependencies = [
  "rb-model",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -2405,6 +2408,7 @@ dependencies = [
  "eframe",
  "futures",
  "rb-core",
+ "rb-decode",
  "rb-device",
  "rb-model",
 ]

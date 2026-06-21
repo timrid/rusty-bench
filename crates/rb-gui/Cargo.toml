@@ -9,6 +9,7 @@ authors.workspace = true
 
 [dependencies]
 rb-core.workspace = true
+rb-decode.workspace = true
 rb-device.workspace = true
 rb-model.workspace = true
 eframe.workspace = true

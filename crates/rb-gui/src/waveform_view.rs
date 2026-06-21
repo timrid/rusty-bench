@@ -1,4 +1,5 @@
-//! Per-device waveform view: analog min/max envelope + digital signal rows.
+//! Per-device waveform view: analog min/max envelope + digital signal rows,
+//! and optional protocol-decoder annotation rows.
 //!
 //! [`WaveformView`] holds the visible sample window (pan/zoom state) for one
 //! connected device. Each frame, [`WaveformView::draw`] reads directly from the
@@ -10,6 +11,7 @@
 //!   so draw cost is constant regardless of zoom.
 //! - **Digital**: one row per channel, drawn as a step-waveform. Transitions
 //!   come from [`DigitalMipMap::edges_in`], so only visible edges are visited.
+//! - **Decoder annotations**: optional protocol-decoder row below digital traces.
 //!
 //! # Pan / zoom
 //! - Scroll wheel over the panel: zoom in/out around the view centre.
@@ -20,6 +22,10 @@ use std::ops::Range;
 
 use eframe::egui;
 use rb_core::{AcquisitionState, DeviceHandle};
+use rb_decode::{
+    Annotation, AnnotationKind, Decoder, I2cConfig, I2cDecoder, SpiConfig, SpiDecoder, UartConfig,
+    UartDecoder,
+};
 use rb_model::{AnalogTrace, DigitalTrace};
 
 /// Height of one analog trace row in logical pixels.
@@ -28,12 +34,38 @@ const ANALOG_ROW_H: f32 = 80.0;
 /// Height of one digital channel row in logical pixels.
 const DIGITAL_ROW_H: f32 = 22.0;
 
+/// Height of the annotation bar row in logical pixels.
+const ANNOTATION_ROW_H: f32 = 16.0;
+
 /// Left margin reserved for channel labels inside a digital row.
 const LABEL_W: f32 = 36.0;
 
+// ── Decoder kind selector ─────────────────────────────────────────────────────
+
+/// Which protocol decoder (if any) is attached to this view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+enum DecoderKind {
+    #[default]
+    None,
+    Uart,
+    I2c,
+    Spi,
+}
+
+impl DecoderKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Uart => "UART",
+            Self::I2c => "I\u{00B2}C",
+            Self::Spi => "SPI",
+        }
+    }
+}
+
 // ── View state ────────────────────────────────────────────────────────────────
 
-/// Pan/zoom state for one device's waveform display.
+/// Pan/zoom and optional decoder state for one device's waveform display.
 pub struct WaveformView {
     /// Index of the first visible sample.
     view_start: usize,
@@ -41,6 +73,27 @@ pub struct WaveformView {
     view_samples: usize,
     /// When `true`, the view tracks the newest data while the device is running.
     auto_scroll: bool,
+
+    // ── Decoder state ─────────────────────────────────────────────────────────
+    decoder_kind: DecoderKind,
+    decoder: Option<Box<dyn Decoder>>,
+    annotations: Vec<Annotation>,
+    /// How many digital-store words have been fed to the decoder so far.
+    decoded_up_to: usize,
+    /// When `true`, the decoder is rebuilt and all annotations are cleared on
+    /// the next `draw` call (triggered by kind or config changes).
+    decoder_dirty: bool,
+
+    // ── Per-decoder config (mirrors `UartConfig` / `I2cConfig` / `SpiConfig`) ─
+    uart_baud: u32,
+    uart_rx_bit: u8,
+    i2c_scl_bit: u8,
+    i2c_sda_bit: u8,
+    spi_mode: u8,
+    spi_clk_bit: u8,
+    spi_mosi_bit: u8,
+    spi_miso_bit: u8,
+    spi_cs_bit: u8,
 }
 
 impl Default for WaveformView {
@@ -49,14 +102,56 @@ impl Default for WaveformView {
             view_start: 0,
             view_samples: 1_000,
             auto_scroll: true,
+            decoder_kind: DecoderKind::None,
+            decoder: None,
+            annotations: Vec::new(),
+            decoded_up_to: 0,
+            decoder_dirty: false,
+            uart_baud: 115_200,
+            uart_rx_bit: 0,
+            i2c_scl_bit: 0,
+            i2c_sda_bit: 1,
+            spi_mode: 0,
+            spi_clk_bit: 0,
+            spi_mosi_bit: 1,
+            spi_miso_bit: 2,
+            spi_cs_bit: 3,
         }
     }
 }
 
 impl WaveformView {
+    /// Rebuilds the decoder from the current kind + config, clearing cached
+    /// annotations.  Called when the user changes decoder kind or parameters.
+    fn rebuild_decoder(&mut self) {
+        self.decoder = match self.decoder_kind {
+            DecoderKind::None => None,
+            DecoderKind::Uart => Some(Box::new(UartDecoder::new(UartConfig {
+                rx_bit: self.uart_rx_bit,
+                baud_rate: self.uart_baud,
+                ..Default::default()
+            }))),
+            DecoderKind::I2c => Some(Box::new(I2cDecoder::new(I2cConfig {
+                scl_bit: self.i2c_scl_bit,
+                sda_bit: self.i2c_sda_bit,
+            }))),
+            DecoderKind::Spi => Some(Box::new(SpiDecoder::new(SpiConfig {
+                clk_bit: self.spi_clk_bit,
+                mosi_bit: self.spi_mosi_bit,
+                miso_bit: self.spi_miso_bit,
+                cs_bit: self.spi_cs_bit,
+                mode: self.spi_mode,
+                ..Default::default()
+            }))),
+        };
+        self.annotations.clear();
+        self.decoded_up_to = 0;
+        self.decoder_dirty = false;
+    }
+
     /// Draws the waveform for `handle`'s stores into `ui`.
     ///
-    /// Reads sample data without blocking; mutates only pan/zoom state.
+    /// Reads sample data without blocking; mutates only pan/zoom and decoder state.
     pub fn draw(&mut self, ui: &mut egui::Ui, handle: &DeviceHandle) {
         let sample_count = handle.sample_count();
 
@@ -103,6 +198,74 @@ impl WaveformView {
         if let Some(dt) = handle.digital_trace() {
             draw_digital(ui, dt, range.clone());
         }
+
+        // ── Decoder: feed new samples, then draw annotation row ───────────────
+        if self.decoder_dirty {
+            self.rebuild_decoder();
+        }
+        if let (Some(dec), Some(dt)) = (&mut self.decoder, handle.digital_trace()) {
+            let words = dt.store().words();
+            let rate = dt.timebase().sample_rate_hz();
+            if self.decoded_up_to < words.len() {
+                let new_anns = dec.feed(&words[self.decoded_up_to..], self.decoded_up_to, rate);
+                self.annotations.extend(new_anns);
+                self.decoded_up_to = words.len();
+            }
+        }
+        if !self.annotations.is_empty() {
+            draw_annotations(ui, &self.annotations, range.clone());
+        }
+
+        // ── Decoder selector and config ───────────────────────────────────────
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label("Decoder:");
+            let prev_kind = self.decoder_kind;
+            egui::ComboBox::from_id_salt("decoder_kind")
+                .selected_text(self.decoder_kind.label())
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.decoder_kind, DecoderKind::None, "None");
+                    ui.selectable_value(&mut self.decoder_kind, DecoderKind::Uart, "UART");
+                    ui.selectable_value(&mut self.decoder_kind, DecoderKind::I2c, "I\u{00B2}C");
+                    ui.selectable_value(&mut self.decoder_kind, DecoderKind::Spi, "SPI");
+                });
+            if self.decoder_kind != prev_kind {
+                self.decoder_dirty = true;
+            }
+
+            match self.decoder_kind {
+                DecoderKind::None => {}
+                DecoderKind::Uart => {
+                    ui.label("Baud:");
+                    let prev = self.uart_baud;
+                    ui.add(egui::DragValue::new(&mut self.uart_baud).range(300..=4_000_000));
+                    ui.label("RX bit:");
+                    ui.add(egui::DragValue::new(&mut self.uart_rx_bit).range(0..=63u8));
+                    if self.uart_baud != prev {
+                        self.decoder_dirty = true;
+                    }
+                }
+                DecoderKind::I2c => {
+                    ui.label("SCL:");
+                    let prev_scl = self.i2c_scl_bit;
+                    ui.add(egui::DragValue::new(&mut self.i2c_scl_bit).range(0..=63u8));
+                    ui.label("SDA:");
+                    let prev_sda = self.i2c_sda_bit;
+                    ui.add(egui::DragValue::new(&mut self.i2c_sda_bit).range(0..=63u8));
+                    if self.i2c_scl_bit != prev_scl || self.i2c_sda_bit != prev_sda {
+                        self.decoder_dirty = true;
+                    }
+                }
+                DecoderKind::Spi => {
+                    ui.label("Mode:");
+                    let prev = self.spi_mode;
+                    ui.add(egui::DragValue::new(&mut self.spi_mode).range(0..=3u8));
+                    if self.spi_mode != prev {
+                        self.decoder_dirty = true;
+                    }
+                }
+            }
+        });
 
         // ── Pan / zoom via pointer events ─────────────────────────────────────
         // Interact retroactively with the entire area drawn above.
@@ -284,5 +447,60 @@ fn draw_digital(ui: &mut egui::Ui, dt: &DigitalTrace, range: Range<usize>) {
             [egui::pos2(prev_x, current_y), egui::pos2(end_x, current_y)],
             egui::Stroke::new(1.5, color),
         );
+    }
+}
+
+// ── Annotation row ────────────────────────────────────────────────────────────
+
+/// Renders a single row of decoder annotations below the digital traces.
+///
+/// Each annotation is drawn as a coloured rectangle with a text label.
+/// Only annotations that overlap the visible range are drawn.
+fn draw_annotations(ui: &mut egui::Ui, annotations: &[Annotation], range: Range<usize>) {
+    let width = ui.available_width();
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(width, ANNOTATION_ROW_H), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(18, 18, 35));
+
+    let range_len = (range.end - range.start).max(1) as f32;
+    let x_of = |sample: usize| -> f32 {
+        rect.left() + (sample.saturating_sub(range.start)) as f32 / range_len * rect.width()
+    };
+
+    for ann in annotations {
+        // Skip annotations completely outside the visible window.
+        if ann.range.end <= range.start || ann.range.start >= range.end {
+            continue;
+        }
+        let x0 = x_of(ann.range.start.max(range.start));
+        let x1 = x_of(ann.range.end.min(range.end));
+        if x1 - x0 < 1.0 {
+            continue;
+        }
+
+        let fill = match ann.kind {
+            AnnotationKind::Data => egui::Color32::from_rgb(40, 80, 160),
+            AnnotationKind::Address => egui::Color32::from_rgb(140, 80, 20),
+            AnnotationKind::Frame => egui::Color32::from_rgb(60, 60, 60),
+            AnnotationKind::Error => egui::Color32::from_rgb(160, 30, 30),
+        };
+
+        let ann_rect = egui::Rect::from_min_max(
+            egui::pos2(x0 + 0.5, rect.top() + 1.0),
+            egui::pos2(x1 - 0.5, rect.bottom() - 1.0),
+        );
+        painter.rect_filled(ann_rect, 2.0, fill);
+
+        // Draw label if wide enough.
+        if ann_rect.width() > 12.0 {
+            painter.text(
+                ann_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                &ann.label,
+                egui::FontId::monospace(9.0),
+                egui::Color32::WHITE,
+            );
+        }
     }
 }
