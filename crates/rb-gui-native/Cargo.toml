@@ -13,4 +13,5 @@ path = "src/main.rs"
 
 [dependencies]
 rb-gui.workspace = true
+rb-drivers = { workspace = true, features = ["fx2lafw"] }
 eframe.workspace = true

@@ -13,6 +13,16 @@ use async_trait::async_trait;
 use crate::error::{TransportError, TransportResult};
 use crate::transport::{Transport, TransportCapabilities, TransportKind};
 
+/// A recorded control transfer for test assertions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ControlTransferRecord {
+    pub request_type: u8,
+    pub request: u8,
+    pub value: u16,
+    pub index: u16,
+    pub data: Vec<u8>,
+}
+
 /// In-memory transport that replays queued reads and records writes.
 #[derive(Debug, Clone)]
 pub struct MockTransport {
@@ -20,6 +30,10 @@ pub struct MockTransport {
     to_read: VecDeque<u8>,
     written: Vec<u8>,
     closed: bool,
+    /// Queue of canned responses for [`control_transfer`](Transport::control_transfer).
+    control_responses: VecDeque<Vec<u8>>,
+    /// All control transfers issued so far.
+    control_transfers: Vec<ControlTransferRecord>,
 }
 
 impl MockTransport {
@@ -35,6 +49,8 @@ impl MockTransport {
             to_read: VecDeque::new(),
             written: Vec::new(),
             closed: false,
+            control_responses: VecDeque::new(),
+            control_transfers: Vec::new(),
         }
     }
 
@@ -87,6 +103,30 @@ impl MockTransport {
         self.closed
     }
 
+    /// Queues a canned response for the next [`control_transfer`](Transport::control_transfer).
+    /// Each call to `control_transfer` consumes one queued response.
+    pub fn queue_control_response(&mut self, data: impl AsRef<[u8]>) {
+        self.control_responses.push_back(data.as_ref().to_vec());
+    }
+
+    /// Builder: pre-loads a control-transfer response.
+    #[must_use]
+    pub fn with_control_response(mut self, data: impl AsRef<[u8]>) -> Self {
+        self.queue_control_response(data);
+        self
+    }
+
+    /// All control transfers issued so far (for test assertions).
+    #[must_use]
+    pub fn control_transfers(&self) -> &[ControlTransferRecord] {
+        &self.control_transfers
+    }
+
+    /// Drains and returns all recorded control transfers.
+    pub fn take_control_transfers(&mut self) -> Vec<ControlTransferRecord> {
+        core::mem::take(&mut self.control_transfers)
+    }
+
     /// The per-call transfer cap, if any.
     fn transfer_cap(&self) -> usize {
         self.caps.max_transfer.unwrap_or(usize::MAX)
@@ -128,6 +168,26 @@ impl Transport for MockTransport {
     async fn close(&mut self) -> TransportResult<()> {
         self.closed = true;
         Ok(())
+    }
+
+    async fn control_transfer(
+        &mut self,
+        request_type: u8,
+        request: u8,
+        value: u16,
+        index: u16,
+        data: &[u8],
+    ) -> TransportResult<Vec<u8>> {
+        self.control_transfers.push(ControlTransferRecord {
+            request_type,
+            request,
+            value,
+            index,
+            data: data.to_vec(),
+        });
+        self.control_responses
+            .pop_front()
+            .ok_or(TransportError::Unsupported)
     }
 }
 

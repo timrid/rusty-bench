@@ -19,9 +19,12 @@ mod factory;
 mod mock;
 mod transport;
 
+#[cfg(feature = "usb")]
+pub mod nusb;
+
 pub use error::{TransportError, TransportResult};
 pub use factory::{DeviceCandidate, DriverError, DriverFactory, DriverResult};
-pub use mock::MockTransport;
+pub use mock::{ControlTransferRecord, MockTransport};
 pub use transport::{Transport, TransportCapabilities, TransportKind};
 
 #[cfg(test)]

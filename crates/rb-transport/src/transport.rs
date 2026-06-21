@@ -7,7 +7,7 @@
 
 use async_trait::async_trait;
 
-use crate::error::TransportResult;
+use crate::error::{TransportError, TransportResult};
 
 /// The kind of physical/logical medium a transport rides on.
 ///
@@ -72,5 +72,27 @@ pub trait Transport {
     /// Closes the transport. Further reads/writes must fail.
     async fn close(&mut self) -> TransportResult<()> {
         Ok(())
+    }
+
+    /// Performs a USB control transfer (vendor/class requests).
+    ///
+    /// - `request_type`: bmRequestType byte (direction + recipient + type).
+    /// - `request`: bRequest byte.
+    /// - `value`: wValue field.
+    /// - `index`: wIndex field.
+    /// - `data`: payload for host-to-device transfers; ignored for device-to-host.
+    ///
+    /// Returns the data phase payload (empty for host-to-device).
+    ///
+    /// The default implementation returns [`TransportError::Unsupported`].
+    async fn control_transfer(
+        &mut self,
+        _request_type: u8,
+        _request: u8,
+        _value: u16,
+        _index: u16,
+        _data: &[u8],
+    ) -> TransportResult<Vec<u8>> {
+        Err(TransportError::Unsupported)
     }
 }

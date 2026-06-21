@@ -20,6 +20,7 @@ rb-core.workspace = true
 rb-model.workspace = true
 rb-device.workspace = true
 rb-io.workspace = true
+rb-drivers = { workspace = true, features = ["fx2lafw"] }
 anyhow.workspace = true
 clap.workspace = true
 futures.workspace = true

@@ -11,13 +11,16 @@
 
 #[cfg(feature = "demo")]
 pub mod demo;
+#[cfg(feature = "fx2lafw")]
+pub mod fx2lafw;
 
 use rb_transport::DriverFactory;
 
 /// Collects a boxed [`DriverFactory`] for every driver enabled at compile time.
 ///
 /// The set is determined entirely by Cargo features: enabling the `demo` feature
-/// adds the synthetic [`demo::DemoFactory`], and so on for future drivers.
+/// adds the synthetic [`demo::DemoFactory`], enabling `fx2lafw` adds the
+/// [`fx2lafw::Fx2lafwFactory`], and so on for future drivers.
 #[must_use]
 #[allow(clippy::vec_init_then_push)] // push is conditional on enabled drivers
 pub fn factories() -> Vec<Box<dyn DriverFactory>> {
@@ -25,6 +28,8 @@ pub fn factories() -> Vec<Box<dyn DriverFactory>> {
     let mut factories: Vec<Box<dyn DriverFactory>> = Vec::new();
     #[cfg(feature = "demo")]
     factories.push(Box::new(demo::DemoFactory::new()));
+    #[cfg(feature = "fx2lafw")]
+    factories.push(Box::new(fx2lafw::Fx2lafwFactory::new()));
     factories
 }
 
@@ -39,5 +44,7 @@ mod tests {
         assert!(factories.iter().any(|f| f.name() == "demo"));
         #[cfg(not(feature = "demo"))]
         assert!(factories.is_empty());
+        #[cfg(feature = "fx2lafw")]
+        assert!(factories.iter().any(|f| f.name() == "fx2lafw"));
     }
 }

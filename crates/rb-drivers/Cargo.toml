@@ -14,13 +14,14 @@ rb-transport.workspace = true
 rb-scpi.workspace = true
 rb-decode.workspace = true
 async-trait.workspace = true
+futures.workspace = true
+nusb = { workspace = true, optional = true }
 
 [dev-dependencies]
-futures.workspace = true
 
 # Each driver lives in its own module behind a Cargo feature. The synthetic
 # `demo` driver is on by default so the CLI/GUI always have a hardware-free device.
 [features]
 default = ["demo"]
 demo = []
-# fx2lafw = ["rb-transport/usb"]
+fx2lafw = ["dep:nusb", "rb-transport/usb"]

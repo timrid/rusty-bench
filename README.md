@@ -5,7 +5,7 @@ multimeter, oscilloscope, power supply, waveform generator, SDR receiver, spectr
 analyzer and electronic load — with a scriptable CLI and an [egui](https://github.com/emilk/egui)
 GUI that runs **natively and in the browser**.
 
-> Status: early scaffolding (milestone **M0**). See [`BACKLOG.md`](BACKLOG.md) for the
+> Status: fx2lafw device support (milestone **M8**). See [`BACKLOG.md`](BACKLOG.md) for the
 > roadmap and [`UBIQUITOUS_LANGUAGE.md`](UBIQUITOUS_LANGUAGE.md) for the domain glossary.
 
 ## Workspace layout
