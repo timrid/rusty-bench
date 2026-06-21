@@ -48,7 +48,7 @@ zip = "2"
 # Native async runtime (NOT wasm-safe): only pulled in behind a `native` feature.
 tokio = { version = "1", default-features = false }
 # Native USB access behind the `usb` feature of rb-transport.
-nusb = "0.1"
+nusb = "0.2"
 eframe = { version = "0.34", default-features = false, features = [
     "glow",
     "default_fonts",
