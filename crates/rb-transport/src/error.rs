@@ -1,6 +1,6 @@
 //! Typed transport errors.
 
-/// A failure on a [`Transport`](crate::Transport).
+/// A failure on an [`UsbTransport`](crate::UsbTransport).
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum TransportError {
@@ -8,17 +8,9 @@ pub enum TransportError {
     #[error("transport is closed")]
     Closed,
 
-    /// The transport is not connected to a peer.
-    #[error("transport is not connected")]
-    NotConnected,
-
     /// An operation exceeded its deadline.
     #[error("transport operation timed out")]
     Timeout,
-
-    /// The transport does not support the requested operation.
-    #[error("operation not supported by this transport")]
-    Unsupported,
 
     /// A lower-level I/O failure. The string keeps this crate independent of any
     /// concrete platform I/O error type.

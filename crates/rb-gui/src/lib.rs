@@ -666,49 +666,54 @@ mod tests {
             .expect("demo driver present")
     }
 
-    // ── fx2lafw integration tests (MockTransport, no USB hardware) ──────────
+    // ── fx2lafw integration tests (MockUsbTransport, no USB hardware) ──────────
 
     use rb_device::{DeviceId, DeviceInfo};
     use rb_drivers::fx2lafw::{Fx2lafwConfig, Fx2lafwDevice};
-    use rb_transport::MockTransport;
+    use rb_transport::MockUsbTransport;
 
     // ── SteppedTransport: simulates async USB reads ────────────────────────
     //
     // Real USB (nusb) returns `Pending` on the first poll of each read and
-    // `Ready` only after the waker fires (on a later poll cycle).  MockTransport
+    // `Ready` only after the waker fires (on a later poll cycle).  MockUsbTransport
     // always returns `Ready` immediately, so `run_until_stalled()` processes
     // everything in one call — hiding the frame-boundary issue that the GUI
     // hits with real hardware.
     //
-    // `SteppedTransport` gates each `read()` call behind a barrier: it returns
+    // `SteppedTransport` gates each `next_bulk_in()` call behind a barrier: it returns
     // `Pending` until the test calls `step()`.  Each `step()` unblocks exactly
     // one pending read.  This forces the acquisition future to yield at every
     // read, so the test must call `run_until_stalled()` once per chunk — exactly
     // like the GUI frame loop.
 
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
     use std::rc::Rc;
 
     use async_trait::async_trait;
     use rb_transport::{
-        Transport, TransportCapabilities, TransportError, TransportKind, TransportResult,
+        UsbTransport, TransportError, TransportResult,
     };
 
-    /// An async transport that unblocks one read per `step()` call.
+    /// An async transport that unblocks one `next_bulk_in` per `step()` call.
+    ///
+    /// Matches the `submit_bulk_in` / `pending_bulk_in` / `next_bulk_in`
+    /// pattern.  Each `step()` unblocks exactly one pending read, forcing the
+    /// acquisition future to yield at every read — matching the GUI's
+    /// frame-by-frame polling behaviour.
     struct SteppedTransport {
-        caps: TransportCapabilities,
         /// Queued byte chunks — each chunk is one read's worth of data.
         chunks: RefCell<VecDeque<Vec<u8>>>,
-        /// Oneshot senders for blocked reads — the transport awaits
-        /// these, and `step()` resolves the oldest one.
+        /// Oneshot senders for blocked `next_bulk_in` calls.
         steps: RefCell<VecDeque<futures::channel::oneshot::Sender<Vec<u8>>>>,
+        pending_in: Cell<usize>,
+        pending_out: Cell<usize>,
         control_responses: RefCell<VecDeque<Vec<u8>>>,
         control_transfers: RefCell<Vec<ControlTransferRecord>>,
         read_errors: RefCell<VecDeque<String>>,
     }
 
-    /// Newtype wrapper so we can implement [`Transport`] (orphan rule).
+    /// Newtype wrapper so we can implement [`UsbTransport`] (orphan rule).
     struct StepTransport(Rc<SteppedTransport>);
 
     impl StepTransport {
@@ -734,32 +739,57 @@ mod tests {
     }
 
     #[async_trait(?Send)]
-    impl Transport for StepTransport {
-        fn capabilities(&self) -> TransportCapabilities {
-            self.0.caps
+    impl UsbTransport for StepTransport {
+        fn submit_bulk_in(&mut self, _buf: Vec<u8>) {
+            self.0.pending_in.set(self.0.pending_in.get() + 1);
         }
 
-        async fn write(&mut self, _data: &[u8]) -> TransportResult<usize> {
-            Ok(0) // not used by fx2lafw read loop
+        fn pending_bulk_in(&self) -> usize {
+            self.0.pending_in.get()
         }
 
-        async fn read(&mut self, buf: &mut [u8]) -> TransportResult<usize> {
+        async fn next_bulk_in(&mut self) -> TransportResult<Vec<u8>> {
             // Check for queued errors first.
             if let Some(msg) = self.0.read_errors.borrow_mut().pop_front() {
                 return Err(TransportError::Io(msg));
             }
 
+            let pending = self.0.pending_in.get();
+            if pending == 0 {
+                return Err(TransportError::Io(
+                    "next_bulk_in with no transfers in flight".into(),
+                ));
+            }
+            self.0.pending_in.set(pending - 1);
+
             let (tx, rx) = futures::channel::oneshot::channel();
             self.0.steps.borrow_mut().push_back(tx);
-            // release borrows before awaiting
-            let data = rx.await.map_err(|_| TransportError::Io("step channel closed".into()))?;
+            let data =
+                rx.await.map_err(|_| TransportError::Io("step channel closed".into()))?;
+            Ok(data) // empty Vec = EOF
+        }
 
-            if data.is_empty() {
-                return Ok(0); // EOF
+        fn submit_bulk_out(&mut self, _data: Vec<u8>) {
+            self.0.pending_out.set(self.0.pending_out.get() + 1);
+        }
+
+        fn pending_bulk_out(&self) -> usize {
+            self.0.pending_out.get()
+        }
+
+        async fn next_bulk_out(&mut self) -> TransportResult<Vec<u8>> {
+            let pending = self.0.pending_out.get();
+            if pending == 0 {
+                return Err(TransportError::Io(
+                    "next_bulk_out with no transfers in flight".into(),
+                ));
             }
-            let n = data.len().min(buf.len());
-            buf[..n].copy_from_slice(&data[..n]);
-            Ok(n)
+            self.0.pending_out.set(pending - 1);
+            Ok(Vec::new())
+        }
+
+        async fn clear_in_halt(&mut self) -> TransportResult<()> {
+            Ok(())
         }
 
         async fn close(&mut self) -> TransportResult<()> {
@@ -793,7 +823,7 @@ mod tests {
     // Re-import ControlTransferRecord (needed for SteppedTransport).
     use rb_transport::ControlTransferRecord;
 
-    /// Helper: build an `Fx2lafwDevice` with a `MockTransport` whose control-
+    /// Helper: build an `Fx2lafwDevice` with a `MockUsbTransport` whose control-
     /// transfer slots and read-data queue are already populated.
     ///
     /// Returns the device and the transport (so the caller can inspect
@@ -801,8 +831,8 @@ mod tests {
     fn fx2lafw_mock_device(
         channels: u8,
         read_data: &[u8],
-    ) -> (Fx2lafwDevice, MockTransport) {
-        let mut transport = MockTransport::new();
+    ) -> (Fx2lafwDevice, MockUsbTransport) {
+        let mut transport = MockUsbTransport::new();
         // Control responses consumed by open() and arm().
         transport.queue_control_response([1, 4]); // fw version 1.4
         transport.queue_control_response([1]); // revid=1 → FX2LP
@@ -865,13 +895,13 @@ mod tests {
 
     #[test]
     fn fx2lafw_packet_oriented_streaming_via_gui_exceeds_4096_samples() {
-        // Packet-oriented MockTransport caps each read at 512 bytes (like USB
+        // Packet-oriented MockUsbTransport caps each read at 512 bytes (like USB
         // bulk).  8192 bytes require ~16 reads — if the loop exits after the
         // first read (4096-byte buffer), we get ≤ 4096 samples.
         let read_data: Vec<u8> = (0u8..=255).cycle().take(8192).collect();
 
         // Build a packet-oriented transport manually (not via the helper).
-        let mut transport = MockTransport::packet(512);
+        let mut transport = MockUsbTransport::packet(512);
         transport.queue_control_response([1, 4]);
         transport.queue_control_response([1]);
         transport.queue_control_response([]);
@@ -912,7 +942,7 @@ mod tests {
             .collect();
         assert_eq!(read_data.len(), 8192);
 
-        let mut transport = MockTransport::new();
+        let mut transport = MockUsbTransport::new();
         transport.queue_control_response([1, 4]);
         transport.queue_control_response([1]);
         transport.queue_control_response([]);
@@ -962,13 +992,10 @@ mod tests {
     fn stepped_transport_multi_chunk_via_tight_pump() {
         // Clone-friendly setup: keep a StepTransport handle for stepping.
         let inner = Rc::new(SteppedTransport {
-            caps: TransportCapabilities {
-                kind: TransportKind::Mock,
-                packet_oriented: false,
-                max_transfer: None,
-            },
             chunks: RefCell::new(VecDeque::new()),
             steps: RefCell::new(VecDeque::new()),
+            pending_in: Cell::new(0),
+            pending_out: Cell::new(0),
             control_responses: RefCell::new(VecDeque::new()),
             control_transfers: RefCell::new(Vec::new()),
             read_errors: RefCell::new(VecDeque::new()),
@@ -986,7 +1013,7 @@ mod tests {
 
         let id = DeviceId::new("fx2lafw-stepped");
         let info = DeviceInfo::new("Test", "FX2LP");
-        // The device takes Box<dyn Transport>, moving our StepTransport.
+        // The device takes Box<dyn UsbTransport>, moving our StepTransport.
         let dev = Fx2lafwDevice::new(
             id.clone(),
             info,

@@ -1,16 +1,15 @@
 //! Transport abstraction for RustyBench.
 //!
-//! - [`Transport`] — the byte/packet-oriented link a driver speaks over,
-//!   described by [`TransportCapabilities`] / [`TransportKind`].
-//! - [`MockTransport`] — the in-memory test backbone: replays queued reads,
+//! - [`UsbTransport`] — the USB bulk-pair link a driver speaks over.
+//! - [`MockUsbTransport`] — the in-memory test backbone: replays queued reads,
 //!   captures writes.
 //! - [`DriverFactory`] — the scan/connect contract that turns a reachable
 //!   [`DeviceCandidate`] into a live [`Device`](rb_device::Device).
 //!
-//! Concrete platform implementations (USB/Serial/Bluetooth/Ethernet on native,
-//! WebUSB/WebSerial/WebBluetooth on web) are added behind Cargo features in
-//! later milestones. The default build is pure and wasm-safe, so the mock and
-//! the trait surface compile to `wasm32-unknown-unknown` with no features.
+//! Concrete platform implementations (native USB via `nusb`, WebUSB, …) are
+//! added behind Cargo features in later milestones. The default build is pure
+//! and wasm-safe, so the mock and the trait surface compile to
+//! `wasm32-unknown-unknown` with no features.
 
 #![forbid(unsafe_code)]
 
@@ -24,8 +23,8 @@ pub mod nusb;
 
 pub use error::{TransportError, TransportResult};
 pub use factory::{DeviceCandidate, DriverError, DriverFactory, DriverResult};
-pub use mock::{ControlTransferRecord, MockTransport};
-pub use transport::{Transport, TransportCapabilities, TransportKind};
+pub use mock::{ControlTransferRecord, MockUsbTransport};
+pub use transport::UsbTransport;
 
 #[cfg(test)]
 mod tests {
@@ -34,12 +33,12 @@ mod tests {
     use futures::executor::block_on;
     use rb_device::{Device, DeviceClass, DeviceId, DeviceInfo};
 
-    /// A device whose state is read back over a [`Transport`], used to show a
-    /// driver talking to hardware purely through [`MockTransport`].
+    /// A device whose state is read back over a [`UsbTransport`], used to show
+    /// a driver talking to hardware purely through [`MockUsbTransport`].
     struct EchoDevice {
         id: DeviceId,
         info: DeviceInfo,
-        transport: MockTransport,
+        transport: MockUsbTransport,
     }
 
     #[async_trait(?Send)]
@@ -54,16 +53,19 @@ mod tests {
             // A real driver would handshake here; we just send an identify
             // command and confirm the canned reply.
             self.transport
-                .write(b"*IDN?\n")
+                .submit_bulk_out(b"*IDN?\n".to_vec());
+            self.transport
+                .next_bulk_out()
                 .await
                 .map_err(|e| rb_device::DeviceError::Transport(e.to_string()))?;
-            let mut buf = [0u8; 16];
-            let n = self
+            self.transport
+                .submit_bulk_in(vec![0u8; 16]);
+            let data = self
                 .transport
-                .read(&mut buf)
+                .next_bulk_in()
                 .await
                 .map_err(|e| rb_device::DeviceError::Transport(e.to_string()))?;
-            if &buf[..n] == b"OK" {
+            if data == b"OK" {
                 Ok(())
             } else {
                 Err(rb_device::DeviceError::Protocol("unexpected reply".into()))
@@ -96,7 +98,7 @@ mod tests {
             Ok(Box::new(EchoDevice {
                 id: DeviceId::new(&candidate.address),
                 info: candidate.info.clone(),
-                transport: MockTransport::new().with_read_data(b"OK"),
+                transport: MockUsbTransport::new().with_read_data(b"OK"),
             }))
         }
     }

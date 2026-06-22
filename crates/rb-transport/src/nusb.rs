@@ -1,6 +1,6 @@
 //! Native USB transport via the [`nusb`] crate.
 //!
-//! Wraps a [`nusb::Interface`] behind the [`Transport`] trait.
+//! Wraps a [`nusb::Interface`] behind the [`UsbTransport`] trait.
 //! Available only with the `usb` feature.
 
 use std::time::Duration;
@@ -12,18 +12,17 @@ use nusb::{
 };
 
 use crate::error::{TransportError, TransportResult};
-use crate::transport::{Transport, TransportCapabilities, TransportKind};
+use crate::transport::UsbTransport;
 
 /// Timeout for USB control transfers.
 const CONTROL_TIMEOUT: Duration = Duration::from_millis(1000);
 
-/// A [`Transport`] backed by a native USB bulk endpoint pair.
+/// A native USB bulk endpoint pair behind [`UsbTransport`].
 ///
 /// Bulk transfers use the nusb 0.2 [`Endpoint`](nusb::Endpoint) API:
 /// [`submit`](nusb::Endpoint::submit) + [`next_complete`](nusb::Endpoint::next_complete).
 pub struct NusbTransport {
     interface: Interface,
-    caps: TransportCapabilities,
     ep_in: Option<nusb::Endpoint<Bulk, In>>,
     ep_out: Option<nusb::Endpoint<Bulk, Out>>,
 }
@@ -39,11 +38,6 @@ impl NusbTransport {
     /// Panics if a non-zero endpoint address cannot be opened.
     #[must_use]
     pub fn new(interface: Interface, bulk_in_ep: u8, bulk_out_ep: u8) -> Self {
-        let caps = TransportCapabilities {
-            kind: TransportKind::Usb,
-            packet_oriented: true,
-            max_transfer: Some(512),
-        };
         let ep_in = if bulk_in_ep != 0x00 {
             Some(
                 interface
@@ -64,7 +58,6 @@ impl NusbTransport {
         };
         Self {
             interface,
-            caps,
             ep_in,
             ep_out,
         }
@@ -92,61 +85,63 @@ fn decode_bmrequest_type(bm: u8) -> (ControlType, Direction, Recipient) {
 }
 
 #[async_trait(?Send)]
-impl Transport for NusbTransport {
-    fn capabilities(&self) -> TransportCapabilities {
-        self.caps
-    }
+impl UsbTransport for NusbTransport {
+    // ── Bulk IN ────────────────────────────────────────────────────────────
 
-    async fn write(&mut self, data: &[u8]) -> TransportResult<usize> {
-        let ep = self
-            .ep_out
+    fn submit_bulk_in(&mut self, buf: Vec<u8>) {
+        self.ep_in
             .as_mut()
-            .ok_or_else(|| TransportError::Io("no bulk OUT endpoint".into()))?;
-        ep.submit(data.to_vec().into());
-        let completed = ep.next_complete().await;
-        completed
-            .status
-            .map_err(|e| TransportError::Io(format!("USB bulk OUT: {e}")))?;
-        Ok(data.len())
+            .expect("submit_bulk_in: no bulk IN endpoint")
+            .submit(buf.into());
     }
 
-    async fn read(&mut self, buf: &mut [u8]) -> TransportResult<usize> {
+    fn pending_bulk_in(&self) -> usize {
+        self.ep_in
+            .as_ref()
+            .map_or(0, |ep| ep.pending())
+    }
+
+    async fn next_bulk_in(&mut self) -> TransportResult<Vec<u8>> {
         let ep = self
             .ep_in
             .as_mut()
             .ok_or_else(|| TransportError::Io("no bulk IN endpoint".into()))?;
-
-        // Keep ~8 transfers in flight to saturate the USB pipe.
-        // This prevents the fx2lafw firmware's small EP2 buffer from
-        // filling up and permanently stalling the GPIF engine.
-        while ep.pending() < 8 {
-            ep.submit(vec![0u8; 4096].into());
-        }
-
-        log::trace!("nusb: waiting for IN completion…");
         let completed = ep.next_complete().await;
-        log::debug!("nusb: IN completed, buffer_len={}", completed.buffer.len());
         completed
             .status
             .map_err(|e| TransportError::Io(format!("USB bulk IN: {e}")))?;
-        let n = completed.buffer.len().min(buf.len());
-        buf[..n].copy_from_slice(&completed.buffer[..n]);
-        drop(completed);
-        Ok(n)
+        log::debug!("nusb: bulk IN completed, len={}", completed.buffer.len());
+        Ok(completed.buffer.to_vec())
     }
 
-    async fn close(&mut self) -> TransportResult<()> {
-        Ok(())
+    // ── Bulk OUT ───────────────────────────────────────────────────────────
+
+    fn submit_bulk_out(&mut self, data: Vec<u8>) {
+        self.ep_out
+            .as_mut()
+            .expect("submit_bulk_out: no bulk OUT endpoint")
+            .submit(data.into());
     }
 
-    async fn clear_in_halt(&mut self) -> TransportResult<()> {
-        if let Some(ref mut ep) = self.ep_in {
-            ep.clear_halt()
-                .wait()
-                .map_err(|e| TransportError::Io(format!("clear_in_halt: {e}")))?;
-        }
-        Ok(())
+    fn pending_bulk_out(&self) -> usize {
+        self.ep_out
+            .as_ref()
+            .map_or(0, |ep| ep.pending())
     }
+
+    async fn next_bulk_out(&mut self) -> TransportResult<Vec<u8>> {
+        let ep = self
+            .ep_out
+            .as_mut()
+            .ok_or_else(|| TransportError::Io("no bulk OUT endpoint".into()))?;
+        let completed = ep.next_complete().await;
+        completed
+            .status
+            .map_err(|e| TransportError::Io(format!("USB bulk OUT: {e}")))?;
+        Ok(completed.buffer.to_vec())
+    }
+
+    // ── Control ────────────────────────────────────────────────────────────
 
     async fn control_transfer(
         &mut self,
@@ -197,5 +192,20 @@ impl Transport for NusbTransport {
                 Ok(Vec::new())
             }
         }
+    }
+
+    // ── Misc ───────────────────────────────────────────────────────────────
+
+    async fn close(&mut self) -> TransportResult<()> {
+        Ok(())
+    }
+
+    async fn clear_in_halt(&mut self) -> TransportResult<()> {
+        if let Some(ref mut ep) = self.ep_in {
+            ep.clear_halt()
+                .wait()
+                .map_err(|e| TransportError::Io(format!("clear_in_halt: {e}")))?;
+        }
+        Ok(())
     }
 }

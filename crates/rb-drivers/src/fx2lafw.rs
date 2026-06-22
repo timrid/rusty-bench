@@ -19,9 +19,9 @@
 //! - Sample rate: GPIF delay = `clock_hz / target_hz - 1`, capped at 1536, sent
 //!   big-endian in the start command. Clock source is 48 MHz or 30 MHz.
 //!
-//! The driver is tested against [`MockTransport`] for all protocol logic.
+//! The driver is tested against [`MockUsbTransport`] for all protocol logic.
 //!
-//! [`MockTransport`]: rb_transport::MockTransport
+//! [`MockUsbTransport`]: rb_transport::MockUsbTransport
 
 use std::future::Future;
 use std::pin::Pin;
@@ -38,7 +38,7 @@ use rb_device::{
     LogicAnalyzer,
 };
 use rb_model::{DigitalChannel, SampleChunk};
-use rb_transport::{DeviceCandidate, DriverError, DriverFactory, DriverResult, Transport};
+use rb_transport::{DeviceCandidate, DriverError, DriverFactory, DriverResult, UsbTransport};
 
 // ── Protocol constants ─────────────────────────────────────────────────────────
 
@@ -190,8 +190,8 @@ fn start_flags(sample_wide: bool, clock_48mhz: bool, _analog_enabled: bool) -> u
 
 /// An fx2lafw-based logic analyzer device.
 ///
-/// All protocol I/O goes through the owned [`Transport`], making the device
-/// testable via [`MockTransport`](rb_transport::MockTransport).
+/// All protocol I/O goes through the owned [`UsbTransport`], making the device
+/// testable via [`MockUsbTransport`](rb_transport::MockUsbTransport).
 ///
 /// The `transport` is wrapped in `Option` so [`start_streaming`] can move it
 /// into the read-loop future.  After `start_streaming`, `transport` is `None`
@@ -201,7 +201,7 @@ fn start_flags(sample_wide: bool, clock_48mhz: bool, _analog_enabled: bool) -> u
 pub struct Fx2lafwDevice {
     id: DeviceId,
     info: DeviceInfo,
-    transport: Option<Box<dyn Transport>>,
+    transport: Option<Box<dyn UsbTransport>>,
     config: Fx2lafwConfig,
     /// Firmware version reported by the device (major, minor).
     fw_version: (u8, u8),
@@ -228,7 +228,7 @@ impl Fx2lafwDevice {
     pub fn new(
         id: DeviceId,
         info: DeviceInfo,
-        transport: Box<dyn Transport>,
+        transport: Box<dyn UsbTransport>,
         config: Fx2lafwConfig,
     ) -> Self {
         let ch = config.channels.clamp(1, MAX_CHANNELS_16BIT);
@@ -255,7 +255,7 @@ impl Fx2lafwDevice {
 
     /// Borrows the transport, panicking if it has been moved out (e.g. by an
     /// active read loop).
-    fn transport_mut(&mut self) -> &mut dyn Transport {
+    fn transport_mut(&mut self) -> &mut dyn UsbTransport {
         self.transport
             .as_mut()
             .expect("transport moved out — acquisition already running")
@@ -338,7 +338,7 @@ impl Device for Fx2lafwDevice {
 ///
 /// Sends `CMD_GET_FW_VERSION` (0xB0) as a vendor IN request and reads the
 /// 2-byte `{major, minor}` response.
-async fn get_fw_version(transport: &mut dyn Transport) -> DeviceResult<(u8, u8)> {
+async fn get_fw_version(transport: &mut dyn UsbTransport) -> DeviceResult<(u8, u8)> {
     let resp = transport
         .control_transfer(
             0xC0,               // vendor, device-to-host (IN)
@@ -362,7 +362,7 @@ async fn get_fw_version(transport: &mut dyn Transport) -> DeviceResult<(u8, u8)>
 ///
 /// Sends `CMD_GET_REVID` (0xB2) as a vendor IN request and reads the 1-byte
 /// REVID response.  Returns 1 for FX2LP (CY7C68013A), 0 for FX2 (CY7C68013).
-async fn get_revid(transport: &mut dyn Transport) -> DeviceResult<u8> {
+async fn get_revid(transport: &mut dyn UsbTransport) -> DeviceResult<u8> {
     let resp = transport
         .control_transfer(
             0xC0,          // vendor, device-to-host (IN)
@@ -383,7 +383,7 @@ async fn get_revid(transport: &mut dyn Transport) -> DeviceResult<u8> {
 ///
 /// The data phase is `{flags, delay_h, delay_l}` where delay is big-endian.
 async fn start_acquisition(
-    transport: &mut dyn Transport,
+    transport: &mut dyn UsbTransport,
     flags: u8,
     delay: u16,
 ) -> DeviceResult<()> {
@@ -465,7 +465,13 @@ impl AcquisitionSource for Fx2lafwDevice {
 
         let fut = async move {
             let mut buf = Vec::new();
-            let mut read_buf = vec![0u8; 4096];
+
+            // Keep ~8 transfers in flight to saturate the USB pipe.
+            // This prevents the fx2lafw firmware's small EP2 buffer from
+            // filling up and permanently stalling the GPIF engine.
+            for _ in 0..8 {
+                transport.submit_bulk_in(vec![0u8; 4096]);
+            }
 
             loop {
                 if !running.load(Ordering::SeqCst) {
@@ -481,18 +487,20 @@ impl AcquisitionSource for Fx2lafwDevice {
                 }
 
                 // Read from USB EP2 IN — suspends until data arrives.
-                match transport.read(&mut read_buf).await {
-                    Ok(0) => {
-                        log::info!("fx2lafw: USB read returned 0 (EOF)");
+                match transport.next_bulk_in().await {
+                    Ok(data) if data.is_empty() => {
+                        log::info!("fx2lafw: USB read returned EOF");
                         running.store(false, Ordering::SeqCst);
                     }
                     Err(e) => {
                         log::warn!("fx2lafw: USB read error: {e}");
                         running.store(false, Ordering::SeqCst);
                     }
-                    Ok(n) => {
-                        log::trace!("fx2lafw: USB read got {n} bytes");
-                        buf.extend_from_slice(&read_buf[..n]);
+                    Ok(data) => {
+                        log::trace!("fx2lafw: USB read got {} bytes", data.len());
+                        buf.extend_from_slice(&data);
+                        // Re-submit immediately to keep the pipe saturated.
+                        transport.submit_bulk_in(vec![0u8; 4096]);
 
                         // Decode as many complete samples as possible and send.
                         let sample_bytes = if sample_wide { 2 } else { 1 };
@@ -511,7 +519,6 @@ impl AcquisitionSource for Fx2lafwDevice {
                         }
                     }
                 }
-                // No yield between reads — keep the USB pipe saturated!
             }
 
             running.store(false, Ordering::SeqCst);
@@ -639,7 +646,7 @@ fn parse_ihex(data: &[u8]) -> Result<Vec<(u16, Vec<u8>)>, String> {
 /// Returns an error if any control transfer fails or the firmware format is
 /// invalid.
 pub async fn upload_firmware(
-    transport: &mut dyn Transport,
+    transport: &mut dyn UsbTransport,
     ihex_data: &[u8],
 ) -> Result<(), String> {
     let chunks = parse_ihex(ihex_data)?;
@@ -929,7 +936,7 @@ async fn connect_usb(candidate: &DeviceCandidate) -> DriverResult<Box<dyn Device
 
     // fx2lafw firmware only uses EP2 IN (0x82) for sample data.
     // All commands go through EP0 control transfers — no bulk OUT endpoint needed.
-    let transport: Box<dyn Transport> = Box::new(rb_transport::nusb::NusbTransport::new(
+    let transport: Box<dyn UsbTransport> = Box::new(rb_transport::nusb::NusbTransport::new(
         interface, EP_DATA, // bulk IN  = EP2 IN  (0x82)
         0x00,    // bulk OUT = unused (firmware has no bulk OUT endpoint)
     ));
@@ -966,7 +973,7 @@ pub async fn upload_firmware_and_connect(
         .wait()
         .map_err(|e| DriverError::Transport(rb_transport::TransportError::Io(e.to_string())))?;
 
-    let mut transport: Box<dyn Transport> = Box::new(rb_transport::nusb::NusbTransport::new(
+    let mut transport: Box<dyn UsbTransport> = Box::new(rb_transport::nusb::NusbTransport::new(
         interface, 0x00, 0x00,
     ));
 
@@ -1049,7 +1056,7 @@ mod tests {
     use futures::StreamExt;
     use futures::executor::block_on;
     use futures::task::LocalSpawnExt;
-    use rb_transport::MockTransport;
+    use rb_transport::MockUsbTransport;
 
     // ── GPIF delay computation ────────────────────────────────────────────────
 
@@ -1187,7 +1194,7 @@ mod tests {
         assert_eq!(chunk.logic().len(), 2);
     }
 
-    // ── Device lifecycle (MockTransport) ──────────────────────────────────────
+    // ── Device lifecycle (MockUsbTransport) ───────────────────────────────────
 
     #[test]
     fn device_info_and_channels_are_correct() {
@@ -1196,7 +1203,7 @@ mod tests {
         let dev = Fx2lafwDevice::new(
             id,
             info,
-            Box::new(MockTransport::new()),
+            Box::new(MockUsbTransport::new()),
             Fx2lafwConfig::default(),
         );
 
@@ -1216,7 +1223,7 @@ mod tests {
         let dev = Fx2lafwDevice::new(
             id,
             info,
-            Box::new(MockTransport::new()),
+            Box::new(MockUsbTransport::new()),
             Fx2lafwConfig {
                 channels: 16,
                 sample_rate_hz: 1_000_000.0,
@@ -1230,7 +1237,7 @@ mod tests {
 
     #[test]
     fn open_validates_fw_version() {
-        let mut transport = MockTransport::new();
+        let mut transport = MockUsbTransport::new();
         // Queue responses for get_fw_version (major=1, minor=4) and get_revid.
         transport.queue_control_response([1, 4]); // fw version
         transport.queue_control_response([1]); // revid (FX2LP)
@@ -1246,7 +1253,7 @@ mod tests {
 
     #[test]
     fn open_rejects_wrong_fw_major() {
-        let mut transport = MockTransport::new();
+        let mut transport = MockUsbTransport::new();
         transport.queue_control_response([2, 0]); // fw major=2 (unsupported)
         transport.queue_control_response([1]); // revid
 
@@ -1263,7 +1270,7 @@ mod tests {
 
     #[test]
     fn arm_sends_correct_start_command() {
-        let mut transport = MockTransport::new();
+        let mut transport = MockUsbTransport::new();
         transport.queue_control_response([1, 4]); // fw version
         transport.queue_control_response([1]); // revid
         transport.queue_control_response([]); // start_acquisition response
@@ -1281,13 +1288,13 @@ mod tests {
         block_on(dev.open()).unwrap();
         block_on(dev.arm()).unwrap();
 
-        // After arm(), the MockTransport should have recorded the control transfers.
+        // After arm(), the MockUsbTransport should have recorded the control transfers.
         // We can't access it after the move, but arm() succeeded.
     }
 
     #[test]
     fn arm_with_mock_transport_verifies_protocol() {
-        let mut transport = MockTransport::new();
+        let mut transport = MockUsbTransport::new();
         // Queue: fw version, revid, start_acquisition response
         transport.queue_control_response([1, 4]);
         transport.queue_control_response([1]);
@@ -1309,11 +1316,11 @@ mod tests {
         // At 48 MHz, delay should be 0, flags should be 8-bit + 48 MHz clock.
     }
 
-    // ── Direct protocol tests (MockTransport, no device wrapper) ────────────
+    // ── Direct protocol tests (MockUsbTransport, no device wrapper) ──────────
 
     #[test]
     fn get_fw_version_sends_correct_control_transfer() {
-        let mut transport = MockTransport::new();
+        let mut transport = MockUsbTransport::new();
         transport.queue_control_response([1, 4]); // {major=1, minor=4}
 
         let result = block_on(get_fw_version(&mut transport));
@@ -1335,7 +1342,7 @@ mod tests {
 
     #[test]
     fn get_fw_version_rejects_short_response() {
-        let mut transport = MockTransport::new();
+        let mut transport = MockUsbTransport::new();
         transport.queue_control_response([0x01]); // only 1 byte, need 2
 
         let result = block_on(get_fw_version(&mut transport));
@@ -1344,7 +1351,7 @@ mod tests {
 
     #[test]
     fn get_revid_sends_correct_control_transfer() {
-        let mut transport = MockTransport::new();
+        let mut transport = MockUsbTransport::new();
         transport.queue_control_response([0x01]); // REVID=1 → FX2LP
 
         let result = block_on(get_revid(&mut transport));
@@ -1364,7 +1371,7 @@ mod tests {
 
     #[test]
     fn get_revid_rejects_empty_response() {
-        let mut transport = MockTransport::new();
+        let mut transport = MockUsbTransport::new();
         transport.queue_control_response([]);
 
         let result = block_on(get_revid(&mut transport));
@@ -1373,7 +1380,7 @@ mod tests {
 
     #[test]
     fn start_acquisition_sends_correct_control_transfer() {
-        let mut transport = MockTransport::new();
+        let mut transport = MockUsbTransport::new();
         transport.queue_control_response([]);
 
         // flags=0x21 (8-bit, 48 MHz), delay=47 (big-endian: 0x002F)
@@ -1398,7 +1405,7 @@ mod tests {
 
     #[test]
     fn start_acquisition_encodes_delay_big_endian() {
-        let mut transport = MockTransport::new();
+        let mut transport = MockUsbTransport::new();
         transport.queue_control_response([]);
 
         // delay=0x1234 → high=0x12, low=0x34
@@ -1410,7 +1417,7 @@ mod tests {
 
     #[test]
     fn start_acquisition_delay_zero_is_correct() {
-        let mut transport = MockTransport::new();
+        let mut transport = MockUsbTransport::new();
         transport.queue_control_response([]);
 
         // delay=0 → both bytes zero
@@ -1422,7 +1429,7 @@ mod tests {
 
     #[test]
     fn start_acquisition_max_delay_encodes_correctly() {
-        let mut transport = MockTransport::new();
+        let mut transport = MockUsbTransport::new();
         transport.queue_control_response([]);
 
         // MAX_GPIF_DELAY=1536 = 0x0600
@@ -1452,7 +1459,7 @@ mod tests {
 
     #[test]
     fn stop_is_noop_does_not_send_usb_command() {
-        let transport = MockTransport::new();
+        let transport = MockUsbTransport::new();
         let mut dev = Fx2lafwDevice::new(
             DeviceId::new("test"),
             DeviceInfo::new("Test", "FX2"),
@@ -1469,7 +1476,7 @@ mod tests {
 
     #[test]
     fn set_sample_rate_hz_is_lazy_no_usb_command() {
-        let transport = MockTransport::new();
+        let transport = MockUsbTransport::new();
         let mut dev = Fx2lafwDevice::new(
             DeviceId::new("test"),
             DeviceInfo::new("Test", "FX2"),
@@ -1487,7 +1494,7 @@ mod tests {
 
     #[test]
     fn open_updates_device_info_with_fw_and_chip() {
-        let mut transport = MockTransport::new();
+        let mut transport = MockUsbTransport::new();
         transport.queue_control_response([1, 4]); // fw 1.4
         transport.queue_control_response([1]); // revid=1 → FX2LP
 
@@ -1516,7 +1523,7 @@ mod tests {
 
     #[test]
     fn open_with_revid_zero_detects_fx2() {
-        let mut transport = MockTransport::new();
+        let mut transport = MockUsbTransport::new();
         transport.queue_control_response([1, 2]); // fw 1.2
         transport.queue_control_response([0]); // revid=0 → FX2 (not FX2LP)
 
@@ -1563,10 +1570,10 @@ mod tests {
         assert!(chunk.is_empty());
     }
 
-    // ── start_streaming integration (MockTransport) ──────────────────────────
+    // ── start_streaming integration (MockUsbTransport) ──────────────────────────
 
     /// Helper: create an opened, armed device ready for streaming.
-    fn opened_armed_device(transport: MockTransport, channels: u8) -> Fx2lafwDevice {
+    fn opened_armed_device(transport: MockUsbTransport, channels: u8) -> Fx2lafwDevice {
         let mut dev = Fx2lafwDevice::new(
             DeviceId::new("test"),
             DeviceInfo::new("X", "Y"),
@@ -1583,7 +1590,7 @@ mod tests {
 
     #[test]
     fn streaming_reads_8bit_from_transport() {
-        let mut transport = MockTransport::new();
+        let mut transport = MockUsbTransport::new();
         transport.queue_control_response([1, 4]); // fw
         transport.queue_control_response([1]); // revid
         transport.queue_control_response([]); // start_acq
@@ -1607,7 +1614,7 @@ mod tests {
 
     #[test]
     fn streaming_reads_16bit_from_transport() {
-        let mut transport = MockTransport::new();
+        let mut transport = MockUsbTransport::new();
         transport.queue_control_response([1, 4]);
         transport.queue_control_response([1]);
         transport.queue_control_response([]);
@@ -1634,7 +1641,7 @@ mod tests {
 
     #[test]
     fn streaming_buffers_partial_16bit_sample() {
-        let mut transport = MockTransport::new();
+        let mut transport = MockUsbTransport::new();
         transport.queue_control_response([1, 4]);
         transport.queue_control_response([1]);
         transport.queue_control_response([]);
@@ -1660,7 +1667,7 @@ mod tests {
 
     #[test]
     fn streaming_handles_empty_transport_read() {
-        let mut transport = MockTransport::new();
+        let mut transport = MockUsbTransport::new();
         transport.queue_control_response([1, 4]);
         transport.queue_control_response([1]);
         transport.queue_control_response([]);
@@ -1684,7 +1691,7 @@ mod tests {
 
     #[test]
     fn streaming_stops_via_running_flag() {
-        let mut transport = MockTransport::new();
+        let mut transport = MockUsbTransport::new();
         transport.queue_control_response([1, 4]);
         transport.queue_control_response([1]);
         transport.queue_control_response([]);
@@ -1752,7 +1759,7 @@ mod tests {
 
     #[test]
     fn upload_firmware_sends_control_transfers() {
-        let mut transport = MockTransport::new();
+        let mut transport = MockUsbTransport::new();
         transport.queue_control_response([]); // response for data write
         transport.queue_control_response([]); // response for start execution
 

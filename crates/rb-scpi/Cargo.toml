@@ -9,4 +9,3 @@ authors.workspace = true
 
 [dependencies]
 rb-model.workspace = true
-rb-transport.workspace = true

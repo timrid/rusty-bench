@@ -1,5 +1,6 @@
-//! Thin SCPI helper layer over the `Transport` trait: query/write, timeouts and
-//! `*IDN?` parsing reused by SCPI-speaking drivers.
+//! Thin SCPI helper layer: query/write, timeouts and `*IDN?` parsing reused
+//! by SCPI-speaking drivers.  Will be reconnected to the transport layer when
+//! SCPI support is implemented.
 
 pub const CRATE: &str = "rb-scpi";
 
