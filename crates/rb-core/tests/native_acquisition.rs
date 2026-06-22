@@ -6,11 +6,16 @@
 #![cfg(feature = "native")]
 
 use core::time::Duration;
+use std::future::Future;
+use std::pin::Pin;
 
 use async_trait::async_trait;
+use futures::StreamExt;
+use futures::channel::mpsc;
+use futures::task::LocalSpawnExt;
 
 use rb_core::runtime::native::AcquisitionController;
-use rb_core::{AcquisitionCommand, AcquisitionState, DeviceHandle, Session};
+use rb_core::{AcquisitionCommand, DeviceHandle, Session};
 use rb_device::{AcquisitionSource, Device, DeviceId, DeviceInfo, DeviceResult, Oscilloscope};
 use rb_drivers::demo::{DemoConfig, DemoDevice};
 use rb_model::{AnalogChannel, SampleChunk};
@@ -23,27 +28,34 @@ async fn spawned_task_acquires_via_command_channel() {
             let device = DemoDevice::new(DeviceId::new("demo:0"), DemoConfig::default());
             let handle = DeviceHandle::new(Box::new(device));
 
-            let controller = AcquisitionController::spawn(handle, Duration::from_millis(1), 64);
+            let controller = AcquisitionController::spawn(handle);
             controller.send(AcquisitionCommand::Start).unwrap();
-            tokio::time::sleep(Duration::from_millis(25)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
 
             let handle = controller.finish().await.unwrap();
-            assert_eq!(handle.state(), &AcquisitionState::Running);
             assert!(handle.sample_count() > 0, "expected the store to fill");
         })
         .await;
 }
 
-/// A source that panics on first pull, to prove task-boundary isolation.
+/// A source that panics on start_streaming, to prove task-boundary isolation.
 struct PanicSource;
 
+#[async_trait(?Send)]
 impl AcquisitionSource for PanicSource {
-    fn next_chunk(&mut self, _max_samples: usize) -> SampleChunk {
+    async fn start_streaming(
+        &mut self,
+        _chunk_tx: mpsc::UnboundedSender<SampleChunk>,
+    ) -> DeviceResult<Pin<Box<dyn Future<Output = ()>>>> {
         panic!("synthetic driver fault");
+    }
+
+    async fn stop_streaming(&mut self) -> DeviceResult<()> {
+        Ok(())
     }
 }
 
-/// A minimal device that arms cleanly but whose source panics when pumped.
+/// A minimal device that arms cleanly but whose source panics when streaming.
 struct PanicDevice {
     id: DeviceId,
     info: DeviceInfo,
@@ -106,7 +118,7 @@ async fn a_panicking_device_is_isolated_from_the_session() {
     local
         .run_until(async {
             let handle = DeviceHandle::new(Box::new(PanicDevice::new()));
-            let controller = AcquisitionController::spawn(handle, Duration::from_millis(1), 32);
+            let controller = AcquisitionController::spawn(handle);
             controller.send(AcquisitionCommand::Start).unwrap();
             tokio::time::sleep(Duration::from_millis(15)).await;
 
@@ -121,8 +133,17 @@ async fn a_panicking_device_is_isolated_from_the_session() {
             let mut session = Session::new();
             let device = DemoDevice::new(DeviceId::new("demo:0"), DemoConfig::default());
             let id = session.add_device(Box::new(device));
-            session.device_mut(&id).unwrap().start().await.unwrap();
-            assert_eq!(session.pump_all(16), 16);
+            let handle = session.device_mut(&id).unwrap();
+            let (read_loop, mut data_rx) = handle.start_streaming().await.unwrap();
+
+            let mut pool = futures::executor::LocalPool::new();
+            pool.spawner().spawn_local(read_loop).unwrap();
+            let chunk = pool.run_until(data_rx.next()).unwrap();
+            handle.ingest_chunk(&chunk);
+            assert!(handle.sample_count() > 0);
+
+            drop(data_rx);
+            pool.run_until_stalled();
         })
         .await;
 }

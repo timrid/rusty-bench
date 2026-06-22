@@ -95,4 +95,15 @@ pub trait Transport {
     ) -> TransportResult<Vec<u8>> {
         Err(TransportError::Unsupported)
     }
+
+    /// Clears a halted/stalled IN endpoint (USB `ClearFeature(ENDPOINT_HALT)`).
+    ///
+    /// On fx2lafw devices this is needed after a fresh plug-in to reset the
+    /// bulk-IN pipe before the first acquisition; without it, the second
+    /// `WinUsb_ReadPipe` never completes.
+    ///
+    /// The default implementation is a no-op (non-USB transports).
+    async fn clear_in_halt(&mut self) -> TransportResult<()> {
+        Ok(())
+    }
 }

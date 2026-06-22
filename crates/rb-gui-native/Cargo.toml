@@ -12,6 +12,7 @@ name = "rusty-bench-gui"
 path = "src/main.rs"
 
 [dependencies]
-rb-gui.workspace = true
+rb-gui = { workspace = true, features = ["native"] }
 rb-drivers = { workspace = true, features = ["fx2lafw"] }
 eframe.workspace = true
+env_logger = "0.11"

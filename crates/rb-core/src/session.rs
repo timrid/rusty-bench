@@ -33,6 +33,13 @@ impl Session {
         id
     }
 
+    /// Inserts a pre-built [`DeviceHandle`] under the given id. An existing
+    /// device with the same id is replaced.
+    pub fn add_device_from_handle(&mut self, id: DeviceId, handle: DeviceHandle) -> DeviceId {
+        self.devices.insert(id.clone(), handle);
+        id
+    }
+
     /// Removes and returns a device's handle, if present.
     pub fn remove(&mut self, id: &DeviceId) -> Option<DeviceHandle> {
         self.devices.remove(id)
@@ -65,21 +72,14 @@ impl Session {
     pub fn is_empty(&self) -> bool {
         self.devices.is_empty()
     }
-
-    /// Pumps every running device once, returning the total samples appended.
-    pub async fn pump_all(&mut self, max_samples: usize) -> usize {
-        let mut total = 0;
-        for handle in self.devices.values_mut() {
-            total += handle.pump(max_samples).await;
-        }
-        total
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::StreamExt;
     use futures::executor::block_on;
+    use futures::task::LocalSpawnExt;
     use rb_drivers::demo::{DemoConfig, DemoDevice};
 
     fn add_demo(session: &mut Session, id: &str) -> DeviceId {
@@ -100,14 +100,23 @@ mod tests {
     }
 
     #[test]
-    fn pump_all_only_advances_running_devices() {
+    fn start_streaming_fills_store() {
         let mut session = Session::new();
-        let running = add_demo(&mut session, "demo:0");
-        let _idle = add_demo(&mut session, "demo:1");
+        let id = add_demo(&mut session, "demo:0");
 
-        block_on(session.device_mut(&running).unwrap().start()).unwrap();
-        let appended = block_on(session.pump_all(32));
-        assert_eq!(appended, 32);
-        assert_eq!(session.device(&running).unwrap().sample_count(), 32);
+        let handle = session.device_mut(&id).unwrap();
+        let (read_loop, mut data_rx) = block_on(handle.start_streaming()).unwrap();
+
+        let mut pool = futures::executor::LocalPool::new();
+        pool.spawner().spawn_local(read_loop).unwrap();
+
+        let chunk = pool.run_until(data_rx.next()).unwrap();
+        handle.ingest_chunk(&chunk);
+
+        drop(data_rx);
+        pool.run_until_stalled();
+
+        let handle = session.device(&id).unwrap();
+        assert!(handle.sample_count() > 0);
     }
 }

@@ -22,7 +22,10 @@ fn scan_json_output_is_valid() {
 
     assert!(!parsed.is_empty(), "should list at least the demo device");
     let entry = &parsed[0];
-    assert_eq!(entry["driver"], "demo", "first device should have driver tag");
+    assert_eq!(
+        entry["driver"], "demo",
+        "first device should have driver tag"
+    );
     assert_eq!(entry["address"], "demo:0", "demo address present");
     assert!(
         entry["model"].as_str().unwrap().contains("Demo"),

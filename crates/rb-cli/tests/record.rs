@@ -27,8 +27,16 @@ fn record_csv_time_based_stops_after_duration() {
     let s = String::from_utf8(out).unwrap();
     let lines: Vec<&str> = s.lines().collect();
 
-    assert!(lines.len() >= 450, "expected ~500 data rows, got {}", lines.len() - 1);
-    assert!(lines.len() <= 600, "expected ~500 data rows, got {}", lines.len() - 1);
+    assert!(
+        lines.len() >= 450,
+        "expected ~500 data rows, got {}",
+        lines.len() - 1
+    );
+    assert!(
+        lines.len() <= 600,
+        "expected ~500 data rows, got {}",
+        lines.len() - 1
+    );
 }
 
 /// --continuous is not yet implemented and should produce a clear error.
@@ -100,7 +108,10 @@ fn record_csv_line_count_equals_samples_plus_header() {
     let lines: Vec<&str> = s.lines().collect();
 
     assert_eq!(lines.len(), 501, "header + 500 data rows");
-    assert!(lines[0].contains("sample_index"), "missing sample_index header");
+    assert!(
+        lines[0].contains("sample_index"),
+        "missing sample_index header"
+    );
     assert!(lines[0].contains("time_s"), "missing time_s header");
     assert!(lines[0].contains("A0"), "missing A0 header");
     assert!(lines[0].contains("D0"), "missing D0 header");
@@ -139,7 +150,10 @@ fn record_csv_sample_zero_is_origin() {
     assert_eq!(fields[1], "0.000000000", "time_s at sample 0");
 
     let a0: f64 = fields[2].parse().unwrap();
-    assert!(a0.abs() < 1e-9, "A0 physical value at sample 0 should be 0, got {a0}");
+    assert!(
+        a0.abs() < 1e-9,
+        "A0 physical value at sample 0 should be 0, got {a0}"
+    );
 
     for field in &fields[3..=6] {
         assert_eq!(*field, "0", "digital channel should be 0 at sample 0");
@@ -228,7 +242,10 @@ fn record_vcd_has_valid_header_structure() {
     let s = String::from_utf8(out).unwrap();
 
     assert!(s.contains("$timescale"), "missing $timescale");
-    assert!(s.contains("$enddefinitions $end"), "missing $enddefinitions");
+    assert!(
+        s.contains("$enddefinitions $end"),
+        "missing $enddefinitions"
+    );
     assert!(s.contains("$dumpvars"), "missing $dumpvars");
     assert!(s.contains("$var wire 1"), "missing $var wire declaration");
     assert!(s.contains("D0"), "missing D0 in VCD");
@@ -255,7 +272,10 @@ fn record_vcd_d0_transitions_at_first_sample() {
     .unwrap();
     let s = String::from_utf8(out).unwrap();
 
-    assert!(s.contains("#1000"), "missing #1000 timestamp for D0 first edge");
+    assert!(
+        s.contains("#1000"),
+        "missing #1000 timestamp for D0 first edge"
+    );
 }
 
 #[test]

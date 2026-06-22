@@ -1,0 +1,23 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "trunk serve (rb-gui-web)",
+            "type": "shell",
+            "command": "trunk",
+            "args": ["serve"],
+            "options": {
+                "cwd": "${workspaceFolder}/crates/rb-gui-web"
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            }
+        }
+    ]
+}

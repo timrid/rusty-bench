@@ -17,6 +17,8 @@ thiserror.workspace = true
 # `futures` (channels/streams/select) is the only runtime glue the *default*
 # build needs; it is wasm-safe, so rb-core compiles to wasm32 with no features.
 futures.workspace = true
+futures-timer.workspace = true
+log.workspace = true
 
 # Optional, platform-specific spawners. Neither is enabled by default, so the
 # default build stays pure and wasm-safe.

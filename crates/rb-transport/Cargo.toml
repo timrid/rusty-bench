@@ -12,10 +12,11 @@ rb-model.workspace = true
 rb-device.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
+log.workspace = true
+futures.workspace = true
 nusb = { workspace = true, optional = true }
 
 [dev-dependencies]
-futures.workspace = true
 
 [features]
 # Native USB transport via nusb.

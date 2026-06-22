@@ -18,16 +18,15 @@
 mod types;
 pub use types::*;
 
-mod util;
-mod scan;
-mod info;
-mod record;
 mod control;
 mod decode;
+mod info;
+mod record;
+mod scan;
+mod util;
 
-pub use scan::run_scan;
-pub use info::run_info;
-pub use record::run_record;
 pub use control::{run_electronic_load, run_multimeter, run_power_supply, run_waveform_gen};
 pub use decode::run_decode;
-
+pub use info::run_info;
+pub use record::run_record;
+pub use scan::run_scan;

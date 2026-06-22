@@ -297,6 +297,160 @@ impl WaveformView {
             }
         }
     }
+
+    /// Draws the waveform directly from component parts (for running
+    /// acquisitions where the `DeviceHandle` is owned by the background task).
+    ///
+    /// This is the same as [`draw`](Self::draw) but accepts the parts
+    /// individually instead of borrowing a [`DeviceHandle`].
+    pub fn draw_direct(
+        &mut self,
+        ui: &mut egui::Ui,
+        state: &AcquisitionState,
+        analog: &[AnalogTrace],
+        digital: Option<&DigitalTrace>,
+        sample_count: usize,
+    ) {
+        // ── Status bar ────────────────────────────────────────────────────────
+        ui.horizontal(|ui| {
+            let (col, txt) = match state {
+                AcquisitionState::Running => (egui::Color32::GREEN, "\u{25CF} Running"),
+                AcquisitionState::Idle => (egui::Color32::GRAY, "\u{25CB} Idle"),
+                AcquisitionState::Stopped => (egui::Color32::GRAY, "\u{25CB} Stopped"),
+                AcquisitionState::Error(_) => (egui::Color32::RED, "\u{26A0} Error"),
+            };
+            ui.colored_label(col, txt);
+            if let AcquisitionState::Error(msg) = state {
+                ui.colored_label(egui::Color32::RED, msg.as_str());
+            }
+            ui.separator();
+            ui.label(format!("{sample_count} samples"));
+            ui.separator();
+            ui.checkbox(&mut self.auto_scroll, "Follow");
+        });
+        ui.separator();
+
+        if sample_count == 0 {
+            ui.weak("No samples yet — press \u{25B6} in the sidebar to start acquisition.");
+            return;
+        }
+
+        // ── Clamp and advance view window ─────────────────────────────────────
+        self.view_samples = self.view_samples.clamp(16, sample_count);
+        if self.auto_scroll && matches!(state, AcquisitionState::Running) {
+            self.view_start = sample_count.saturating_sub(self.view_samples);
+        }
+        self.view_start = self
+            .view_start
+            .min(sample_count.saturating_sub(self.view_samples));
+        let view_end = (self.view_start + self.view_samples).min(sample_count);
+        let range = self.view_start..view_end;
+
+        // ── Draw traces ───────────────────────────────────────────────────────
+        for trace in analog {
+            draw_analog(ui, trace, range.clone());
+            ui.add_space(2.0);
+        }
+        if let Some(dt) = digital {
+            draw_digital(ui, dt, range.clone());
+        }
+
+        // ── Decoder: feed new samples, then draw annotation row ───────────────
+        if self.decoder_dirty {
+            self.rebuild_decoder();
+        }
+        if let (Some(dec), Some(dt)) = (&mut self.decoder, digital) {
+            let words = dt.store().words();
+            let rate = dt.timebase().sample_rate_hz();
+            if self.decoded_up_to < words.len() {
+                let new_anns = dec.feed(&words[self.decoded_up_to..], self.decoded_up_to, rate);
+                self.annotations.extend(new_anns);
+                self.decoded_up_to = words.len();
+            }
+        }
+        if !self.annotations.is_empty() {
+            draw_annotations(ui, &self.annotations, range.clone());
+        }
+
+        // ── Decoder selector and config ───────────────────────────────────────
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label("Decoder:");
+            let prev_kind = self.decoder_kind;
+            egui::ComboBox::from_id_salt("decoder_kind")
+                .selected_text(self.decoder_kind.label())
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.decoder_kind, DecoderKind::None, "None");
+                    ui.selectable_value(&mut self.decoder_kind, DecoderKind::Uart, "UART");
+                    ui.selectable_value(&mut self.decoder_kind, DecoderKind::I2c, "I\u{00B2}C");
+                    ui.selectable_value(&mut self.decoder_kind, DecoderKind::Spi, "SPI");
+                });
+            if self.decoder_kind != prev_kind {
+                self.decoder_dirty = true;
+            }
+
+            match self.decoder_kind {
+                DecoderKind::None => {}
+                DecoderKind::Uart => {
+                    ui.label("Baud:");
+                    let prev = self.uart_baud;
+                    ui.add(egui::DragValue::new(&mut self.uart_baud).range(300..=4_000_000));
+                    ui.label("RX bit:");
+                    ui.add(egui::DragValue::new(&mut self.uart_rx_bit).range(0..=63u8));
+                    if self.uart_baud != prev {
+                        self.decoder_dirty = true;
+                    }
+                }
+                DecoderKind::I2c => {
+                    ui.label("SCL:");
+                    let prev_scl = self.i2c_scl_bit;
+                    ui.add(egui::DragValue::new(&mut self.i2c_scl_bit).range(0..=63u8));
+                    ui.label("SDA:");
+                    let prev_sda = self.i2c_sda_bit;
+                    ui.add(egui::DragValue::new(&mut self.i2c_sda_bit).range(0..=63u8));
+                    if self.i2c_scl_bit != prev_scl || self.i2c_sda_bit != prev_sda {
+                        self.decoder_dirty = true;
+                    }
+                }
+                DecoderKind::Spi => {
+                    ui.label("Mode:");
+                    let prev = self.spi_mode;
+                    ui.add(egui::DragValue::new(&mut self.spi_mode).range(0..=3u8));
+                    if self.spi_mode != prev {
+                        self.decoder_dirty = true;
+                    }
+                }
+            }
+        });
+
+        // ── Pan / zoom via pointer events ─────────────────────────────────────
+        let drawn_rect = ui.min_rect();
+        let response = ui.interact(drawn_rect, ui.id().with("waveform"), egui::Sense::drag());
+
+        let scroll = ui.input(|i| i.smooth_scroll_delta);
+        if response.hovered() && scroll.y != 0.0 {
+            let factor: f64 = if scroll.y > 0.0 { 0.8 } else { 1.25 };
+            let center = self.view_start + self.view_samples / 2;
+            let new_samples =
+                ((self.view_samples as f64 * factor) as usize).clamp(16, sample_count);
+            self.view_samples = new_samples;
+            self.view_start = center
+                .saturating_sub(new_samples / 2)
+                .min(sample_count.saturating_sub(new_samples));
+            self.auto_scroll = false;
+        }
+
+        if response.dragged() {
+            let dx = response.drag_delta().x;
+            if dx.abs() > 0.5 {
+                let spx = self.view_samples as f32 / drawn_rect.width().max(1.0);
+                let delta = (dx * spx) as isize;
+                let max_start = sample_count.saturating_sub(self.view_samples) as isize;
+                self.view_start = (self.view_start as isize - delta).clamp(0, max_start) as usize;
+                self.auto_scroll = false;
+            }
+        }
+    }
 }
 
 // ── Analog trace ──────────────────────────────────────────────────────────────

@@ -1,7 +1,12 @@
 //! [`DeviceHandle`]: one connected device plus its stores and acquisition state.
 
+use std::future::Future;
+use std::pin::Pin;
+
+use futures::channel::mpsc;
+
 use rb_device::{Device, DeviceId};
-use rb_model::{AnalogTrace, DigitalTrace, Timebase};
+use rb_model::{AnalogTrace, DigitalTrace, SampleChunk, Timebase};
 
 use crate::error::SessionError;
 
@@ -34,10 +39,10 @@ pub enum AcquisitionCommand {
 /// One connected device together with the per-channel stores its samples flow
 /// into and its current [`AcquisitionState`].
 ///
-/// The handle is deliberately synchronous and runtime-free: control commands
-/// ([`apply`](Self::apply)) are `async` only because the device capability traits
-/// are, while the bulk path ([`pump`](Self::pump)) is a plain synchronous call.
-/// The runtime glue drives both.
+/// The handle owns the device and its stores.  Control commands flow through
+/// [`apply`](Self::apply).  The push-based bulk path works through
+/// [`start_streaming`](Self::start_streaming) → read-loop future (spawned by the
+/// runtime) → [`ingest_chunk`](Self::ingest_chunk) fed from the data channel.
 pub struct DeviceHandle {
     id: DeviceId,
     device: Box<dyn Device>,
@@ -139,7 +144,7 @@ impl DeviceHandle {
     /// acquirable capability.
     pub async fn apply(&mut self, command: AcquisitionCommand) -> Result<(), SessionError> {
         match command {
-            AcquisitionCommand::Start => self.start().await,
+            AcquisitionCommand::Start => self.arm().await,
             AcquisitionCommand::Stop => self.stop().await,
             AcquisitionCommand::SetSampleRate(hz) => self.set_sample_rate_hz(hz).await,
         }
@@ -147,10 +152,13 @@ impl DeviceHandle {
 
     /// Arms every acquirable capability and enters [`Running`](AcquisitionState::Running).
     ///
+    /// Does NOT start the bulk data streaming — call [`start_streaming`] after
+    /// this to begin the push-based data flow.
+    ///
     /// # Errors
     /// Returns [`SessionError::NotAcquirable`] if the device streams no samples,
     /// or a [`SessionError::Device`] if arming fails.
-    pub async fn start(&mut self) -> Result<(), SessionError> {
+    pub async fn arm(&mut self) -> Result<(), SessionError> {
         let mut armed_any = false;
         if let Some(scope) = self.device.as_oscilloscope_mut() {
             scope.arm().await?;
@@ -173,6 +181,9 @@ impl DeviceHandle {
     /// Returns a [`SessionError::Device`] if the device reports a fault while
     /// stopping.
     pub async fn stop(&mut self) -> Result<(), SessionError> {
+        if let Some(source) = self.device.as_acquisition_source_mut() {
+            source.stop_streaming().await?;
+        }
         if let Some(scope) = self.device.as_oscilloscope_mut() {
             scope.stop().await?;
         }
@@ -181,6 +192,54 @@ impl DeviceHandle {
         }
         self.state = AcquisitionState::Stopped;
         Ok(())
+    }
+
+    /// Arms the device AND starts push-based streaming.
+    ///
+    /// Returns a read-loop future plus a receiver for the [`SampleChunk`]s.
+    ///
+    /// # Errors
+    /// Returns [`SessionError::NotAcquirable`] if the device has no bulk source.
+    pub async fn start_streaming(
+        &mut self,
+    ) -> Result<
+        (
+            Pin<Box<dyn Future<Output = ()>>>,
+            mpsc::UnboundedReceiver<SampleChunk>,
+        ),
+        SessionError,
+    > {
+        self.arm().await?;
+
+        let (data_tx, data_rx) = mpsc::unbounded();
+        let read_loop = self
+            .device
+            .as_acquisition_source_mut()
+            .ok_or(SessionError::NotAcquirable)?
+            .start_streaming(data_tx)
+            .await
+            .map_err(SessionError::Device)?;
+
+        Ok((read_loop, data_rx))
+    }
+
+    /// Feeds a [`SampleChunk`] into the per-channel stores.
+    ///
+    /// Called by the runtime for each chunk received from the streaming source.
+    /// Returns the number of samples appended.
+    pub fn ingest_chunk(&mut self, chunk: &SampleChunk) -> usize {
+        let count = chunk.sample_count();
+        for (index, trace) in self.analog.iter_mut().enumerate() {
+            if let Some(samples) = chunk.analog_channel(index) {
+                trace.push_raw(samples);
+            }
+        }
+        if let Some(digital) = self.digital.as_mut() {
+            if !chunk.logic().is_empty() {
+                digital.push_words(chunk.logic());
+            }
+        }
+        count
     }
 
     /// Sets the acquisition sample rate and resizes the (empty) stores' timebase.
@@ -196,33 +255,6 @@ impl DeviceHandle {
         }
         self.rebuild_traces();
         Ok(())
-    }
-
-    /// Pulls up to `max_samples` from the device's acquisition source into the
-    /// stores, returning the number of samples appended.
-    ///
-    /// A no-op (returns `0`) unless the device is [`Running`](AcquisitionState::Running)
-    /// and exposes an acquisition source.
-    pub async fn pump(&mut self, max_samples: usize) -> usize {
-        if self.state != AcquisitionState::Running || max_samples == 0 {
-            return 0;
-        }
-        let chunk = match self.device.as_acquisition_source_mut() {
-            Some(source) => source.next_chunk(max_samples).await,
-            None => return 0,
-        };
-        let count = chunk.sample_count();
-        for (index, trace) in self.analog.iter_mut().enumerate() {
-            if let Some(samples) = chunk.analog_channel(index) {
-                trace.push_raw(samples);
-            }
-        }
-        if let Some(digital) = self.digital.as_mut() {
-            if !chunk.logic().is_empty() {
-                digital.push_words(chunk.logic());
-            }
-        }
-        count
     }
 
     /// Forces the device into the [`Error`](AcquisitionState::Error) state. Used
@@ -241,7 +273,9 @@ fn positive_rate(hz: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::StreamExt;
     use futures::executor::block_on;
+    use futures::task::LocalSpawnExt;
     use rb_device::DeviceId;
     use rb_drivers::demo::{DemoConfig, DemoDevice};
 
@@ -260,34 +294,51 @@ mod tests {
     }
 
     #[test]
-    fn pump_is_a_noop_until_started() {
+    fn start_streaming_fills_stores() {
         let mut handle = demo_handle();
-        assert_eq!(block_on(handle.pump(64)), 0);
-        assert_eq!(handle.sample_count(), 0);
-    }
-
-    #[test]
-    fn start_then_pump_fills_every_store() {
-        let mut handle = demo_handle();
-        block_on(handle.apply(AcquisitionCommand::Start)).unwrap();
+        let (read_loop, mut data_rx) = block_on(handle.start_streaming()).unwrap();
         assert_eq!(handle.state(), &AcquisitionState::Running);
 
-        let appended = block_on(handle.pump(100));
-        assert_eq!(appended, 100);
-        assert_eq!(handle.sample_count(), 100);
-        assert_eq!(handle.analog_traces()[0].len(), 100);
-        assert_eq!(handle.digital_trace().unwrap().len(), 100);
+        // Spawn the read loop on a LocalPool.
+        let mut pool = futures::executor::LocalPool::new();
+        pool.spawner().spawn_local(read_loop).unwrap();
+
+        // Read one chunk and ingest it.
+        let chunk = pool.run_until(data_rx.next()).unwrap();
+        handle.ingest_chunk(&chunk);
+        assert!(handle.sample_count() >= 256);
+        assert_eq!(handle.analog_traces()[0].len(), handle.sample_count());
+        assert_eq!(handle.digital_trace().unwrap().len(), handle.sample_count());
+
+        // Stop streaming.
+        block_on(handle.apply(AcquisitionCommand::Stop)).unwrap();
+        assert_eq!(handle.state(), &AcquisitionState::Stopped);
+
+        drop(data_rx);
+        pool.run_until_stalled();
     }
 
     #[test]
     fn stop_halts_acquisition() {
         let mut handle = demo_handle();
-        block_on(handle.apply(AcquisitionCommand::Start)).unwrap();
-        block_on(handle.pump(50));
+        let (read_loop, mut data_rx) = block_on(handle.start_streaming()).unwrap();
+
+        let mut pool = futures::executor::LocalPool::new();
+        pool.spawner().spawn_local(read_loop).unwrap();
+
+        let chunk = pool.run_until(data_rx.next()).unwrap();
+        handle.ingest_chunk(&chunk);
+        let count_before = handle.sample_count();
+        assert!(count_before > 0);
+
         block_on(handle.apply(AcquisitionCommand::Stop)).unwrap();
         assert_eq!(handle.state(), &AcquisitionState::Stopped);
-        assert_eq!(block_on(handle.pump(50)), 0);
-        assert_eq!(handle.sample_count(), 50);
+
+        drop(data_rx);
+        pool.run_until_stalled();
+
+        // No new samples ingested after stop.
+        assert_eq!(handle.sample_count(), count_before);
     }
 
     #[test]

@@ -24,7 +24,9 @@ fn info_json_includes_all_capabilities() {
 
     assert_eq!(parsed["vendor"], "RustyBench");
     assert_eq!(parsed["address"], "demo:0");
-    let classes = parsed["classes"].as_array().expect("classes should be array");
+    let classes = parsed["classes"]
+        .as_array()
+        .expect("classes should be array");
     let names: Vec<&str> = classes.iter().map(|c| c.as_str().unwrap()).collect();
     assert!(
         names.contains(&"Oscilloscope"),

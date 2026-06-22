@@ -14,3 +14,18 @@ rb-device.workspace = true
 rb-model.workspace = true
 eframe.workspace = true
 futures.workspace = true
+
+# Web spawner (wasm only).
+wasm-bindgen-futures = { workspace = true, optional = true }
+# Native spawner (non-wasm).
+tokio = { workspace = true, optional = true, features = ["rt", "time"] }
+
+[dev-dependencies]
+rb-drivers = { workspace = true, features = ["fx2lafw"] }
+rb-transport.workspace = true
+async-trait.workspace = true
+
+[features]
+default = []
+web = ["rb-core/web", "dep:wasm-bindgen-futures"]
+native = ["rb-core/native", "dep:tokio"]

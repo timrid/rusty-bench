@@ -11,7 +11,13 @@
 //! - logic word, sample `i`: `i & ((1 << digital_channels) - 1)` — i.e. `D0`
 //!   toggles every sample, `D1` every two, and so on.
 
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use async_trait::async_trait;
+use futures::channel::mpsc;
 
 use rb_device::{
     AcquisitionSource, Device, DeviceClass, DeviceError, DeviceId, DeviceInfo, DeviceResult,
@@ -47,11 +53,15 @@ impl Default for DemoConfig {
     }
 }
 
-/// The pull-based signal generator behind a [`DemoDevice`].
-#[derive(Clone, Debug)]
+/// The signal generator behind a [`DemoDevice`].
+///
+/// The `running` flag is shared with the read-loop future spawned by
+/// [`start_streaming`](AcquisitionSource::start_streaming).
+#[derive(Debug)]
 pub struct DemoSource {
     config: DemoConfig,
     produced: u64,
+    running: Arc<AtomicBool>,
 }
 
 impl DemoSource {
@@ -61,6 +71,7 @@ impl DemoSource {
         Self {
             config,
             produced: 0,
+            running: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -70,6 +81,61 @@ impl DemoSource {
         self.produced
     }
 
+    /// Whether the source is currently streaming.
+    #[must_use]
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait(?Send)]
+impl AcquisitionSource for DemoSource {
+    async fn start_streaming(
+        &mut self,
+        chunk_tx: mpsc::UnboundedSender<SampleChunk>,
+    ) -> DeviceResult<Pin<Box<dyn Future<Output = ()>>>> {
+        self.running.store(true, Ordering::SeqCst);
+
+        let config = self.config;
+        let produced = self.produced;
+        let running = self.running.clone();
+        const CHUNK_SIZE: usize = 256;
+
+        let fut = async move {
+            let mut state = ReadLoopState {
+                config,
+                produced,
+                chunk_tx,
+            };
+            while running.load(Ordering::SeqCst) {
+                let chunk = state.generate_chunk(CHUNK_SIZE);
+                if state.chunk_tx.unbounded_send(chunk).is_err() {
+                    break;
+                }
+                // Rate-limit so cooperative executors don't busy-loop on
+                // pure-compute devices.  Real I/O devices suspend on I/O.
+                futures_timer::Delay::new(core::time::Duration::from_millis(1)).await;
+            }
+            running.store(false, Ordering::SeqCst);
+        };
+
+        Ok(Box::pin(fut))
+    }
+
+    async fn stop_streaming(&mut self) -> DeviceResult<()> {
+        self.running.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// Owned state for the demo read-loop future.
+struct ReadLoopState {
+    config: DemoConfig,
+    produced: u64,
+    chunk_tx: mpsc::UnboundedSender<SampleChunk>,
+}
+
+impl ReadLoopState {
     fn logic_mask(&self) -> u64 {
         match self.config.digital_channels {
             0 => 0,
@@ -77,36 +143,33 @@ impl DemoSource {
             n => (1u64 << n) - 1,
         }
     }
-}
 
-#[async_trait(?Send)]
-impl AcquisitionSource for DemoSource {
-    async fn next_chunk(&mut self, max_samples: usize) -> SampleChunk {
+    fn generate_chunk(&mut self, count: usize) -> SampleChunk {
         let cfg = self.config;
         let mask = self.logic_mask();
         let mut analog: Vec<Vec<i32>> = (0..cfg.analog_channels)
-            .map(|_| Vec::with_capacity(max_samples))
+            .map(|_| Vec::with_capacity(count))
             .collect();
         let mut logic: Vec<u64> = if cfg.digital_channels > 0 {
-            Vec::with_capacity(max_samples)
+            Vec::with_capacity(count)
         } else {
             Vec::new()
         };
 
-        for s in 0..max_samples {
+        for s in 0..count {
             let idx = self.produced + s as u64;
             let t = idx as f64 / cfg.sample_rate_hz;
-            for (j, channel) in analog.iter_mut().enumerate() {
+            for (j, analog_ch) in analog.iter_mut().enumerate() {
                 let phase = j as f64 * core::f64::consts::FRAC_PI_2;
                 let angle = core::f64::consts::TAU * cfg.analog_frequency_hz * t + phase;
-                channel.push((cfg.analog_amplitude as f64 * angle.sin()).round() as i32);
+                analog_ch.push((cfg.analog_amplitude as f64 * angle.sin()).round() as i32);
             }
             if cfg.digital_channels > 0 {
                 logic.push(idx & mask);
             }
         }
 
-        self.produced += max_samples as u64;
+        self.produced += count as u64;
         SampleChunk::new().with_analog(analog).with_logic(logic)
     }
 }
@@ -119,7 +182,6 @@ pub struct DemoDevice {
     analog_channels: Vec<AnalogChannel>,
     digital_channels: Vec<DigitalChannel>,
     source: DemoSource,
-    armed: bool,
 }
 
 impl DemoDevice {
@@ -150,14 +212,13 @@ impl DemoDevice {
             analog_channels,
             digital_channels,
             source: DemoSource::new(config),
-            armed: false,
         }
     }
 
     /// Whether the device is currently armed (producing samples).
     #[must_use]
     pub fn is_armed(&self) -> bool {
-        self.armed
+        self.source.is_running()
     }
 
     fn set_rate(&mut self, hz: f64) -> DeviceResult<()> {
@@ -186,12 +247,12 @@ impl Oscilloscope for DemoDevice {
     }
 
     async fn arm(&mut self) -> DeviceResult<()> {
-        self.armed = true;
+        self.source.running.store(true, Ordering::SeqCst);
         Ok(())
     }
 
     async fn stop(&mut self) -> DeviceResult<()> {
-        self.armed = false;
+        self.source.running.store(false, Ordering::SeqCst);
         Ok(())
     }
 }
@@ -211,12 +272,12 @@ impl LogicAnalyzer for DemoDevice {
     }
 
     async fn arm(&mut self) -> DeviceResult<()> {
-        self.armed = true;
+        self.source.running.store(true, Ordering::SeqCst);
         Ok(())
     }
 
     async fn stop(&mut self) -> DeviceResult<()> {
-        self.armed = false;
+        self.source.running.store(false, Ordering::SeqCst);
         Ok(())
     }
 }
@@ -305,32 +366,51 @@ impl DriverFactory for DemoFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::StreamExt;
     use futures::executor::block_on;
+    use futures::task::LocalSpawnExt;
 
     #[test]
     fn source_generates_consistent_deterministic_chunks() {
         let mut source = DemoSource::new(DemoConfig::default());
-        let chunk = block_on(source.next_chunk(8));
+        let (tx, mut rx) = mpsc::unbounded();
 
-        assert_eq!(chunk.sample_count(), 8);
+        let read_loop = block_on(source.start_streaming(tx)).unwrap();
+
+        let mut pool = futures::executor::LocalPool::new();
+        pool.spawner().spawn_local(read_loop).unwrap();
+
+        // First chunk has 256 samples.
+        let chunk = pool.run_until(rx.next()).unwrap();
+        assert_eq!(chunk.sample_count(), 256);
         assert!(chunk.is_consistent());
         assert_eq!(chunk.analog_channel_count(), 1);
         // sin(0) == 0 at the very first sample.
         assert_eq!(chunk.analog_channel(0).unwrap()[0], 0);
         // D0..D3 counter: logic word == sample index & 0b1111.
-        let logic: Vec<u64> = (0..8).map(|i| i & 0b1111).collect();
-        assert_eq!(chunk.logic(), logic.as_slice());
-        assert_eq!(source.produced(), 8);
+        assert_eq!(chunk.logic()[0], 0);
+        assert_eq!(chunk.logic()[1], 1);
+
+        drop(rx);
+        pool.run_until_stalled();
     }
 
     #[test]
-    fn source_advances_position_across_calls() {
+    fn source_advances_position_across_chunks() {
         let mut source = DemoSource::new(DemoConfig::default());
-        let _ = block_on(source.next_chunk(8));
-        let chunk = block_on(source.next_chunk(4));
-        // Counter continues from sample 8.
-        assert_eq!(chunk.logic(), [8, 9, 10, 11].map(|i| i & 0b1111));
-        assert_eq!(source.produced(), 12);
+        let (tx, mut rx) = mpsc::unbounded();
+
+        let read_loop = block_on(source.start_streaming(tx)).unwrap();
+        let mut pool = futures::executor::LocalPool::new();
+        pool.spawner().spawn_local(read_loop).unwrap();
+
+        let _ = pool.run_until(rx.next()).unwrap();
+        let chunk2 = pool.run_until(rx.next()).unwrap();
+        // Second chunk continues from sample 256.
+        assert_eq!(chunk2.logic()[0], 256 & 0b1111);
+
+        drop(rx);
+        pool.run_until_stalled();
     }
 
     #[test]

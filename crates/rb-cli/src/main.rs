@@ -278,7 +278,9 @@ fn parse_channel_range(raw: &str) -> Result<ChannelSpec, String> {
         .parse()
         .map_err(|_| format!("invalid channel range start: '{prefix_start}'"))?;
 
-    let channels: Vec<String> = (start_num..=end_num).map(|n| format!("{prefix}{n}")).collect();
+    let channels: Vec<String> = (start_num..=end_num)
+        .map(|n| format!("{prefix}{n}"))
+        .collect();
     Ok(ChannelSpec::Range(channels))
 }
 

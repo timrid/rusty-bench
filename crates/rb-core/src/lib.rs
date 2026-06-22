@@ -7,8 +7,9 @@
 //!   [`DriverFactory`](rb_transport::DriverFactory)s.
 //! - [`Session`] maps each [`DeviceId`](rb_device::DeviceId) to a [`DeviceHandle`]
 //!   (device + per-channel stores + [`AcquisitionState`]).
-//! - [`runtime::run_acquisition`] drives a handle from command/tick streams; the
-//!   `native` and `web` features add the matching spawners.
+//! - [`runtime::run_acquisition`] drives a handle from a command stream,
+//!   pumping continuously; the `native` and `web` features add the matching
+//!   spawners.
 //!
 //! The default build is runtime-free (only `futures`) and compiles to
 //! `wasm32-unknown-unknown` with no features.
@@ -30,7 +31,9 @@ pub use session::Session;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::StreamExt;
     use futures::executor::block_on;
+    use futures::task::LocalSpawnExt;
 
     #[test]
     fn end_to_end_scan_connect_acquire() {
@@ -47,13 +50,21 @@ mod tests {
         let id = session.add_device(device);
 
         let handle = session.device_mut(&id).unwrap();
-        block_on(handle.apply(AcquisitionCommand::Start)).unwrap();
-        block_on(handle.pump(256));
+        let (read_loop, mut data_rx) = block_on(handle.start_streaming()).unwrap();
+
+        let mut pool = futures::executor::LocalPool::new();
+        pool.spawner().spawn_local(read_loop).unwrap();
+
+        let chunk = pool.run_until(data_rx.next()).unwrap();
+        handle.ingest_chunk(&chunk);
+
+        drop(data_rx);
+        pool.run_until_stalled();
 
         let handle = session.device(&id).unwrap();
         assert_eq!(handle.state(), &AcquisitionState::Running);
-        assert_eq!(handle.sample_count(), 256);
-        assert_eq!(handle.analog_traces()[0].len(), 256);
-        assert_eq!(handle.digital_trace().unwrap().len(), 256);
+        assert!(handle.sample_count() > 0, "should have streamed samples");
+        assert_eq!(handle.analog_traces()[0].len(), handle.sample_count());
+        assert_eq!(handle.digital_trace().unwrap().len(), handle.sample_count());
     }
 }

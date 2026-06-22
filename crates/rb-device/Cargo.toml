@@ -13,6 +13,7 @@ authors.workspace = true
 [dependencies]
 rb-model.workspace = true
 async-trait.workspace = true
+futures.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

@@ -12,7 +12,7 @@ name = "rb-gui-web"
 path = "src/main.rs"
 
 [dependencies]
-rb-gui.workspace = true
+rb-gui = { workspace = true, features = ["web"] }
 eframe.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

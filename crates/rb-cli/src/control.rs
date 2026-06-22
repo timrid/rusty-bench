@@ -16,11 +16,7 @@ use crate::util::{find_and_connect, write_json};
 /// # Errors
 /// Returns an error if the device cannot be found, connected, or if it
 /// does not support the multimeter capability.
-pub fn run_multimeter(
-    address: &str,
-    writer: &mut dyn io::Write,
-    json: bool,
-) -> anyhow::Result<()> {
+pub fn run_multimeter(address: &str, writer: &mut dyn io::Write, json: bool) -> anyhow::Result<()> {
     let mut device = find_and_connect(address)?;
     let dmm = device
         .as_multimeter_mut()
@@ -91,7 +87,12 @@ pub fn run_power_supply(
             struct PsStatus {
                 output: String,
             }
-            return write_json(&PsStatus { output: state.into() }, writer);
+            return write_json(
+                &PsStatus {
+                    output: state.into(),
+                },
+                writer,
+            );
         }
         writeln!(writer, "Power supply output: {state}")?;
     } else {
@@ -102,7 +103,12 @@ pub fn run_power_supply(
             struct PsStatus {
                 output: String,
             }
-            return write_json(&PsStatus { output: state.into() }, writer);
+            return write_json(
+                &PsStatus {
+                    output: state.into(),
+                },
+                writer,
+            );
         }
         writeln!(writer, "Power supply output: {state}")?;
     }
@@ -149,7 +155,12 @@ pub fn run_waveform_gen(
         struct WgStatus {
             output: String,
         }
-        return write_json(&WgStatus { output: state.into() }, writer);
+        return write_json(
+            &WgStatus {
+                output: state.into(),
+            },
+            writer,
+        );
     }
     writeln!(writer, "Waveform generator output: {state}")?;
     Ok(())

@@ -170,7 +170,9 @@ fn build_capabilities_json(device: &dyn Device) -> CapabilitiesJson {
         sdr_receiver: device.as_sdr_receiver().map(|sdr| SdrReceiverJson {
             sample_rate_hz: sdr.sample_rate_hz(),
         }),
-        spectrum_analyzer: device.as_spectrum_analyzer().map(|_| SpectrumAnalyzerJson {}),
+        spectrum_analyzer: device
+            .as_spectrum_analyzer()
+            .map(|_| SpectrumAnalyzerJson {}),
         electronic_load: device.as_electronic_load().map(|el| ElectronicLoadJson {
             mode: format!("{:?}", el.mode()),
         }),

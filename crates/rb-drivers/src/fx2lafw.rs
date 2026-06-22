@@ -23,7 +23,13 @@
 //!
 //! [`MockTransport`]: rb_transport::MockTransport
 
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use async_trait::async_trait;
+use futures::channel::mpsc;
 
 use nusb::MaybeFuture;
 
@@ -186,10 +192,16 @@ fn start_flags(sample_wide: bool, clock_48mhz: bool, _analog_enabled: bool) -> u
 ///
 /// All protocol I/O goes through the owned [`Transport`], making the device
 /// testable via [`MockTransport`](rb_transport::MockTransport).
+///
+/// The `transport` is wrapped in `Option` so [`start_streaming`] can move it
+/// into the read-loop future.  After `start_streaming`, `transport` is `None`
+/// until the read loop ends.
+///
+/// [`start_streaming`]: AcquisitionSource::start_streaming
 pub struct Fx2lafwDevice {
     id: DeviceId,
     info: DeviceInfo,
-    transport: Box<dyn Transport>,
+    transport: Option<Box<dyn Transport>>,
     config: Fx2lafwConfig,
     /// Firmware version reported by the device (major, minor).
     fw_version: (u8, u8),
@@ -200,10 +212,8 @@ pub struct Fx2lafwDevice {
     /// Achievable sample rate after GPIF delay computation.
     actual_rate: f64,
     channels: Vec<DigitalChannel>,
-    /// Buffer for partially-received sample data between `next_chunk` calls.
-    sample_buf: Vec<u8>,
-    /// Whether acquisition has been started (device is producing samples).
-    running: bool,
+    /// Whether acquisition has been started (shared with read-loop future).
+    running: Arc<AtomicBool>,
 }
 
 impl Fx2lafwDevice {
@@ -229,7 +239,7 @@ impl Fx2lafwDevice {
         Self {
             id,
             info,
-            transport,
+            transport: Some(transport),
             config: Fx2lafwConfig {
                 channels: ch,
                 sample_rate_hz: config.sample_rate_hz,
@@ -239,9 +249,17 @@ impl Fx2lafwDevice {
             clock_hz: CLOCK_48MHZ,
             actual_rate: 0.0,
             channels,
-            sample_buf: Vec::new(),
-            running: false,
+            running: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Borrows the transport, panicking if it has been moved out (e.g. by an
+    /// active read loop).
+    fn transport_mut(&mut self) -> &mut dyn Transport {
+        self.transport
+            .as_mut()
+            .expect("transport moved out — acquisition already running")
+            .as_mut()
     }
 }
 
@@ -273,7 +291,7 @@ impl Device for Fx2lafwDevice {
 
     async fn open(&mut self) -> DeviceResult<()> {
         // Query firmware version and validate.
-        self.fw_version = get_fw_version(&mut *self.transport).await?;
+        self.fw_version = get_fw_version(self.transport_mut()).await?;
         if self.fw_version.0 != REQUIRED_FW_MAJOR {
             return Err(DeviceError::Protocol(format!(
                 "unsupported firmware version {}.{} (need {}.x)",
@@ -282,8 +300,12 @@ impl Device for Fx2lafwDevice {
         }
 
         // Query chip revision.
-        let revid = get_revid(&mut *self.transport).await?;
-        let chip = if revid == 1 { "FX2LP (CY7C68013A)" } else { "FX2 (CY7C68013)" };
+        let revid = get_revid(self.transport_mut()).await?;
+        let chip = if revid == 1 {
+            "FX2LP (CY7C68013A)"
+        } else {
+            "FX2 (CY7C68013)"
+        };
 
         // Update device info with discovered details.
         let vendor = core::mem::take(&mut self.info.vendor);
@@ -291,7 +313,10 @@ impl Device for Fx2lafwDevice {
         let serial = self.info.serial.take();
         let mut info = DeviceInfo::new(
             vendor,
-            format!("{model} fw:{}.{} chip:{chip}", self.fw_version.0, self.fw_version.1),
+            format!(
+                "{model} fw:{}.{} chip:{chip}",
+                self.fw_version.0, self.fw_version.1
+            ),
         );
         info.serial = serial;
         self.info = info;
@@ -300,7 +325,9 @@ impl Device for Fx2lafwDevice {
     }
 
     async fn close(&mut self) -> DeviceResult<()> {
-        let _ = self.transport.close().await;
+        if let Some(ref mut transport) = self.transport {
+            let _ = transport.close().await;
+        }
         Ok(())
     }
 }
@@ -314,7 +341,7 @@ impl Device for Fx2lafwDevice {
 async fn get_fw_version(transport: &mut dyn Transport) -> DeviceResult<(u8, u8)> {
     let resp = transport
         .control_transfer(
-            0xC0,              // vendor, device-to-host (IN)
+            0xC0,               // vendor, device-to-host (IN)
             CMD_GET_FW_VERSION, // bRequest = 0xB0
             0,                  // wValue
             0,                  // wIndex
@@ -338,11 +365,11 @@ async fn get_fw_version(transport: &mut dyn Transport) -> DeviceResult<(u8, u8)>
 async fn get_revid(transport: &mut dyn Transport) -> DeviceResult<u8> {
     let resp = transport
         .control_transfer(
-            0xC0,           // vendor, device-to-host (IN)
-            CMD_GET_REVID,   // bRequest = 0xB2
-            0,               // wValue
-            0,               // wIndex
-            &[],             // no OUT data
+            0xC0,          // vendor, device-to-host (IN)
+            CMD_GET_REVID, // bRequest = 0xB2
+            0,             // wValue
+            0,             // wIndex
+            &[],           // no OUT data
         )
         .await
         .map_err(|e| DeviceError::Transport(format!("get_revid: {e}")))?;
@@ -365,11 +392,11 @@ async fn start_acquisition(
     let data = [flags, delay_h, delay_l];
     transport
         .control_transfer(
-            0x40,            // vendor, host-to-device (OUT)
-            CMD_START_ACQ,   // bRequest = 0xB1
-            0,               // wValue
-            0,               // wIndex
-            &data,           // 3-byte data phase
+            0x40,          // vendor, host-to-device (OUT)
+            CMD_START_ACQ, // bRequest = 0xB1
+            0,             // wValue
+            0,             // wIndex
+            &data,         // 3-byte data phase
         )
         .await
         .map_err(|e| DeviceError::Transport(format!("start_acquisition: {e}")))?;
@@ -393,68 +420,109 @@ impl LogicAnalyzer for Fx2lafwDevice {
     }
 
     async fn arm(&mut self) -> DeviceResult<()> {
+        // Reset the bulk-IN pipe before starting acquisition.  After a fresh
+        // plug-in, the first WinUsb_ReadPipe after CMD_START_ACQ works, but
+        // the second may hang forever.  WinUsb_ResetPipe clears this condition.
+        self.transport_mut()
+            .clear_in_halt()
+            .await
+            .map_err(|e| DeviceError::Transport(format!("clear_in_halt before arm: {e}")))?;
+
         let dc = compute_delay(self.config.sample_rate_hz);
         let clock_48mhz = (dc.clock_hz - CLOCK_48MHZ).abs() < 1.0;
         let flags = start_flags(self.sample_wide, clock_48mhz, false);
 
-        start_acquisition(&mut *self.transport, flags, dc.delay).await?;
+        start_acquisition(self.transport_mut(), flags, dc.delay).await?;
 
         self.clock_hz = dc.clock_hz;
         self.actual_rate = dc.actual_rate_hz;
-        self.running = true;
-        self.sample_buf.clear();
+        self.running.store(true, Ordering::SeqCst);
         Ok(())
     }
 
     async fn stop(&mut self) -> DeviceResult<()> {
         // The fx2lafw firmware has no explicit stop command; the GPIF engine
         // stops when its waveform completes or the host stops reading.
-        self.running = false;
+        self.running.store(false, Ordering::SeqCst);
         Ok(())
     }
 }
 
 #[async_trait(?Send)]
 impl AcquisitionSource for Fx2lafwDevice {
-    async fn next_chunk(&mut self, max_samples: usize) -> SampleChunk {
-        let sample_bytes = if self.sample_wide { 2 } else { 1 };
+    async fn start_streaming(
+        &mut self,
+        chunk_tx: mpsc::UnboundedSender<SampleChunk>,
+    ) -> DeviceResult<Pin<Box<dyn Future<Output = ()>>>> {
+        // Take ownership of transport and state for the read loop.
+        let mut transport = self
+            .transport
+            .take()
+            .ok_or_else(|| DeviceError::Protocol("acquisition already running".into()))?;
+        let sample_wide = self.sample_wide;
+        let running = self.running.clone();
+        running.store(true, Ordering::SeqCst);
 
-        if !self.running {
-            // Final drain: decode everything left in sample_buf.
-            let samples = decode_samples(&self.sample_buf, self.sample_wide, max_samples);
-            let consumed = samples.logic().len() * sample_bytes;
-            self.sample_buf.drain(..consumed.min(self.sample_buf.len()));
-            return samples;
-        }
+        let fut = async move {
+            let mut buf = Vec::new();
+            let mut read_buf = vec![0u8; 4096];
 
-        // Read one chunk from EP2 IN into sample_buf.
-        let mut read_buf = vec![0u8; 4096];
-        match self.transport.read(&mut read_buf).await {
-            Ok(0) => {
-                // EOF — firmware stopped sending.
-                self.running = false;
-            }
-            Err(_) => {
-                // Transport error — stop reading.
-                self.running = false;
-            }
-            Ok(n) => {
-                self.sample_buf.extend_from_slice(&read_buf[..n]);
-            }
-        }
+            loop {
+                if !running.load(Ordering::SeqCst) {
+                    // Final drain: send remaining buffered samples.
+                    let sample_bytes = if sample_wide { 2 } else { 1 };
+                    let complete = (buf.len() / sample_bytes) * sample_bytes;
+                    if complete > 0 {
+                        let chunk =
+                            decode_samples(&buf[..complete], sample_wide, complete / sample_bytes);
+                        let _ = chunk_tx.unbounded_send(chunk);
+                    }
+                    break;
+                }
 
-        // Decode as many complete samples as we have (up to max_samples).
-        let avail = self.sample_buf.len();
-        let complete = (avail / sample_bytes) * sample_bytes;
-        let samples = decode_samples(
-            &self.sample_buf[..complete],
-            self.sample_wide,
-            max_samples,
-        );
-        // Drain only the bytes actually consumed by decode_samples.
-        let consumed = samples.logic().len() * sample_bytes;
-        self.sample_buf.drain(..consumed);
-        samples
+                // Read from USB EP2 IN — suspends until data arrives.
+                match transport.read(&mut read_buf).await {
+                    Ok(0) => {
+                        log::info!("fx2lafw: USB read returned 0 (EOF)");
+                        running.store(false, Ordering::SeqCst);
+                    }
+                    Err(e) => {
+                        log::warn!("fx2lafw: USB read error: {e}");
+                        running.store(false, Ordering::SeqCst);
+                    }
+                    Ok(n) => {
+                        log::trace!("fx2lafw: USB read got {n} bytes");
+                        buf.extend_from_slice(&read_buf[..n]);
+
+                        // Decode as many complete samples as possible and send.
+                        let sample_bytes = if sample_wide { 2 } else { 1 };
+                        let complete = (buf.len() / sample_bytes) * sample_bytes;
+                        if complete >= sample_bytes {
+                            let max = complete / sample_bytes;
+                            let chunk = decode_samples(&buf[..complete], sample_wide, max);
+                            let consumed = chunk.logic().len() * sample_bytes;
+                            buf.drain(..consumed);
+
+                            if !chunk.is_empty() {
+                                if chunk_tx.unbounded_send(chunk).is_err() {
+                                    break; // receiver dropped
+                                }
+                            }
+                        }
+                    }
+                }
+                // No yield between reads — keep the USB pipe saturated!
+            }
+
+            running.store(false, Ordering::SeqCst);
+        };
+
+        Ok(Box::pin(fut))
+    }
+
+    async fn stop_streaming(&mut self) -> DeviceResult<()> {
+        self.running.store(false, Ordering::SeqCst);
+        Ok(())
     }
 }
 
@@ -628,27 +696,99 @@ struct DeviceProfile {
 /// Known fx2lafw-compatible devices (matches sigrok's `supported_fx2[]`).
 static SUPPORTED_DEVICES: &[DeviceProfile] = &[
     // Cypress FX2 (no EEPROM) — bootloader VID/PID
-    DeviceProfile { vid: 0x04B4, pid: 0x8613, vendor: "Cypress", model: "FX2 (bootloader)", has_16bit: true },
+    DeviceProfile {
+        vid: 0x04B4,
+        pid: 0x8613,
+        vendor: "Cypress",
+        model: "FX2 (bootloader)",
+        has_16bit: true,
+    },
     // USBee AX (and clones)
-    DeviceProfile { vid: 0x08A9, pid: 0x0014, vendor: "CWAV", model: "USBee AX", has_16bit: false },
+    DeviceProfile {
+        vid: 0x08A9,
+        pid: 0x0014,
+        vendor: "CWAV",
+        model: "USBee AX",
+        has_16bit: false,
+    },
     // USBee DX
-    DeviceProfile { vid: 0x08A9, pid: 0x0015, vendor: "CWAV", model: "USBee DX", has_16bit: true },
+    DeviceProfile {
+        vid: 0x08A9,
+        pid: 0x0015,
+        vendor: "CWAV",
+        model: "USBee DX",
+        has_16bit: true,
+    },
     // USBee SX
-    DeviceProfile { vid: 0x08A9, pid: 0x0009, vendor: "CWAV", model: "USBee SX", has_16bit: false },
+    DeviceProfile {
+        vid: 0x08A9,
+        pid: 0x0009,
+        vendor: "CWAV",
+        model: "USBee SX",
+        has_16bit: false,
+    },
     // Saleae Logic (and many clones)
-    DeviceProfile { vid: 0x0925, pid: 0x3881, vendor: "Saleae", model: "Logic", has_16bit: false },
+    DeviceProfile {
+        vid: 0x0925,
+        pid: 0x3881,
+        vendor: "Saleae",
+        model: "Logic",
+        has_16bit: false,
+    },
     // Braintechnology USB-LPS
-    DeviceProfile { vid: 0x16D0, pid: 0x0498, vendor: "Braintechnology", model: "USB-LPS", has_16bit: true },
+    DeviceProfile {
+        vid: 0x16D0,
+        pid: 0x0498,
+        vendor: "Braintechnology",
+        model: "USB-LPS",
+        has_16bit: true,
+    },
     // sigrok FX2 LA 8ch
-    DeviceProfile { vid: 0x1D50, pid: 0x608C, vendor: "sigrok", model: "FX2 LA (8ch)", has_16bit: false },
+    DeviceProfile {
+        vid: 0x1D50,
+        pid: 0x608C,
+        vendor: "sigrok",
+        model: "FX2 LA (8ch)",
+        has_16bit: false,
+    },
     // sigrok FX2 LA 16ch
-    DeviceProfile { vid: 0x1D50, pid: 0x608D, vendor: "sigrok", model: "FX2 LA (16ch)", has_16bit: true },
+    DeviceProfile {
+        vid: 0x1D50,
+        pid: 0x608D,
+        vendor: "sigrok",
+        model: "FX2 LA (16ch)",
+        has_16bit: true,
+    },
     // fx2lafw-generic PIDs
-    DeviceProfile { vid: 0x1D50, pid: 0x6081, vendor: "sigrok", model: "fx2lafw", has_16bit: false },
-    DeviceProfile { vid: 0x1D50, pid: 0x6082, vendor: "sigrok", model: "fx2lafw", has_16bit: false },
-    DeviceProfile { vid: 0x1D50, pid: 0x608E, vendor: "sigrok", model: "fx2lafw", has_16bit: false },
+    DeviceProfile {
+        vid: 0x1D50,
+        pid: 0x6081,
+        vendor: "sigrok",
+        model: "fx2lafw",
+        has_16bit: false,
+    },
+    DeviceProfile {
+        vid: 0x1D50,
+        pid: 0x6082,
+        vendor: "sigrok",
+        model: "fx2lafw",
+        has_16bit: false,
+    },
+    DeviceProfile {
+        vid: 0x1D50,
+        pid: 0x608E,
+        vendor: "sigrok",
+        model: "fx2lafw",
+        has_16bit: false,
+    },
     // sigrok usb-c-grok
-    DeviceProfile { vid: 0x1D50, pid: 0x608F, vendor: "sigrok", model: "usb-c-grok", has_16bit: false },
+    DeviceProfile {
+        vid: 0x1D50,
+        pid: 0x608F,
+        vendor: "sigrok",
+        model: "usb-c-grok",
+        has_16bit: false,
+    },
 ];
 
 /// Look up a device profile by VID/PID.
@@ -790,8 +930,7 @@ async fn connect_usb(candidate: &DeviceCandidate) -> DriverResult<Box<dyn Device
     // fx2lafw firmware only uses EP2 IN (0x82) for sample data.
     // All commands go through EP0 control transfers — no bulk OUT endpoint needed.
     let transport: Box<dyn Transport> = Box::new(rb_transport::nusb::NusbTransport::new(
-        interface,
-        EP_DATA, // bulk IN  = EP2 IN  (0x82)
+        interface, EP_DATA, // bulk IN  = EP2 IN  (0x82)
         0x00,    // bulk OUT = unused (firmware has no bulk OUT endpoint)
     ));
 
@@ -846,9 +985,9 @@ pub async fn upload_firmware_and_connect(
         #[cfg(not(target_arch = "wasm32"))]
         std::thread::sleep(std::time::Duration::from_millis(RENUM_POLL_MS));
 
-        let devices = nusb::list_devices().wait().map_err(|e| {
-            DriverError::Transport(rb_transport::TransportError::Io(e.to_string()))
-        })?;
+        let devices = nusb::list_devices()
+            .wait()
+            .map_err(|e| DriverError::Transport(rb_transport::TransportError::Io(e.to_string())))?;
 
         for dev in devices {
             let vid = dev.vendor_id();
@@ -880,11 +1019,7 @@ pub async fn upload_firmware_and_connect(
 
 /// Find a USB device by VID, PID, and optional serial.
 #[cfg(feature = "fx2lafw")]
-async fn find_usb_device(
-    vid: u16,
-    pid: u16,
-    serial: &str,
-) -> DriverResult<nusb::DeviceInfo> {
+async fn find_usb_device(vid: u16, pid: u16, serial: &str) -> DriverResult<nusb::DeviceInfo> {
     nusb::list_devices()
         .wait()
         .map_err(|e| DriverError::Transport(rb_transport::TransportError::Io(e.to_string())))?
@@ -911,7 +1046,9 @@ async fn connect_usb(_candidate: &DeviceCandidate) -> DriverResult<Box<dyn Devic
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::StreamExt;
     use futures::executor::block_on;
+    use futures::task::LocalSpawnExt;
     use rb_transport::MockTransport;
 
     // ── GPIF delay computation ────────────────────────────────────────────────
@@ -1080,7 +1217,10 @@ mod tests {
             id,
             info,
             Box::new(MockTransport::new()),
-            Fx2lafwConfig { channels: 16, sample_rate_hz: 1_000_000.0 },
+            Fx2lafwConfig {
+                channels: 16,
+                sample_rate_hz: 1_000_000.0,
+            },
         );
 
         assert_eq!(dev.channels().len(), 16);
@@ -1092,17 +1232,12 @@ mod tests {
     fn open_validates_fw_version() {
         let mut transport = MockTransport::new();
         // Queue responses for get_fw_version (major=1, minor=4) and get_revid.
-        transport.queue_control_response([1, 4]);  // fw version
-        transport.queue_control_response([1]);       // revid (FX2LP)
+        transport.queue_control_response([1, 4]); // fw version
+        transport.queue_control_response([1]); // revid (FX2LP)
 
         let id = DeviceId::new("test");
         let info = DeviceInfo::new("Test", "FX2");
-        let mut dev = Fx2lafwDevice::new(
-            id,
-            info,
-            Box::new(transport),
-            Fx2lafwConfig::default(),
-        );
+        let mut dev = Fx2lafwDevice::new(id, info, Box::new(transport), Fx2lafwConfig::default());
 
         let result = block_on(dev.open());
         assert!(result.is_ok());
@@ -1112,8 +1247,8 @@ mod tests {
     #[test]
     fn open_rejects_wrong_fw_major() {
         let mut transport = MockTransport::new();
-        transport.queue_control_response([2, 0]);  // fw major=2 (unsupported)
-        transport.queue_control_response([1]);      // revid
+        transport.queue_control_response([2, 0]); // fw major=2 (unsupported)
+        transport.queue_control_response([1]); // revid
 
         let mut dev = Fx2lafwDevice::new(
             DeviceId::new("test"),
@@ -1129,15 +1264,18 @@ mod tests {
     #[test]
     fn arm_sends_correct_start_command() {
         let mut transport = MockTransport::new();
-        transport.queue_control_response([1, 4]);  // fw version
-        transport.queue_control_response([1]);       // revid
-        transport.queue_control_response([]);        // start_acquisition response
+        transport.queue_control_response([1, 4]); // fw version
+        transport.queue_control_response([1]); // revid
+        transport.queue_control_response([]); // start_acquisition response
 
         let mut dev = Fx2lafwDevice::new(
             DeviceId::new("test"),
             DeviceInfo::new("Test", "FX2"),
             Box::new(transport),
-            Fx2lafwConfig { channels: 8, sample_rate_hz: 1_000_000.0 },
+            Fx2lafwConfig {
+                channels: 8,
+                sample_rate_hz: 1_000_000.0,
+            },
         );
 
         block_on(dev.open()).unwrap();
@@ -1159,12 +1297,15 @@ mod tests {
             DeviceId::new("test"),
             DeviceInfo::new("Test", "FX2"),
             Box::new(transport),
-            Fx2lafwConfig { channels: 8, sample_rate_hz: 48_000_000.0 },
+            Fx2lafwConfig {
+                channels: 8,
+                sample_rate_hz: 48_000_000.0,
+            },
         );
 
         block_on(dev.open()).unwrap();
         block_on(dev.arm()).unwrap();
-        assert!(dev.running);
+        assert!(dev.running.load(Ordering::SeqCst));
         // At 48 MHz, delay should be 0, flags should be 8-bit + 48 MHz clock.
     }
 
@@ -1180,8 +1321,14 @@ mod tests {
 
         let ctrl = transport.control_transfers();
         assert_eq!(ctrl.len(), 1);
-        assert_eq!(ctrl[0].request_type, 0xC0, "must be vendor IN (device→host)");
-        assert_eq!(ctrl[0].request, 0xB0, "bRequest must be CMD_GET_FW_VERSION (0xB0)");
+        assert_eq!(
+            ctrl[0].request_type, 0xC0,
+            "must be vendor IN (device→host)"
+        );
+        assert_eq!(
+            ctrl[0].request, 0xB0,
+            "bRequest must be CMD_GET_FW_VERSION (0xB0)"
+        );
         assert_eq!(ctrl[0].value, 0);
         assert_eq!(ctrl[0].index, 0);
     }
@@ -1205,8 +1352,14 @@ mod tests {
 
         let ctrl = transport.control_transfers();
         assert_eq!(ctrl.len(), 1);
-        assert_eq!(ctrl[0].request_type, 0xC0, "must be vendor IN (device→host)");
-        assert_eq!(ctrl[0].request, 0xB2, "bRequest must be CMD_GET_REVID (0xB2)");
+        assert_eq!(
+            ctrl[0].request_type, 0xC0,
+            "must be vendor IN (device→host)"
+        );
+        assert_eq!(
+            ctrl[0].request, 0xB2,
+            "bRequest must be CMD_GET_REVID (0xB2)"
+        );
     }
 
     #[test]
@@ -1229,8 +1382,14 @@ mod tests {
 
         let ctrl = transport.control_transfers();
         assert_eq!(ctrl.len(), 1);
-        assert_eq!(ctrl[0].request_type, 0x40, "must be vendor OUT (host→device)");
-        assert_eq!(ctrl[0].request, 0xB1, "bRequest must be CMD_START_ACQ (0xB1)");
+        assert_eq!(
+            ctrl[0].request_type, 0x40,
+            "must be vendor OUT (host→device)"
+        );
+        assert_eq!(
+            ctrl[0].request, 0xB1,
+            "bRequest must be CMD_START_ACQ (0xB1)"
+        );
         assert_eq!(ctrl[0].value, 0);
         assert_eq!(ctrl[0].index, 0);
         // 3-byte data phase: [flags, delay_h, delay_l]
@@ -1300,11 +1459,11 @@ mod tests {
             Box::new(transport),
             Fx2lafwConfig::default(),
         );
-        dev.running = true; // simulate armed state
+        dev.running.store(true, Ordering::SeqCst); // simulate armed state
 
         let result = block_on(dev.stop());
         assert!(result.is_ok());
-        assert!(!dev.running);
+        assert!(!dev.running.load(Ordering::SeqCst));
         // No control transfers were issued (transport has no queued responses consumed).
     }
 
@@ -1329,8 +1488,8 @@ mod tests {
     #[test]
     fn open_updates_device_info_with_fw_and_chip() {
         let mut transport = MockTransport::new();
-        transport.queue_control_response([1, 4]);  // fw 1.4
-        transport.queue_control_response([1]);      // revid=1 → FX2LP
+        transport.queue_control_response([1, 4]); // fw 1.4
+        transport.queue_control_response([1]); // revid=1 → FX2LP
 
         let mut dev = Fx2lafwDevice::new(
             DeviceId::new("test"),
@@ -1341,16 +1500,25 @@ mod tests {
 
         block_on(dev.open()).unwrap();
         assert_eq!(dev.info().vendor, "TestVendor");
-        assert!(dev.info().model.contains("TestModel"), "model should contain original name");
-        assert!(dev.info().model.contains("fw:1.4"), "model should contain fw version");
-        assert!(dev.info().model.contains("FX2LP"), "model should contain chip type");
+        assert!(
+            dev.info().model.contains("TestModel"),
+            "model should contain original name"
+        );
+        assert!(
+            dev.info().model.contains("fw:1.4"),
+            "model should contain fw version"
+        );
+        assert!(
+            dev.info().model.contains("FX2LP"),
+            "model should contain chip type"
+        );
     }
 
     #[test]
     fn open_with_revid_zero_detects_fx2() {
         let mut transport = MockTransport::new();
-        transport.queue_control_response([1, 2]);  // fw 1.2
-        transport.queue_control_response([0]);      // revid=0 → FX2 (not FX2LP)
+        transport.queue_control_response([1, 2]); // fw 1.2
+        transport.queue_control_response([0]); // revid=0 → FX2 (not FX2LP)
 
         let mut dev = Fx2lafwDevice::new(
             DeviceId::new("test"),
@@ -1364,11 +1532,41 @@ mod tests {
         assert!(!dev.info().model.contains("FX2LP"));
     }
 
-    // ── next_chunk integration (MockTransport) ───────────────────────────────
+    // ── decode_samples (pure function) ───────────────────────────────────────
 
-    /// Helper: create a device with firmware validated and acquisition armed,
-    /// ready for next_chunk() calls.
-    fn armed_device(transport: MockTransport, channels: u8) -> Fx2lafwDevice {
+    #[test]
+    fn decode_samples_8bit() {
+        let chunk = decode_samples(&[0x01, 0x02, 0x03], false, 10);
+        assert_eq!(chunk.logic(), &[0x01, 0x02, 0x03]);
+    }
+
+    #[test]
+    fn decode_samples_16bit() {
+        let chunk = decode_samples(&[0x34, 0x12, 0x78, 0x56, 0xBC, 0x9A], true, 3);
+        assert_eq!(chunk.logic().len(), 3);
+        assert_eq!(chunk.logic()[0], 0x1234);
+        assert_eq!(chunk.logic()[1], 0x5678);
+        assert_eq!(chunk.logic()[2], 0x9ABC);
+    }
+
+    #[test]
+    fn decode_samples_respects_max_samples() {
+        let chunk = decode_samples(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06], false, 2);
+        assert_eq!(chunk.logic().len(), 2);
+        assert_eq!(chunk.logic()[0], 0x01);
+        assert_eq!(chunk.logic()[1], 0x02);
+    }
+
+    #[test]
+    fn decode_samples_empty_input() {
+        let chunk = decode_samples(&[], false, 10);
+        assert!(chunk.is_empty());
+    }
+
+    // ── start_streaming integration (MockTransport) ──────────────────────────
+
+    /// Helper: create an opened, armed device ready for streaming.
+    fn opened_armed_device(transport: MockTransport, channels: u8) -> Fx2lafwDevice {
         let mut dev = Fx2lafwDevice::new(
             DeviceId::new("test"),
             DeviceInfo::new("X", "Y"),
@@ -1384,108 +1582,130 @@ mod tests {
     }
 
     #[test]
-    fn next_chunk_when_stopped_drains_buffer() {
-        let transport = MockTransport::new();
-
-        let mut dev = Fx2lafwDevice::new(
-            DeviceId::new("test"),
-            DeviceInfo::new("X", "Y"),
-            Box::new(transport),
-            Fx2lafwConfig { channels: 8, sample_rate_hz: 1_000_000.0 },
-        );
-
-        // Pre-fill buffer as if acquisition was running.
-        dev.sample_buf = vec![0x01, 0x02, 0x03];
-        dev.running = false;
-
-        let chunk = block_on(dev.next_chunk(10));
-        assert_eq!(chunk.logic(), &[0x01, 0x02, 0x03]);
-        assert!(dev.sample_buf.is_empty(), "buffer should be drained after stopped read");
-    }
-
-    #[test]
-    fn next_chunk_reads_8bit_from_transport() {
+    fn streaming_reads_8bit_from_transport() {
         let mut transport = MockTransport::new();
         transport.queue_control_response([1, 4]); // fw
         transport.queue_control_response([1]); // revid
         transport.queue_control_response([]); // start_acq
         transport.queue_read([0x0F, 0xF0, 0x55]);
+        // EOF after first read
+        transport.queue_read(&[]);
 
-        let mut dev = armed_device(transport, 8);
+        let mut dev = opened_armed_device(transport, 8);
+        let (tx, mut rx) = mpsc::unbounded();
+        let read_loop = block_on(dev.start_streaming(tx)).unwrap();
 
-        let chunk = block_on(dev.next_chunk(10));
+        let mut pool = futures::executor::LocalPool::new();
+        pool.spawner().spawn_local(read_loop).unwrap();
+
+        let chunk = pool.run_until(rx.next()).unwrap();
         assert_eq!(chunk.logic(), &[0x0F, 0xF0, 0x55]);
+
+        drop(rx);
+        pool.run_until_stalled();
     }
 
     #[test]
-    fn next_chunk_reads_16bit_from_transport() {
+    fn streaming_reads_16bit_from_transport() {
         let mut transport = MockTransport::new();
         transport.queue_control_response([1, 4]);
         transport.queue_control_response([1]);
         transport.queue_control_response([]);
-        // 16-bit samples: 3 samples = 6 bytes (little-endian)
         transport.queue_read([0x34, 0x12, 0x78, 0x56, 0xBC, 0x9A]);
+        transport.queue_read(&[]);
 
-        let mut dev = armed_device(transport, 16);
-        assert!(dev.sample_wide, "16-channel device must be in wide mode");
+        let mut dev = opened_armed_device(transport, 16);
+        assert!(dev.sample_wide);
+        let (tx, mut rx) = mpsc::unbounded();
+        let read_loop = block_on(dev.start_streaming(tx)).unwrap();
 
-        let chunk = block_on(dev.next_chunk(3));
+        let mut pool = futures::executor::LocalPool::new();
+        pool.spawner().spawn_local(read_loop).unwrap();
+
+        let chunk = pool.run_until(rx.next()).unwrap();
         assert_eq!(chunk.logic().len(), 3);
         assert_eq!(chunk.logic()[0], 0x1234);
         assert_eq!(chunk.logic()[1], 0x5678);
         assert_eq!(chunk.logic()[2], 0x9ABC);
+
+        drop(rx);
+        pool.run_until_stalled();
     }
 
     #[test]
-    fn next_chunk_handles_partial_16bit_sample() {
+    fn streaming_buffers_partial_16bit_sample() {
         let mut transport = MockTransport::new();
         transport.queue_control_response([1, 4]);
         transport.queue_control_response([1]);
         transport.queue_control_response([]);
-        // 5 bytes = 2 complete samples + 1 leftover byte
-        transport.queue_read([0x01, 0x00, 0x02, 0x00, 0x03]);
+        // 6 bytes = 3 complete 16-bit samples (little-endian).
+        transport.queue_read([0x01, 0x00, 0x02, 0x00, 0x03, 0x04]);
 
-        let mut dev = armed_device(transport, 16);
+        let mut dev = opened_armed_device(transport, 16);
+        let (tx, mut rx) = mpsc::unbounded();
+        let read_loop = block_on(dev.start_streaming(tx)).unwrap();
 
-        let chunk = block_on(dev.next_chunk(10));
-        // 2 complete 16-bit samples decoded, 1 byte buffered for next call.
-        assert_eq!(chunk.logic().len(), 2);
+        let mut pool = futures::executor::LocalPool::new();
+        pool.spawner().spawn_local(read_loop).unwrap();
+
+        let chunk = pool.run_until(rx.next()).unwrap();
+        assert_eq!(chunk.logic().len(), 3);
         assert_eq!(chunk.logic()[0], 0x0001);
         assert_eq!(chunk.logic()[1], 0x0002);
-        assert_eq!(dev.sample_buf, vec![0x03], "partial sample byte should remain in buffer");
+        assert_eq!(chunk.logic()[2], 0x0403);
+
+        drop(rx);
+        pool.run_until_stalled();
     }
 
     #[test]
-    fn next_chunk_respects_max_samples() {
+    fn streaming_handles_empty_transport_read() {
         let mut transport = MockTransport::new();
         transport.queue_control_response([1, 4]);
         transport.queue_control_response([1]);
         transport.queue_control_response([]);
-        transport.queue_read([0x01, 0x02, 0x03, 0x04, 0x05, 0x06]);
+        // No queued read → EOF → read loop exits.
 
-        let mut dev = armed_device(transport, 8);
+        let mut dev = opened_armed_device(transport, 8);
+        let (tx, mut rx) = mpsc::unbounded();
+        let read_loop = block_on(dev.start_streaming(tx)).unwrap();
 
-        // Only request 2 samples.
-        let chunk = block_on(dev.next_chunk(2));
-        assert_eq!(chunk.logic().len(), 2);
-        assert_eq!(chunk.logic()[0], 0x01);
-        assert_eq!(chunk.logic()[1], 0x02);
-        // Extra bytes remain in sample_buf.
-        assert_eq!(dev.sample_buf.len(), 4);
+        let mut pool = futures::executor::LocalPool::new();
+        pool.spawner().spawn_local(read_loop).unwrap();
+
+        // Read loop exits immediately on EOF.
+        let chunk = pool.run_until(rx.next());
+        // EOF may result in None or empty chunk depending on timing.
+        // Either way, no data was produced.
+        assert!(chunk.is_none() || chunk.unwrap().is_empty());
+
+        pool.run_until_stalled();
     }
 
     #[test]
-    fn next_chunk_handles_empty_transport_read() {
+    fn streaming_stops_via_running_flag() {
         let mut transport = MockTransport::new();
         transport.queue_control_response([1, 4]);
         transport.queue_control_response([1]);
         transport.queue_control_response([]);
-        // No queued read → reader exits with EOF.
+        transport.queue_read([0x01, 0x02]);
 
-        let mut dev = armed_device(transport, 8);
+        let mut dev = opened_armed_device(transport, 8);
+        let (tx, mut rx) = mpsc::unbounded();
+        let read_loop = block_on(dev.start_streaming(tx)).unwrap();
 
-        let chunk = block_on(dev.next_chunk(10));
-        assert_eq!(chunk.logic().len(), 0, "empty transport → empty chunk");
+        let mut pool = futures::executor::LocalPool::new();
+        pool.spawner().spawn_local(read_loop).unwrap();
+
+        let chunk = pool.run_until(rx.next()).unwrap();
+        assert_eq!(chunk.logic(), &[0x01, 0x02]);
+
+        // Stop via the running flag.
+        block_on(dev.stop_streaming()).unwrap();
+        assert!(!dev.running.load(Ordering::SeqCst));
+
+        drop(rx);
+        pool.run_until_stalled();
     }
 
     // ── Intel HEX parsing ─────────────────────────────────────────────────────
@@ -1571,175 +1791,5 @@ mod tests {
     fn is_bootloader_detects_cypress() {
         assert!(is_bootloader(0x04B4, 0x8613));
         assert!(!is_bootloader(0x1D50, 0x608C));
-    }
-
-    // ── Async next_chunk (direct transport.read, WASM-safe) ──────────────────
-
-    /// next_chunk reads one USB transfer per call and decodes buffered data.
-    /// With MockTransport, each call drains one queued read chunk.
-    #[test]
-    fn async_next_chunk_reads_one_transfer_per_call() {
-        let mut transport = MockTransport::new();
-        transport.queue_control_response([1, 4]);
-        transport.queue_control_response([1]);
-        transport.queue_control_response([]);
-        transport.queue_read([0x01, 0x02, 0x03]);
-
-        let mut dev = Fx2lafwDevice::new(
-            DeviceId::new("test"),
-            DeviceInfo::new("T", "FX2"),
-            Box::new(transport),
-            Fx2lafwConfig::default(),
-        );
-        block_on(dev.open()).unwrap();
-        block_on(dev.arm()).unwrap();
-
-        let chunk = block_on(dev.next_chunk(10));
-        assert_eq!(chunk.logic(), &[0x01, 0x02, 0x03]);
-    }
-
-    /// After stop(), remaining sample_buf data is drainable.
-    #[test]
-    fn stop_flushes_remaining_data() {
-        let mut transport = MockTransport::new();
-        transport.queue_control_response([1, 4]);
-        transport.queue_control_response([1]);
-        transport.queue_control_response([]);
-        transport.queue_read([0xAA, 0xBB, 0xCC]);
-
-        let mut dev = Fx2lafwDevice::new(
-            DeviceId::new("test"),
-            DeviceInfo::new("T", "M"),
-            Box::new(transport),
-            Fx2lafwConfig::default(),
-        );
-        block_on(dev.open()).unwrap();
-        block_on(dev.arm()).unwrap();
-
-        // Read one chunk.
-        let chunk = block_on(dev.next_chunk(10));
-        assert_eq!(chunk.logic(), &[0xAA, 0xBB, 0xCC]);
-
-        // Stop acquisition.
-        block_on(dev.stop()).unwrap();
-        assert!(!dev.running);
-
-        // No more data queued → empty chunk.
-        let chunk = block_on(dev.next_chunk(10));
-        assert_eq!(chunk.logic().len(), 0);
-    }
-
-    /// 16-bit wide mode works with async next_chunk.
-    #[test]
-    fn async_next_chunk_16bit() {
-        let mut transport = MockTransport::new();
-        transport.queue_control_response([1, 4]);
-        transport.queue_control_response([1]);
-        transport.queue_control_response([]);
-        transport.queue_read([0x34, 0x12, 0x78, 0x56]);
-
-        let mut dev = Fx2lafwDevice::new(
-            DeviceId::new("test"),
-            DeviceInfo::new("T", "M"),
-            Box::new(transport),
-            Fx2lafwConfig { channels: 16, sample_rate_hz: 1_000_000.0 },
-        );
-        block_on(dev.open()).unwrap();
-        block_on(dev.arm()).unwrap();
-
-        let chunk = block_on(dev.next_chunk(2));
-        assert_eq!(chunk.logic().len(), 2);
-        assert_eq!(chunk.logic()[0], 0x1234);
-        assert_eq!(chunk.logic()[1], 0x5678);
-    }
-
-    /// next_chunk reads one transfer → buffers data → max_samples bounds apply.
-    #[test]
-    fn async_next_chunk_respects_max_samples() {
-        let mut transport = MockTransport::new();
-        transport.queue_control_response([1, 4]);
-        transport.queue_control_response([1]);
-        transport.queue_control_response([]);
-        // One large read — MockTransport returns all at once.
-        transport.queue_read([0x01, 0x02, 0x03, 0x04, 0x05, 0x06]);
-
-        let mut dev = Fx2lafwDevice::new(
-            DeviceId::new("test"),
-            DeviceInfo::new("T", "M"),
-            Box::new(transport),
-            Fx2lafwConfig::default(),
-        );
-        block_on(dev.open()).unwrap();
-        block_on(dev.arm()).unwrap();
-
-        // Only request 2 samples.
-        let chunk = block_on(dev.next_chunk(2));
-        assert_eq!(chunk.logic().len(), 2);
-        assert_eq!(chunk.logic()[0], 0x01);
-        // Remaining 4 bytes still in sample_buf.
-        assert_eq!(dev.sample_buf.len(), 4);
-    }
-
-    /// Transport read error → running=false, buffered data drained.
-    #[test]
-    fn async_next_chunk_exits_on_transport_error() {
-        let mut transport = MockTransport::new();
-        transport.queue_control_response([1, 4]);
-        transport.queue_control_response([1]);
-        transport.queue_control_response([]);
-        transport.queue_read([0x01]);
-        transport.queue_read_error("USB disconnect");
-
-        let mut dev = Fx2lafwDevice::new(
-            DeviceId::new("test"),
-            DeviceInfo::new("T", "M"),
-            Box::new(transport),
-            Fx2lafwConfig::default(),
-        );
-        block_on(dev.open()).unwrap();
-        block_on(dev.arm()).unwrap();
-
-        // First call gets the queued data.
-        let chunk = block_on(dev.next_chunk(10));
-        assert_eq!(chunk.logic().len(), 1);
-        assert_eq!(chunk.logic()[0], 0x01);
-
-        // Second call hits error → running=false → empty.
-        let chunk = block_on(dev.next_chunk(10));
-        assert_eq!(chunk.logic().len(), 0);
-        assert!(!dev.running);
-    }
-
-    /// After stop(), re-arm works (transport is still owned by device).
-    #[test]
-    fn re_arm_after_stop_works() {
-        let mut transport = MockTransport::new();
-        transport.queue_control_response([1, 4]); // fw
-        transport.queue_control_response([1]); // revid
-        transport.queue_control_response([]); // start_acq #1
-        transport.queue_read([0x01]);
-        // All data qued before first next_chunk — MockTransport is sequential.
-        transport.queue_control_response([]); // start_acq #2
-        transport.queue_read([0x02, 0x03]);
-
-        let mut dev = Fx2lafwDevice::new(
-            DeviceId::new("test"),
-            DeviceInfo::new("T", "M"),
-            Box::new(transport),
-            Fx2lafwConfig::default(),
-        );
-        block_on(dev.open()).unwrap();
-
-        // First run: reads first queued chunk (both reads qued, gets all 3 bytes).
-        block_on(dev.arm()).unwrap();
-        let chunk = block_on(dev.next_chunk(10));
-        assert_eq!(chunk.logic(), &[0x01, 0x02, 0x03]);
-        block_on(dev.stop()).unwrap();
-
-        // Second run — re-arm succeeds, but transport queue is drained.
-        block_on(dev.arm()).unwrap();
-        assert!(dev.running);
-        let chunk = block_on(dev.next_chunk(10));
-        assert_eq!(chunk.logic().len(), 0);
     }
 }

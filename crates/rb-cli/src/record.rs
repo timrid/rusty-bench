@@ -2,7 +2,9 @@
 
 use std::io;
 
+use futures::StreamExt;
 use futures::executor::block_on;
+use futures::task::LocalSpawnExt;
 use rb_core::{AcquisitionCommand, DeviceHandle};
 use rb_io::{AnalogCapture, DeviceCapture, DigitalCapture};
 
@@ -54,15 +56,25 @@ pub fn run_record(opts: RecordOpts, writer: &mut dyn io::Write) -> anyhow::Resul
     }
 
     if target_samples > 0 {
-        block_on(handle.apply(AcquisitionCommand::Start))?;
+        let (read_loop, mut data_rx) = block_on(handle.start_streaming())?;
+
+        let mut pool = futures::executor::LocalPool::new();
+        pool.spawner()
+            .spawn_local(read_loop)
+            .map_err(|e| anyhow::anyhow!("failed to spawn read loop: {e}"))?;
+
         while handle.sample_count() < target_samples {
-            let remaining = target_samples.saturating_sub(handle.sample_count());
-            let pumped = block_on(handle.pump(remaining.min(4096)));
-            if pumped == 0 {
-                break; // source exhausted
+            let chunk = pool.run_until(data_rx.next());
+            match chunk {
+                Some(chunk) => {
+                    handle.ingest_chunk(&chunk);
+                }
+                None => break, // streaming stopped
             }
         }
         block_on(handle.apply(AcquisitionCommand::Stop))?;
+        drop(data_rx);
+        pool.run_until_stalled();
     }
 
     let capture = capture_from_handle(&handle);

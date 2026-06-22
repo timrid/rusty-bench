@@ -8,9 +8,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use nusb::{
     Interface, MaybeFuture,
-    transfer::{
-        Bulk, ControlIn, ControlOut, ControlType, Direction, In, Out, Recipient,
-    },
+    transfer::{Bulk, ControlIn, ControlOut, ControlType, Direction, In, Out, Recipient},
 };
 
 use crate::error::{TransportError, TransportResult};
@@ -117,17 +115,36 @@ impl Transport for NusbTransport {
             .ep_in
             .as_mut()
             .ok_or_else(|| TransportError::Io("no bulk IN endpoint".into()))?;
-        ep.submit(vec![0u8; buf.len()].into());
+
+        // Keep ~8 transfers in flight to saturate the USB pipe.
+        // This prevents the fx2lafw firmware's small EP2 buffer from
+        // filling up and permanently stalling the GPIF engine.
+        while ep.pending() < 8 {
+            ep.submit(vec![0u8; 4096].into());
+        }
+
+        log::trace!("nusb: waiting for IN completion…");
         let completed = ep.next_complete().await;
+        log::debug!("nusb: IN completed, buffer_len={}", completed.buffer.len());
         completed
             .status
             .map_err(|e| TransportError::Io(format!("USB bulk IN: {e}")))?;
         let n = completed.buffer.len().min(buf.len());
         buf[..n].copy_from_slice(&completed.buffer[..n]);
+        drop(completed);
         Ok(n)
     }
 
     async fn close(&mut self) -> TransportResult<()> {
+        Ok(())
+    }
+
+    async fn clear_in_halt(&mut self) -> TransportResult<()> {
+        if let Some(ref mut ep) = self.ep_in {
+            ep.clear_halt()
+                .wait()
+                .map_err(|e| TransportError::Io(format!("clear_in_halt: {e}")))?;
+        }
         Ok(())
     }
 
