@@ -15,7 +15,7 @@ rb-scpi.workspace = true
 rb-decode.workspace = true
 async-trait.workspace = true
 futures.workspace = true
-futures-timer.workspace = true
+futures-timer = { workspace = true, features = ["wasm-bindgen"] }
 log.workspace = true
 nusb = { workspace = true, optional = true }
 

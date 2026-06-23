@@ -17,7 +17,6 @@ use std::collections::{HashMap, HashSet};
 use eframe::egui;
 use futures::channel::mpsc;
 use futures::executor::block_on;
-use futures::StreamExt;
 use rb_core::{
     AcquisitionCommand, AcquisitionState, DeviceHandle, DriverRegistry, ScanResult, Session,
 };
@@ -26,8 +25,8 @@ use rb_device::DeviceId;
 use rb_model::{AnalogTrace, DigitalTrace, SampleChunk};
 use waveform_view::WaveformView;
 // Executors: tokio LocalSet when native feature is enabled (non-wasm),
-// LocalPool otherwise (wasm + tests).
-#[cfg(not(feature = "native"))]
+// LocalPool otherwise (non-wasm tests only; WASM uses wasm-bindgen-futures).
+#[cfg(not(any(feature = "native", target_arch = "wasm32")))]
 use {futures::executor::LocalPool, futures::executor::LocalSpawner, futures::task::LocalSpawnExt};
 #[cfg(feature = "native")]
 use tokio::task::LocalSet;
@@ -98,11 +97,11 @@ pub struct RustyBenchApp {
     selected_device: Option<DeviceId>,
     views: HashMap<DeviceId, WaveformView>,
     acquisitions: HashMap<DeviceId, DeviceAcquisition>,
-    /// Executor for background acquisition futures.
-    #[cfg(not(feature = "native"))]
+    /// Executor for background acquisition futures (non-WASM, non-native tests).
+    #[cfg(not(any(feature = "native", target_arch = "wasm32")))]
     #[allow(dead_code)]
     pool: LocalPool,
-    #[cfg(not(feature = "native"))]
+    #[cfg(not(any(feature = "native", target_arch = "wasm32")))]
     #[allow(dead_code)]
     spawner: LocalSpawner,
     /// Tokio runtime + LocalSet for native builds (proper I/O integration).
@@ -126,7 +125,7 @@ impl RustyBenchApp {
     /// acquisition — no scan or connect step needed.
     #[must_use]
     pub fn from_session(session: Session) -> Self {
-        #[cfg(not(feature = "native"))]
+        #[cfg(not(any(feature = "native", target_arch = "wasm32")))]
         let (pool, spawner) = {
             let p = LocalPool::new();
             let s = p.spawner();
@@ -152,9 +151,9 @@ impl RustyBenchApp {
             selected_device,
             views: HashMap::new(),
             acquisitions: HashMap::new(),
-            #[cfg(not(feature = "native"))]
+            #[cfg(not(any(feature = "native", target_arch = "wasm32")))]
             pool,
-            #[cfg(not(feature = "native"))]
+            #[cfg(not(any(feature = "native", target_arch = "wasm32")))]
             spawner,
             #[cfg(feature = "native")]
             rt,
@@ -229,13 +228,17 @@ impl RustyBenchApp {
     /// On native: spawns the raw read-loop directly (matching the CLI's proven
     /// pattern), avoiding the `select!` wrapper in `run_acquisition`.
     /// On web: spawns via `wasm-bindgen-futures::spawn_local`.
+    #[allow(unused_mut)]
     fn spawn_acquisition(&mut self, mut handle: DeviceHandle) -> DeviceAcquisition {
         let analog = handle.analog_traces().to_vec();
         let digital = handle.digital_trace().cloned();
 
         #[cfg(target_arch = "wasm32")]
         {
-            let web_handle = rb_core::runtime::web::spawn_local(handle, 512);
+            let web_handle = rb_core::runtime::web::spawn_local(handle);
+            // The spawned run_acquisition future waits for a Start command
+            // before arming the device — send it now so streaming begins.
+            let _ = web_handle.commands.unbounded_send(AcquisitionCommand::Start);
             return DeviceAcquisition {
                 analog,
                 digital,
@@ -510,8 +513,15 @@ impl RustyBenchApp {
     }
 
     /// Run the executor for one tick.  Abstracts over native (tokio
-    /// `LocalSet` with timeout) and non-native (`LocalPool`).
+    /// `LocalSet` with timeout), web (no-op — `wasm-bindgen-futures` drives
+    /// acquisition tasks), and non-native (`LocalPool`).
     fn pump_once(&mut self) {
+        // On WASM, acquisition futures run on `wasm-bindgen-futures`, not the
+        // `LocalPool`.  The browser's microtask queue drives them; we only need
+        // to drain data here.
+        #[cfg(target_arch = "wasm32")]
+        return;
+
         #[cfg(feature = "native")]
         {
             // Drive tokio's LocalSet for a short window — matching what
@@ -525,7 +535,7 @@ impl RustyBenchApp {
                 .await;
             });
         }
-        #[cfg(not(feature = "native"))]
+        #[cfg(not(any(feature = "native", target_arch = "wasm32")))]
         self.pool.run_until_stalled();
     }
 }
