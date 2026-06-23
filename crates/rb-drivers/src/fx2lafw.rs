@@ -104,6 +104,19 @@ const MAX_RENUM_DELAY_MS: u64 = 3000;
 /// Poll interval during renumeration wait.
 const RENUM_POLL_MS: u64 = 100;
 
+// -- Transfer buffer sizing --------------
+
+/// Maximum number of concurrent bulk-IN transfers.
+const NUM_SIMUL_TRANSFERS: usize = 32;
+/// Consecutive empty transfers before assuming the device has stalled.
+const MAX_EMPTY_TRANSFERS: usize = NUM_SIMUL_TRANSFERS * 2;
+/// Buffer alignment (round buffer sizes up to multiples of 512).
+const BUFFER_ALIGN: usize = 512;
+/// Each transfer buffer should hold this many milliseconds of sample data.
+const BUFFER_DURATION_MS: f64 = 10.0;
+/// Total queued buffer capacity (across all transfers) in milliseconds.
+const TOTAL_BUFFER_DURATION_MS: f64 = 500.0;
+
 // ── Configuration ─────────────────────────────────────────────────────────────
 
 /// fx2lafw driver configuration.
@@ -184,6 +197,31 @@ fn start_flags(sample_wide: bool, clock_48mhz: bool, _analog_enabled: bool) -> u
     flags
 }
 
+// ── Transfer buffer sizing ─────────────────────────
+
+/// Bytes per millisecond at the given sample rate.
+fn to_bytes_per_ms(samplerate_hz: f64, sample_wide: bool) -> f64 {
+    let bytes_per_sample = if sample_wide { 2.0 } else { 1.0 };
+    samplerate_hz * bytes_per_sample / 1000.0
+}
+
+/// Compute a single transfer buffer size: `BUFFER_DURATION_MS` of data,
+/// rounded up to the next multiple of [`BUFFER_ALIGN`].
+fn compute_buffer_size(samplerate_hz: f64, sample_wide: bool) -> usize {
+    let s = BUFFER_DURATION_MS * to_bytes_per_ms(samplerate_hz, sample_wide);
+    // Round up to BUFFER_ALIGN (512).
+    let s = (s as usize).max(1);
+    (s + BUFFER_ALIGN - 1) & !(BUFFER_ALIGN - 1)
+}
+
+/// Number of concurrent transfers needed for ~500ms total buffering,
+/// capped at [`NUM_SIMUL_TRANSFERS`].
+fn compute_num_transfers(samplerate_hz: f64, sample_wide: bool) -> usize {
+    let n = (TOTAL_BUFFER_DURATION_MS * to_bytes_per_ms(samplerate_hz, sample_wide)
+        / compute_buffer_size(samplerate_hz, sample_wide) as f64) as usize;
+    n.clamp(1, NUM_SIMUL_TRANSFERS)
+}
+
 // ── Device ─────────────────────────────────────────────────────────────────────
 
 /// An fx2lafw-based logic analyzer device.
@@ -212,6 +250,10 @@ pub struct Fx2lafwDevice {
     channels: Vec<DigitalChannel>,
     /// Whether acquisition has been started (shared with read-loop future).
     running: Arc<AtomicBool>,
+    /// Pre-computed arm state: start-acquisition flags (set by `arm()`).
+    arm_flags: u8,
+    /// Pre-computed arm state: GPIF delay (set by `arm()`).
+    arm_delay: u16,
 }
 
 impl Fx2lafwDevice {
@@ -248,6 +290,8 @@ impl Fx2lafwDevice {
             actual_rate: 0.0,
             channels,
             running: Arc::new(AtomicBool::new(false)),
+            arm_flags: 0,
+            arm_delay: 0,
         }
     }
 
@@ -426,15 +470,17 @@ impl LogicAnalyzer for Fx2lafwDevice {
             .await
             .map_err(|e| DeviceError::Transport(format!("clear_in_halt before arm: {e}")))?;
 
+        // Compute delay and flags now, but defer the actual GPIF start
+        // to `start_streaming()`.  This lets `start_streaming()` queue all
+        // USB bulk-IN transfers BEFORE starting the GPIF engine — otherwise
+        // the FX2's tiny EP2 buffer overflows immediately.
         let dc = compute_delay(self.config.sample_rate_hz);
         let clock_48mhz = (dc.clock_hz - CLOCK_48MHZ).abs() < 1.0;
-        let flags = start_flags(self.sample_wide, clock_48mhz, false);
-
-        start_acquisition(self.transport_mut(), flags, dc.delay).await?;
-
+        self.arm_flags = start_flags(self.sample_wide, clock_48mhz, false);
+        self.arm_delay = dc.delay;
         self.clock_hz = dc.clock_hz;
         self.actual_rate = dc.actual_rate_hz;
-        self.running.store(true, Ordering::SeqCst);
+
         Ok(())
     }
 
@@ -459,17 +505,36 @@ impl AcquisitionSource for Fx2lafwDevice {
             .ok_or_else(|| DeviceError::Protocol("acquisition already running".into()))?;
         let sample_wide = self.sample_wide;
         let running = self.running.clone();
-        running.store(true, Ordering::SeqCst);
+        let arm_flags = self.arm_flags;
+        let arm_delay = self.arm_delay;
+        let sample_rate_hz = self.actual_rate;
+
+        // ── Compute adaptive buffer sizing ────────────────
+        let buffer_size = compute_buffer_size(sample_rate_hz, sample_wide);
+        let num_transfers = compute_num_transfers(sample_rate_hz, sample_wide);
+        log::debug!(
+            "fx2lafw: adaptive buffer: {} transfers × {} bytes (rate={:.0} Hz, wide={})",
+            num_transfers, buffer_size, sample_rate_hz, sample_wide
+        );
 
         let fut = async move {
             let mut buf = Vec::new();
+            let mut empty_transfer_count: usize = 0;
 
-            // Keep ~8 transfers in flight to saturate the USB pipe.
-            // This prevents the fx2lafw firmware's small EP2 buffer from
-            // filling up and permanently stalling the GPIF engine.
-            for _ in 0..8 {
-                transport.submit_bulk_in(vec![0u8; 4096]);
+            // ── Submit transfers FIRST, BEFORE starting the GPIF engine ────
+            // This is the critical ordering fix: by the time the FX2 starts
+            // producing data, USB transfers are already queued to receive it.
+            for _ in 0..num_transfers {
+                transport.submit_bulk_in(vec![0u8; buffer_size]);
             }
+
+            // ── Now start the GPIF engine ──────────────────────────────────
+            if let Err(e) = start_acquisition(&mut *transport, arm_flags, arm_delay).await {
+                log::error!("fx2lafw: start_acquisition failed: {e}");
+                running.store(false, Ordering::SeqCst);
+                return;
+            }
+            running.store(true, Ordering::SeqCst);
 
             loop {
                 if !running.load(Ordering::SeqCst) {
@@ -487,18 +552,30 @@ impl AcquisitionSource for Fx2lafwDevice {
                 // Read from USB EP2 IN — suspends until data arrives.
                 match transport.next_bulk_in().await {
                     Ok(data) if data.is_empty() => {
-                        log::info!("fx2lafw: USB read returned EOF");
-                        running.store(false, Ordering::SeqCst);
+                        empty_transfer_count += 1;
+                        if empty_transfer_count > MAX_EMPTY_TRANSFERS {
+                            log::warn!(
+                                "fx2lafw: {} consecutive empty transfers — \
+                                 device stalled (buffer overflow?)",
+                                empty_transfer_count
+                            );
+                            running.store(false, Ordering::SeqCst);
+                        } else {
+                            // Re-submit the (empty) buffer and keep waiting.
+                            transport.submit_bulk_in(data);
+                        }
                     }
                     Err(e) => {
                         log::warn!("fx2lafw: USB read error: {e}");
                         running.store(false, Ordering::SeqCst);
                     }
                     Ok(data) => {
-                        log::trace!("fx2lafw: USB read got {} bytes", data.len());
+                        empty_transfer_count = 0;
                         buf.extend_from_slice(&data);
-                        // Re-submit immediately to keep the pipe saturated.
-                        transport.submit_bulk_in(vec![0u8; 4096]);
+                        // Re-submit the SAME buffer (buffer reuse).
+                        // This reuses the buffer that just completed instead
+                        // of allocating a new `Vec<u8>` on every transfer.
+                        transport.submit_bulk_in(data);
 
                         // Decode as many complete samples as possible and send.
                         let sample_bytes = if sample_wide { 2 } else { 1 };
@@ -698,7 +775,7 @@ struct DeviceProfile {
     has_16bit: bool,
 }
 
-/// Known fx2lafw-compatible devices (matches sigrok's `supported_fx2[]`).
+/// Known fx2lafw-compatible devices.
 static SUPPORTED_DEVICES: &[DeviceProfile] = &[
     // Cypress FX2 (no EEPROM) — bootloader VID/PID
     DeviceProfile {
@@ -1273,11 +1350,11 @@ mod tests {
     }
 
     #[test]
-    fn arm_sends_correct_start_command() {
+    fn arm_computes_config_but_does_not_start_acquisition() {
         let mut transport = MockUsbTransport::new();
         transport.queue_control_response([1, 4]); // fw version
         transport.queue_control_response([1]); // revid
-        transport.queue_control_response([]); // start_acquisition response
+        // NOTE: no start_acquisition response queued — arm() does not send it.
 
         let mut dev = Fx2lafwDevice::new(
             DeviceId::new("test"),
@@ -1292,17 +1369,19 @@ mod tests {
         block_on(dev.open()).unwrap();
         block_on(dev.arm()).unwrap();
 
-        // After arm(), the MockUsbTransport should have recorded the control transfers.
-        // We can't access it after the move, but arm() succeeded.
+        // arm() stores the computed config but does NOT start the GPIF yet.
+        // running is still false (set later in start_streaming).
+        assert!(!dev.running.load(Ordering::SeqCst));
+        // The delay should be computed for 1 MHz: 48-1=47, actual=1MHz, clock=48MHz
+        assert!((dev.actual_rate - 1_000_000.0).abs() < 1.0);
+        assert!((dev.clock_hz - CLOCK_48MHZ).abs() < 1.0);
     }
 
     #[test]
-    fn arm_with_mock_transport_verifies_protocol() {
+    fn arm_stores_flags_for_48mhz_clock() {
         let mut transport = MockUsbTransport::new();
-        // Queue: fw version, revid, start_acquisition response
         transport.queue_control_response([1, 4]);
         transport.queue_control_response([1]);
-        transport.queue_control_response([]);
 
         let mut dev = Fx2lafwDevice::new(
             DeviceId::new("test"),
@@ -1316,8 +1395,10 @@ mod tests {
 
         block_on(dev.open()).unwrap();
         block_on(dev.arm()).unwrap();
-        assert!(dev.running.load(Ordering::SeqCst));
+        assert!(!dev.running.load(Ordering::SeqCst));
         // At 48 MHz, delay should be 0, flags should be 8-bit + 48 MHz clock.
+        assert_eq!(dev.arm_delay, 0);
+        assert_ne!(dev.arm_flags & FLAG_CLK_48MHZ, 0);
     }
 
     // ── Direct protocol tests (MockUsbTransport, no device wrapper) ──────────
@@ -1670,12 +1751,17 @@ mod tests {
     }
 
     #[test]
-    fn streaming_handles_empty_transport_read() {
+    fn streaming_handles_empty_reads_with_counting() {
+        // Empty transfers are counted, not treated as immediate EOF.
+        // After MAX_EMPTY_TRANSFERS+1 consecutive empties, the loop stops.
         let mut transport = MockUsbTransport::new();
         transport.queue_control_response([1, 4]);
         transport.queue_control_response([1]);
         transport.queue_control_response([]);
-        // No queued read → EOF → read loop exits.
+        // Queue enough empty reads to trigger the empty-transfer threshold.
+        for _ in 0..(MAX_EMPTY_TRANSFERS + 2) {
+            transport.queue_read(&[]);
+        }
 
         let mut dev = opened_armed_device(transport, 8);
         let (tx, mut rx) = mpsc::unbounded();
@@ -1684,12 +1770,36 @@ mod tests {
         let mut pool = futures::executor::LocalPool::new();
         pool.spawner().spawn_local(read_loop).unwrap();
 
-        // Read loop exits immediately on EOF.
+        // No data should be produced — all reads are empty.
         let chunk = pool.run_until(rx.next());
-        // EOF may result in None or empty chunk depending on timing.
-        // Either way, no data was produced.
         assert!(chunk.is_none() || chunk.unwrap().is_empty());
 
+        pool.run_until_stalled();
+    }
+
+    #[test]
+    fn streaming_recovers_from_transient_empty_transfer() {
+        // A single empty transfer does NOT stop acquisition — empty counting resets
+        // when a non-empty transfer arrives.
+        let mut transport = MockUsbTransport::new();
+        transport.queue_control_response([1, 4]);
+        transport.queue_control_response([1]);
+        transport.queue_control_response([]);
+        transport.queue_read(&[]); // transient empty
+        transport.queue_read([0xAA]); // data arrives → counter resets
+        transport.queue_read(&[]); // EOF, will be counted
+
+        let mut dev = opened_armed_device(transport, 8);
+        let (tx, mut rx) = mpsc::unbounded();
+        let read_loop = block_on(dev.start_streaming(tx)).unwrap();
+
+        let mut pool = futures::executor::LocalPool::new();
+        pool.spawner().spawn_local(read_loop).unwrap();
+
+        let chunk = pool.run_until(rx.next()).unwrap();
+        assert_eq!(chunk.logic(), &[0xAA]);
+
+        drop(rx);
         pool.run_until_stalled();
     }
 
@@ -1802,5 +1912,55 @@ mod tests {
     fn is_bootloader_detects_cypress() {
         assert!(is_bootloader(0x04B4, 0x8613));
         assert!(!is_bootloader(0x1D50, 0x608C));
+    }
+
+    // ── Adaptive buffer sizing ─────────────────────────────────────────────
+
+    #[test]
+    fn buffer_size_8bit_1mhz() {
+        // 1 MHz, 8-bit: 1e6 bytes/s = 1000 bytes/ms. 10ms → 10000, round up to 512 → 10240.
+        let sz = compute_buffer_size(1_000_000.0, false);
+        assert_eq!(sz, 10240);
+    }
+
+    #[test]
+    fn buffer_size_8bit_5mhz() {
+        // 5 MHz, 8-bit: 5e6 bytes/s = 5000 bytes/ms. 10ms → 50000, round → 50176.
+        let sz = compute_buffer_size(5_000_000.0, false);
+        assert_eq!(sz, 50176);
+    }
+
+    #[test]
+    fn buffer_size_16bit_1mhz() {
+        // 1 MHz, 16-bit: 2e6 bytes/s = 2000 bytes/ms. 10ms → 20000, round → 20480.
+        let sz = compute_buffer_size(1_000_000.0, true);
+        assert_eq!(sz, 20480);
+    }
+
+    #[test]
+    fn buffer_size_rounds_up_to_512() {
+        // Very low rate: 100 Hz, 8-bit → 100 bytes/s = 0.1 bytes/ms. 10ms → 1, round to 512.
+        let sz = compute_buffer_size(100.0, false);
+        assert_eq!(sz, 512);
+    }
+
+    #[test]
+    fn num_transfers_capped_at_max() {
+        // 48 MHz, 16-bit: very high throughput → should hit NUM_SIMUL_TRANSFERS cap.
+        let n = compute_num_transfers(48_000_000.0, true);
+        assert_eq!(n, NUM_SIMUL_TRANSFERS);
+    }
+
+    #[test]
+    fn num_transfers_at_least_one() {
+        let n = compute_num_transfers(1.0, false);
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn num_transfers_1mhz_8bit() {
+        // 1 MHz, 8-bit: buffer=10240, total=500ms*1000B/ms=500KB, 500000/10240≈48 → cap 32.
+        let n = compute_num_transfers(1_000_000.0, false);
+        assert_eq!(n, 32);
     }
 }
