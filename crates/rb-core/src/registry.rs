@@ -20,14 +20,24 @@ pub struct ScanResult {
 /// factory per Cargo-enabled driver. Front-ends scan across all drivers and then
 /// connect a chosen candidate by driver name.
 pub struct DriverRegistry {
-    factories: Vec<Box<dyn DriverFactory>>,
+    factories: std::rc::Rc<Vec<Box<dyn DriverFactory>>>,
+}
+
+impl Clone for DriverRegistry {
+    fn clone(&self) -> Self {
+        Self {
+            factories: self.factories.clone(),
+        }
+    }
 }
 
 impl DriverRegistry {
     /// Builds a registry from an explicit list of factories.
     #[must_use]
     pub fn new(factories: Vec<Box<dyn DriverFactory>>) -> Self {
-        Self { factories }
+        Self {
+            factories: std::rc::Rc::new(factories),
+        }
     }
 
     /// Builds a registry from the drivers enabled at compile time.
@@ -60,7 +70,7 @@ impl DriverRegistry {
     /// Returns the first [`SessionError::Driver`] if any driver's scan fails.
     pub async fn scan_all(&self) -> Result<Vec<ScanResult>, SessionError> {
         let mut results = Vec::new();
-        for factory in &self.factories {
+        for factory in self.factories.iter() {
             for candidate in factory.scan().await? {
                 results.push(ScanResult {
                     driver: factory.name().to_string(),
@@ -102,16 +112,16 @@ mod tests {
         assert!(registry.factories().iter().any(|f| f.name() == "demo"));
     }
 
-    #[test]
-    fn scan_all_then_connect_yields_a_demo_device() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn scan_all_then_connect_yields_a_demo_device() {
         let registry = DriverRegistry::with_default_factories();
-        let results = block_on(registry.scan_all()).unwrap();
+        let results = registry.scan_all().await.unwrap();
         let demo = results
             .iter()
             .find(|r| r.driver == "demo")
             .expect("demo candidate present");
 
-        let device = block_on(registry.connect("demo", &demo.candidate)).unwrap();
+        let device = registry.connect("demo", &demo.candidate).await.unwrap();
         assert!(device.as_oscilloscope().is_some());
         assert!(device.as_logic_analyzer().is_some());
     }

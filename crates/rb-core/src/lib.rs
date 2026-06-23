@@ -32,37 +32,42 @@ pub use session::Session;
 mod tests {
     use super::*;
     use futures::StreamExt;
-    use futures::executor::block_on;
-    use futures::task::LocalSpawnExt;
 
-    #[test]
-    fn end_to_end_scan_connect_acquire() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn end_to_end_scan_connect_acquire() {
         // Discover the demo device, register it in a session and acquire.
         let registry = DriverRegistry::with_default_factories();
-        let results = block_on(registry.scan_all()).unwrap();
+        let results = registry.scan_all().await.unwrap();
         let demo = results
             .iter()
             .find(|r| r.driver == "demo")
             .expect("demo candidate present");
-        let device = block_on(registry.connect("demo", &demo.candidate)).unwrap();
+        let device = registry.connect("demo", &demo.candidate).await.unwrap();
 
         let mut session = Session::new();
         let id = session.add_device(device);
 
         let handle = session.device_mut(&id).unwrap();
-        let (read_loop, mut data_rx) = block_on(handle.start_streaming()).unwrap();
+        let (read_loop, mut data_rx) = handle.start_streaming().await.unwrap();
 
-        let mut pool = futures::executor::LocalPool::new();
-        pool.spawner().spawn_local(read_loop).unwrap();
+        let local_set = tokio::task::LocalSet::new();
+        local_set.spawn_local(read_loop);
 
-        let chunk = pool.run_until(data_rx.next()).unwrap();
+        let chunk = local_set.run_until(data_rx.next()).await.unwrap();
         handle.ingest_chunk(&chunk);
 
+        // Stop streaming so the read-loop future exits.
+        handle.apply(AcquisitionCommand::Stop).await.unwrap();
         drop(data_rx);
-        pool.run_until_stalled();
+        // Run remaining tasks until the read-loop exits or we time out.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            local_set.run_until(futures::future::pending::<()>()),
+        )
+        .await;
 
         let handle = session.device(&id).unwrap();
-        assert_eq!(handle.state(), &AcquisitionState::Running);
+        assert_eq!(handle.state(), &AcquisitionState::Stopped);
         assert!(handle.sample_count() > 0, "should have streamed samples");
         assert_eq!(handle.analog_traces()[0].len(), handle.sample_count());
         assert_eq!(handle.digital_trace().unwrap().len(), handle.sample_count());

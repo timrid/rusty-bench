@@ -33,6 +33,22 @@ pub fn factories() -> Vec<Box<dyn DriverFactory>> {
     factories
 }
 
+/// Collects all known USB VID/PID pairs from every driver enabled at compile
+/// time.  Useful for building WebUSB `requestDevice()` filters so the browser
+/// can show a permission dialog for any supported device.
+///
+/// Synthetic drivers (like `demo`) contribute nothing; only drivers backed by
+/// real USB hardware add entries.
+#[must_use]
+pub fn known_usb_vid_pids() -> Vec<(u16, u16)> {
+    let mut v: Vec<(u16, u16)> = Vec::new();
+    #[cfg(feature = "demo")]
+    v.extend(demo::known_vid_pids());
+    #[cfg(feature = "fx2lafw")]
+    v.extend(fx2lafw::known_vid_pids());
+    v
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

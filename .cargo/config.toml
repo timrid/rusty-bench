@@ -1,0 +1,5 @@
+# Enable unstable WebUSB APIs in web-sys (required by nusb webusb branch).
+# The WebUSB specification is still a draft; web-sys gates these behind this cfg.
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg=web_sys_unstable_apis"]
+

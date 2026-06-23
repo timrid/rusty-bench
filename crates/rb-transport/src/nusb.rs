@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use nusb::{
-    Interface, MaybeFuture,
+    Interface,
     transfer::{Bulk, ControlIn, ControlOut, ControlType, Direction, In, Out, Recipient},
 };
 
@@ -171,7 +171,7 @@ impl UsbTransport for NusbTransport {
                         },
                         CONTROL_TIMEOUT,
                     )
-                    .wait()
+                    .await
                     .map_err(|e| TransportError::Io(format!("USB control IN: {e}")))
             }
             Direction::Out => {
@@ -187,7 +187,7 @@ impl UsbTransport for NusbTransport {
                         },
                         CONTROL_TIMEOUT,
                     )
-                    .wait()
+                    .await
                     .map_err(|e| TransportError::Io(format!("USB control OUT: {e}")))?;
                 Ok(Vec::new())
             }
@@ -203,7 +203,7 @@ impl UsbTransport for NusbTransport {
     async fn clear_in_halt(&mut self) -> TransportResult<()> {
         if let Some(ref mut ep) = self.ep_in {
             ep.clear_halt()
-                .wait()
+                .await
                 .map_err(|e| TransportError::Io(format!("clear_in_halt: {e}")))?;
         }
         Ok(())

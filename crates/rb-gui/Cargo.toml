@@ -11,6 +11,7 @@ authors.workspace = true
 rb-core.workspace = true
 rb-decode.workspace = true
 rb-device.workspace = true
+rb-drivers.workspace = true
 rb-model.workspace = true
 eframe.workspace = true
 futures.workspace = true
@@ -20,12 +21,18 @@ wasm-bindgen-futures = { workspace = true, optional = true }
 # Native spawner (non-wasm).
 tokio = { workspace = true, optional = true, features = ["rt", "time"] }
 
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen.workspace = true
+web-sys = { workspace = true, features = ["Navigator", "Usb", "UsbDeviceFilter", "UsbDeviceRequestOptions"] }
+
 [dev-dependencies]
 rb-drivers = { workspace = true, features = ["fx2lafw"] }
 rb-transport.workspace = true
 async-trait.workspace = true
+tokio = { workspace = true, features = ["rt", "time"] }
 
 [features]
 default = []
 web = ["rb-core/web", "dep:wasm-bindgen-futures"]
 native = ["rb-core/native", "dep:tokio"]
+fx2lafw = ["rb-core/fx2lafw"]

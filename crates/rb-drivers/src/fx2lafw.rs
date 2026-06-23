@@ -31,8 +31,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use async_trait::async_trait;
 use futures::channel::mpsc;
 
-use nusb::MaybeFuture;
-
 use rb_device::{
     AcquisitionSource, Device, DeviceClass, DeviceError, DeviceId, DeviceInfo, DeviceResult,
     LogicAnalyzer,
@@ -810,6 +808,16 @@ fn is_bootloader(vid: u16, pid: u16) -> bool {
     vid == CYPRESS_VID && pid == CYPRESS_PID
 }
 
+/// Returns the list of known fx2lafw-compatible VID/PID pairs.
+/// Useful for building WebUSB `requestDevice()` filters.
+#[must_use]
+pub fn known_vid_pids() -> Vec<(u16, u16)> {
+    SUPPORTED_DEVICES
+        .iter()
+        .map(|p| (p.vid, p.pid))
+        .collect()
+}
+
 // ── Driver factory ────────────────────────────────────────────────────────────
 
 /// Driver factory for fx2lafw-based logic analyzers.
@@ -869,7 +877,7 @@ impl DriverFactory for Fx2lafwFactory {
 #[cfg(feature = "fx2lafw")]
 async fn scan_usb() -> DriverResult<Vec<DeviceCandidate>> {
     let devices = nusb::list_devices()
-        .wait()
+        .await
         .map_err(|e| DriverError::Transport(rb_transport::TransportError::Io(e.to_string())))?;
 
     let mut results = Vec::new();
@@ -925,13 +933,13 @@ async fn connect_usb(candidate: &DeviceCandidate) -> DriverResult<Box<dyn Device
     let dev_info = find_usb_device(target_vid, target_pid, target_serial).await?;
     let device = dev_info
         .open()
-        .wait()
+        .await
         .map_err(|e| DriverError::Transport(rb_transport::TransportError::Io(e.to_string())))?;
 
     // Claim interface 0 (the only interface fx2lafw exposes).
     let interface = device
         .detach_and_claim_interface(0)
-        .wait()
+        .await
         .map_err(|e| DriverError::Transport(rb_transport::TransportError::Io(e.to_string())))?;
 
     // fx2lafw firmware only uses EP2 IN (0x82) for sample data.
@@ -965,12 +973,12 @@ pub async fn upload_firmware_and_connect(
     let boot_dev_info = find_usb_device(CYPRESS_VID, CYPRESS_PID, boot_serial).await?;
     let boot_device = boot_dev_info
         .open()
-        .wait()
+        .await
         .map_err(|e| DriverError::Transport(rb_transport::TransportError::Io(e.to_string())))?;
 
     let interface = boot_device
         .detach_and_claim_interface(0)
-        .wait()
+        .await
         .map_err(|e| DriverError::Transport(rb_transport::TransportError::Io(e.to_string())))?;
 
     let mut transport: Box<dyn UsbTransport> = Box::new(rb_transport::nusb::NusbTransport::new(
@@ -986,14 +994,12 @@ pub async fn upload_firmware_and_connect(
     drop(transport);
 
     // 3. Wait for renumeration — poll until a fx2lafw device appears.
-    let start = std::time::Instant::now();
-    loop {
-        // Small delay between polls.
-        #[cfg(not(target_arch = "wasm32"))]
-        std::thread::sleep(std::time::Duration::from_millis(RENUM_POLL_MS));
+    let max_polls = (MAX_RENUM_DELAY_MS / RENUM_POLL_MS) as usize;
+    for _ in 0..max_polls {
+        futures_timer::Delay::new(std::time::Duration::from_millis(RENUM_POLL_MS)).await;
 
         let devices = nusb::list_devices()
-            .wait()
+            .await
             .map_err(|e| DriverError::Transport(rb_transport::TransportError::Io(e.to_string())))?;
 
         for dev in devices {
@@ -1015,20 +1021,18 @@ pub async fn upload_firmware_and_connect(
                 }
             }
         }
-
-        if start.elapsed().as_millis() as u64 >= MAX_RENUM_DELAY_MS as u64 {
-            return Err(DriverError::Transport(rb_transport::TransportError::Io(
-                "device did not re-enumerate after firmware upload".into(),
-            )));
-        }
     }
+
+    Err(DriverError::Transport(rb_transport::TransportError::Io(
+        "device did not re-enumerate after firmware upload".into(),
+    )))
 }
 
 /// Find a USB device by VID, PID, and optional serial.
 #[cfg(feature = "fx2lafw")]
 async fn find_usb_device(vid: u16, pid: u16, serial: &str) -> DriverResult<nusb::DeviceInfo> {
     nusb::list_devices()
-        .wait()
+        .await
         .map_err(|e| DriverError::Transport(rb_transport::TransportError::Io(e.to_string())))?
         .find(|dev| {
             dev.vendor_id() == vid

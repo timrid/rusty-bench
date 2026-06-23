@@ -104,9 +104,10 @@ pub struct RustyBenchApp {
     #[cfg(not(any(feature = "native", target_arch = "wasm32")))]
     #[allow(dead_code)]
     spawner: LocalSpawner,
-    /// Tokio runtime + LocalSet for native builds (proper I/O integration).
+    /// Tokio runtime for blocking Ops (non-WASM).
     #[cfg(feature = "native")]
     rt: tokio::runtime::Runtime,
+    /// Tokio LocalSet for native builds (proper I/O integration).
     #[cfg(feature = "native")]
     local_set: LocalSet,
     // Deferred actions.
@@ -114,6 +115,12 @@ pub struct RustyBenchApp {
     pending_disconnect: Option<DeviceId>,
     pending_start: Option<DeviceId>,
     pending_stop: Option<DeviceId>,
+    /// Receiver for a pending WASM scan (spawned via `spawn_local`).
+    #[cfg(target_arch = "wasm32")]
+    pending_wasm_scan: Option<futures::channel::oneshot::Receiver<Result<Vec<ScanResult>, String>>>,
+    /// Receiver for a pending WASM connect (spawned via `spawn_local`).
+    #[cfg(target_arch = "wasm32")]
+    pending_wasm_connect: Option<futures::channel::oneshot::Receiver<Result<Box<dyn rb_device::Device>, String>>>,
 }
 
 impl RustyBenchApp {
@@ -132,14 +139,12 @@ impl RustyBenchApp {
             (p, s)
         };
         #[cfg(feature = "native")]
-        let (rt, local_set) = {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_time()
-                .build()
-                .expect("tokio runtime");
-            let ls = LocalSet::new();
-            (rt, ls)
-        };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("tokio runtime");
+        #[cfg(feature = "native")]
+        let local_set = LocalSet::new();
         let ids: Vec<DeviceId> = session.device_ids();
         let selected_device = ids.into_iter().next();
         Self {
@@ -163,6 +168,10 @@ impl RustyBenchApp {
             pending_disconnect: None,
             pending_start: None,
             pending_stop: None,
+            #[cfg(target_arch = "wasm32")]
+            pending_wasm_scan: None,
+            #[cfg(target_arch = "wasm32")]
+            pending_wasm_connect: None,
         }
     }
 }
@@ -180,13 +189,28 @@ impl RustyBenchApp {
 
     fn apply_pending_actions(&mut self) {
         if let Some(result) = self.pending_connect.take() {
-            match block_on(self.registry.connect(&result.driver, &result.candidate)) {
-                Ok(device) => {
-                    let id = self.session.add_device(device);
-                    self.selected_device = Some(id);
-                    self.connect_error = None;
-                }
-                Err(e) => self.connect_error = Some(e.to_string()),
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                #[cfg(feature = "native")]
+                let connect_result = self.rt.block_on(self.registry.connect(&result.driver, &result.candidate));
+                #[cfg(all(not(feature = "native"), not(target_arch = "wasm32")))]
+                let connect_result = futures::executor::block_on(self.registry.connect(&result.driver, &result.candidate));
+                Self::apply_connect_result(connect_result, &mut self.session, &mut self.selected_device, &mut self.connect_error);
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                // Spawn async connect via wasm-bindgen-futures.
+                let registry = self.registry.clone();
+                let driver = result.driver.clone();
+                let candidate = result.candidate.clone();
+                let (tx, rx) = futures::channel::oneshot::channel();
+                wasm_bindgen_futures::spawn_local(async move {
+                    let r = registry.connect(&driver, &candidate).await
+                        .map_err(|e| e.to_string());
+                    let _ = tx.send(r);
+                });
+                self.pending_wasm_connect = Some(rx);
+                return; // Result arrives next frame.
             }
         }
 
@@ -218,8 +242,62 @@ impl RustyBenchApp {
                 acq.send_command(AcquisitionCommand::Stop);
                 acq.state = AcquisitionState::Stopped;
             } else if let Some(handle) = self.session.device_mut(&id) {
-                let _ = block_on(handle.apply(AcquisitionCommand::Stop));
+                #[cfg(feature = "native")]
+                let _ = self.rt.block_on(handle.apply(AcquisitionCommand::Stop));
+                #[cfg(all(not(feature = "native"), not(target_arch = "wasm32")))]
+                let _ = futures::executor::block_on(handle.apply(AcquisitionCommand::Stop));
             }
+        }
+
+        // Check for completed WASM scan.
+        #[cfg(target_arch = "wasm32")]
+        if let Some(mut rx) = self.pending_wasm_scan.take() {
+            if let Ok(Some(result)) = rx.try_recv() {
+                match result {
+                    Ok(results) => {
+                        self.scan_results = results;
+                        self.scan_error = None;
+                    }
+                    Err(e) => {
+                        self.scan_results.clear();
+                        self.scan_error = Some(e);
+                    }
+                }
+            } else {
+                // Not yet ready; put it back for the next frame.
+                self.pending_wasm_scan = Some(rx);
+            }
+        }
+        // Check for completed WASM connect.
+        #[cfg(target_arch = "wasm32")]
+        if let Some(mut rx) = self.pending_wasm_connect.take() {
+            if let Ok(Some(result)) = rx.try_recv() {
+                Self::apply_connect_result(
+                    result,
+                    &mut self.session,
+                    &mut self.selected_device,
+                    &mut self.connect_error,
+                );
+            } else {
+                self.pending_wasm_connect = Some(rx);
+            }
+        }
+    }
+
+    /// Apply a connect result (shared by sync and async paths).
+    fn apply_connect_result(
+        result: Result<Box<dyn rb_device::Device>, impl ToString>,
+        session: &mut Session,
+        selected_device: &mut Option<DeviceId>,
+        connect_error: &mut Option<String>,
+    ) {
+        match result {
+            Ok(device) => {
+                let id = session.add_device(device);
+                *selected_device = Some(id);
+                *connect_error = None;
+            }
+            Err(e) => *connect_error = Some(e.to_string()),
         }
     }
 
@@ -254,8 +332,11 @@ impl RustyBenchApp {
             let (cmd_tx, cmd_rx) = mpsc::unbounded::<AcquisitionCommand>();
             let (data_tx, data_rx) = mpsc::unbounded();
 
-            let (read_loop, internal_rx) =
-                match block_on(async { handle.start_streaming().await }) {
+            #[cfg(feature = "native")]
+            let start_result = self.rt.block_on(async { handle.start_streaming().await });
+            #[cfg(not(feature = "native"))]
+            let start_result = futures::executor::block_on(async { handle.start_streaming().await });
+            let (read_loop, internal_rx) = match start_result {
                     Ok((rl, rx)) => (rl, rx),
                     Err(e) => {
                         return DeviceAcquisition {
@@ -371,15 +452,44 @@ impl RustyBenchApp {
         ui.separator();
 
         if ui.button("\u{27F3} Scan").clicked() {
-            match block_on(self.registry.scan_all()) {
-                Ok(results) => {
-                    self.scan_results = results;
-                    self.scan_error = None;
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                #[cfg(feature = "native")]
+                let result = self.rt.block_on(self.registry.scan_all());
+                #[cfg(all(not(feature = "native"), not(target_arch = "wasm32")))]
+                let result = futures::executor::block_on(self.registry.scan_all());
+                match result {
+                    Ok(results) => {
+                        self.scan_results = results;
+                        self.scan_error = None;
+                    }
+                    Err(e) => {
+                        self.scan_results.clear();
+                        self.scan_error = Some(e.to_string());
+                    }
                 }
-                Err(e) => {
-                    self.scan_results.clear();
-                    self.scan_error = Some(e.to_string());
-                }
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                // Spawn async scan via wasm-bindgen-futures; results arrive
+                // on the next frame via apply_pending_actions.
+                // First, request device permission via the WebUSB API.
+                // This must happen within the user-gesture event.
+                let registry = self.registry.clone();
+                let (tx, rx) = futures::channel::oneshot::channel();
+                wasm_bindgen_futures::spawn_local(async move {
+                    // Request any known USB device so it appears in
+                    // subsequent getDevices() calls.
+                    let _ = request_supported_usb_devices().await;
+                    let result = registry
+                        .scan_all()
+                        .await
+                        .map_err(|e| e.to_string());
+                    let _ = tx.send(result);
+                });
+                self.pending_wasm_scan = Some(rx);
+                // Request immediate repaint so results appear on the next frame.
+                ui.ctx().request_repaint();
             }
         }
         if let Some(err) = &self.scan_error {
@@ -569,7 +679,12 @@ impl eframe::App for RustyBenchApp {
             .acquisitions
             .values()
             .any(|a| a.state() == &AcquisitionState::Running);
-        if any_running {
+        #[cfg(target_arch = "wasm32")]
+        let wasm_pending = self.pending_wasm_scan.is_some()
+            || self.pending_wasm_connect.is_some();
+        #[cfg(not(target_arch = "wasm32"))]
+        let wasm_pending = false;
+        if any_running || wasm_pending {
             ui.ctx().request_repaint();
         }
 
@@ -588,11 +703,59 @@ impl eframe::App for RustyBenchApp {
     }
 }
 
+// ── WASM helpers ──────────────────────────────────────────────────────────────
+
+/// Requests permission for all known USB devices via the WebUSB API.
+///
+/// Calls `navigator.usb.requestDevice()` with filters built from every
+/// driver's [`rb_drivers::known_usb_vid_pids`] list.  The browser will show a
+/// permission dialog; once granted, the device will appear in subsequent
+/// `nusb::list_devices()` calls.
+#[cfg(target_arch = "wasm32")]
+async fn request_supported_usb_devices() {
+    use wasm_bindgen_futures::JsFuture;
+
+    let window = match web_sys::window() {
+        Some(w) => w,
+        None => return,
+    };
+    let usb = window.navigator().usb();
+    if usb.is_undefined() {
+        return;
+    }
+
+    let known = ::rb_drivers::known_usb_vid_pids();
+    if known.is_empty() {
+        return;
+    }
+    let mut filters: Vec<web_sys::UsbDeviceFilter> = Vec::new();
+    for (vid, pid) in &known {
+        let filter = web_sys::UsbDeviceFilter::new();
+        filter.set_vendor_id(*vid);
+        filter.set_product_id(*pid);
+        filters.push(filter);
+    }
+
+    let options = web_sys::UsbDeviceRequestOptions::new(&filters);
+
+    // This triggers the browser permission dialog.
+    let _ = JsFuture::from(usb.request_device(&options)).await;
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Block on a future using a temporary tokio runtime (required by nusb).
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(f)
+    }
 
     #[test]
     fn app_initializes_empty() {

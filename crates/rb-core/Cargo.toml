@@ -32,6 +32,8 @@ default = []
 native = ["dep:tokio"]
 # Web acquisition spawner (`wasm-bindgen-futures::spawn_local`).
 web = ["dep:wasm-bindgen-futures"]
+# Forward the fx2lafw driver feature through the crate chain.
+fx2lafw = ["rb-drivers/fx2lafw"]
 
 [dev-dependencies]
 async-trait.workspace = true

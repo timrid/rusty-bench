@@ -363,6 +363,13 @@ impl DriverFactory for DemoFactory {
     }
 }
 
+/// The demo driver is synthetic (no USB hardware), so it contributes no
+/// VID/PID pairs to the central WebUSB filter list.
+#[must_use]
+pub fn known_vid_pids() -> Vec<(u16, u16)> {
+    Vec::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
