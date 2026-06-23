@@ -35,7 +35,7 @@ cargo test --workspace
 cargo run -p rb-gui-native
 
 # Web (requires trunk: cargo install trunk)
-cd crates/rb-gui-web && trunk serve
+trunk serve --config crates/rb-gui-web/Trunk.toml
 
 # Verify wasm compatibility of the whole workspace
 cargo build --workspace --target wasm32-unknown-unknown
