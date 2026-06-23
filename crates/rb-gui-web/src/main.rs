@@ -9,6 +9,9 @@ fn main() {}
 fn main() {
     use wasm_bindgen::JsCast as _;
 
+    // Route all log output (debug, info, warn) to the browser console.
+    console_log::init_with_level(log::Level::max()).expect("console_log setup");
+
     let web_options = eframe::WebOptions::default();
 
     wasm_bindgen_futures::spawn_local(async {
