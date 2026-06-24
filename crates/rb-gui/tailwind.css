@@ -1,0 +1,8 @@
+@import "tailwindcss";
+@source "./src/**/*.rs";
+
+/* RustyBench dark theme overrides */
+body {
+  background: #0e0e10;
+  color: #d4d4d8;
+}

@@ -15,12 +15,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install system dependencies (eframe/egui)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-            libxkbcommon-dev libssl-dev libgtk-3-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -28,10 +22,9 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
-        # rb-gui-web is wasm-only; exclude it from native compilation
-        run: cargo clippy --workspace --all-targets --exclude rb-gui-web
+        run: cargo clippy --workspace --all-targets
       - name: Test
-        run: cargo test --workspace --exclude rb-gui-web
+        run: cargo test --workspace
       - name: Test native acquisition runtime (rb-core `native` feature)
         run: cargo test -p rb-core --features native
 
@@ -53,7 +46,7 @@ jobs:
         with:
           version: latest
       - name: Build web GUI
-        working-directory: crates/rb-gui-web
+        working-directory: crates/rb-gui
         run: trunk build
 
   deny:

@@ -2,7 +2,7 @@
 
 A vendor-independent, pure-Rust suite of electronics bench tools — logic analyzer,
 multimeter, oscilloscope, power supply, waveform generator, SDR receiver, spectrum
-analyzer and electronic load — with a scriptable CLI and an [egui](https://github.com/emilk/egui)
+analyzer and electronic load — with a scriptable CLI and a [Dioxus](https://dioxuslabs.com/)
 GUI that runs **natively and in the browser**.
 
 > Status: fx2lafw device support (milestone **M8**). See [`BACKLOG.md`](BACKLOG.md) for the
@@ -20,25 +20,21 @@ GUI that runs **natively and in the browser**.
 | `rb-drivers`    | Device drivers, one module each, behind Cargo features               |
 | `rb-core`       | Session, driver registry, runtime glue                              |
 | `rb-cli`        | Headless, scriptable single-shot tool                               |
-| `rb-gui`        | Platform-neutral eframe application                                 |
-| `rb-gui-native` | Native GUI entrypoint                                                |
-| `rb-gui-web`    | Web (WASM) GUI entrypoint                                            |
+| `rb-gui`        | Platform-neutral Dioxus application (native + web)               |
 
 `rb-model` and `rb-device` must compile to `wasm32-unknown-unknown` with no feature flags.
 
 ## Build & run
 
 ```sh
-# Native
-cargo build --workspace
-cargo test --workspace
-cargo run -p rb-gui-native
+# Desktop
+dx serve --platform desktop
 
-# Web (requires trunk: cargo install trunk)
-trunk serve --config crates/rb-gui-web/Trunk.toml
+# Web
+dx serve --platform web
 
 # Verify wasm compatibility of the whole workspace
-cargo build --workspace --target wasm32-unknown-unknown
+cargo build --workspace --exclude rb-cli --target wasm32-unknown-unknown
 ```
 
 ## License

@@ -1,0 +1,15 @@
+[application]
+name = "RustyBench"
+default_platform = "desktop"
+
+[dioxus_server]
+port = 3000
+
+[web.app]
+title = "RustyBench"
+
+[web.watcher]
+watch_path = ["src", "assets"]
+
+[platform.desktop]
+# Uses dioxus-desktop (wry) for native window
