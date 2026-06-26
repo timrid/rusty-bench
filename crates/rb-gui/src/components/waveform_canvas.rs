@@ -211,7 +211,7 @@ pub fn WaveformCanvas(
                     let mut canvas_width_px = canvas_width_px;
                     move |_evt| {
                         #[cfg(target_arch = "wasm32")]
-                        if let Some(el) = _evt.data().get_raw_element().downcast_ref::<web_sys::Element>()
+                        if let Some(el) = _evt.data().downcast::<web_sys::Element>()
                         {
                             let w = el.client_width() as f64;
                             if w > 0.0 {
@@ -222,13 +222,20 @@ pub fn WaveformCanvas(
                 },
                 onwheel: move |evt| {
                     evt.prevent_default();
-                    let dy = match evt.data().delta() {
-                        dioxus::html::geometry::WheelDelta::Pixels(v) => v.y,
-                        dioxus::html::geometry::WheelDelta::Lines(v) => v.y * 20.0,
-                        dioxus::html::geometry::WheelDelta::Pages(v) => v.y * 200.0,
+                    let (dx, dy) = match evt.data().delta() {
+                        dioxus::html::geometry::WheelDelta::Pixels(v) => (v.x, v.y),
+                        dioxus::html::geometry::WheelDelta::Lines(v) => (v.x * 20.0, v.y * 20.0),
+                        dioxus::html::geometry::WheelDelta::Pages(v) => (v.x * 200.0, v.y * 200.0),
                     };
-                    let factor: f64 = if dy < 0.0 { 0.8 } else { 1.25 };
-                    view.write().zoom(factor, sample_count);
+                    // Horizontal scroll (Shift+Wheel, touchpad) → pan
+                    if dx.abs() > 0.01 {
+                        // Positive dx (scroll right) → show newer data → increase view_start.
+                        // pan() with positive delta_px decreases view_start, so negate.
+                        view.write().pan(-dx as f32, (canvas_width_px() + LABEL_W) as f32, sample_count);
+                    } else {
+                        let factor: f64 = if dy < 0.0 { 0.8 } else { 1.25 };
+                        view.write().zoom(factor, sample_count);
+                    }
                     data_version += 1;
                 },
                 onmousedown: move |evt| {
@@ -564,7 +571,7 @@ fn wrap_with_resize_observer(js: String) -> String {
     let preamble = &inner[..after_guard];
     let body = &inner[after_guard..];
     format!(
-        "{{{}c.__rbDraw=function(){{try{{{}}}catch(e){{console.error('Redraw error for '+c.id,e);}}}};(window.requestAnimationFrame||function(f){{setTimeout(f,0);}})(function(){{c.__rbDraw();}});if(!c.__rbObs){{c.__rbObs=new ResizeObserver(function(){{c.__rbDraw();}});c.__rbObs.observe(c);}}}}",
+        "{{{}c.__rbDraw=function(){{try{{{}}}catch(e){{console.error('Redraw error for '+c.id,e);}}}};setTimeout(function(){{c.__rbDraw();}},0);if(!c.__rbObs){{c.__rbObs=new ResizeObserver(function(){{c.__rbDraw();}});c.__rbObs.observe(c);}}}}",
         preamble, body
     )
 }
@@ -612,7 +619,7 @@ fn build_analog_signal_js(
     xv.push(']'); mxv.push(']'); mnv.push(']');
     // JS: scale sample index to pixel
     js.push_str(&format!("var xv={xv},mv={mxv},lv={mnv},n=xv.length;"));
-    js.push_str(&format!("function ty(v){{return {sig_h}-((v-{p_lo})/{p_span}*{sig_h});}}"));
+    js.push_str(&format!("function ty(v){{return {sig_h}-((v-({p_lo}))/{p_span}*{sig_h});}}"));
     js.push_str(&format!("function xs(s){{return((s-{range_start})/{range_len})*w;}}"));
     // Fill
     js.push_str(&format!("ctx.fillStyle='{color}1a';ctx.beginPath();ctx.moveTo(xs(xv[0]),ty(mv[0]));"));
