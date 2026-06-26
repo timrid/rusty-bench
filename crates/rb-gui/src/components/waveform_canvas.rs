@@ -1,492 +1,700 @@
-//! Waveform canvas component: renders analog/digital traces via HTML5 `<canvas>`
-//! with pan/zoom support and decoder annotation display.
+//! Waveform display: multi-canvas architecture with HTML overlays.
+//!
+//! Each signal row has its own `<canvas>` (drawing only the waveform).
+//! Labels, markers, cursor line, and time ruler are HTML/CSS elements.
+//! A single `use_effect` draws all canvases on each `data_version` change.
 
 use dioxus::prelude::*;
 use rb_core::AcquisitionState;
+use rb_decode::AnnotationKind;
 use rb_model::AnalogTrace;
 
-use crate::waveform_state::WaveformView;
+use crate::waveform_state::{
+    CursorState, RowKind, TimeMarker, WaveformView, DIVIDER_H, LABEL_W,
+    MARKER_BAR_H, MEASUREMENT_ZONE_H, TIME_RULER_H,
+};
 
 use super::app::AppStateRef;
 
-const ANALOG_ROW_H: f64 = 80.0;
-const DIGITAL_ROW_H: f64 = 22.0;
-const ANNOTATION_ROW_H: f64 = 16.0;
-const LABEL_W: f64 = 36.0;
+// ── Colors ───────────────────────────────────────────────────────────────────
 
-/// Waveform canvas component for one device.
+const ANALOG_COLORS: &[&str] = &[
+    "#facc15", "#60a5fa", "#f87171", "#34d399",
+    "#c084fc", "#fb923c", "#2dd4bf", "#f472b6",
+];
+
+const DIGITAL_COLOR: &str = "#58a6ff";
+const BG_COLOR: &str = "#0d1117";
+const GRID_COLOR: &str = "#1a1a2e";
+const CURSOR_COLOR: &str = "#f0f6fc";
+
+// ── Formatting helpers ───────────────────────────────────────────────────────
+
+fn adaptive_tick_spacing(view_duration_s: f64) -> (f64, usize) {
+    let raw = view_duration_s / 6.0;
+    let iv: &[(f64, usize)] = &[
+        (1e-9,5),(5e-9,5),(10e-9,5),(50e-9,5),(100e-9,5),(500e-9,5),
+        (1e-6,5),(5e-6,5),(10e-6,5),(50e-6,5),(100e-6,5),(500e-6,5),
+        (1e-3,5),(5e-3,5),(10e-3,5),(50e-3,5),(100e-3,5),(500e-3,5),
+        (1.0,4),(5.0,5),(10.0,4),
+    ];
+    for &(s, m) in iv { if s >= raw * 0.5 { return (s, m); } }
+    (10.0, 4)
+}
+
+fn fmt_tick(seconds: f64) -> String {
+    if seconds >= 1.0 { format!("{seconds:.1}s") }
+    else if seconds >= 1e-3 { format!("{:.0}ms", seconds * 1e3) }
+    else if seconds >= 1e-6 { format!("{:.0}µs", seconds * 1e6) }
+    else { format!("{:.0}ns", seconds * 1e9) }
+}
+
+fn fmt_time_ns(ns: f64) -> String {
+    if ns >= 1e9 { format!("{:.3}s", ns / 1e9) }
+    else if ns >= 1e6 { format!("{:.3}ms", ns / 1e6) }
+    else if ns >= 1e3 { format!("{:.3}µs", ns / 1e3) }
+    else { format!("{:.0}ns", ns) }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Main component
+// ═══════════════════════════════════════════════════════════════════════════════
+
 #[component]
 pub fn WaveformCanvas(
     device_id: rb_device::DeviceId,
     data_version: Signal<u64>,
-    view: Signal<WaveformView>,
+    mut view: Signal<WaveformView>,
 ) -> Element {
     let _version = data_version();
-
     let state: AppStateRef = use_context();
 
-    // Gather acquisition data for view update.
-    let (acq_state, digital, sample_count) = {
+    // ── Gather data ───────────────────────────────────────────────────────
+    let (acq_state, analog, digital, sample_count) = {
         let s = state.borrow();
         if let Some(acq) = s.acquisitions.get(&device_id) {
-            (
-                acq.state().clone(),
-                acq.digital_trace().cloned(),
-                acq.sample_count(),
-            )
-        } else if let Some(handle) = s.session.device(&device_id) {
-            (
-                handle.state().clone(),
-                handle.digital_trace().cloned(),
-                handle.sample_count(),
-            )
-        } else {
-            (AcquisitionState::Idle, None, 0)
-        }
+            (acq.state().clone(), acq.analog_traces().to_vec(),
+             acq.digital_trace().cloned(), acq.sample_count())
+        } else if let Some(h) = s.session.device(&device_id) {
+            (h.state().clone(), h.analog_traces().to_vec(),
+             h.digital_trace().cloned(), h.sample_count())
+        } else { (AcquisitionState::Idle, Vec::new(), None, 0) }
     };
+    let is_running = matches!(acq_state, AcquisitionState::Running);
 
-    // Update view: clamp window, feed decoder.
+    // ── Dynamic canvas width (replaces hardcoded 800.0) ────────────────
+    // Default 764 = 800 – LABEL_W (36). Updated on wasm32 via onmounted
+    // ResizeObserver; desktop TODO: measure via webview DOM bridge.
+    let canvas_width_px = use_signal(|| 764.0f64);
+
+    // Signal-ized sample_count so the drawing effect always sees the
+    // latest value (avoid closure-capture staleness).
+    let mut sample_count_sig = use_signal(|| sample_count);
+    sample_count_sig.set(sample_count);
+
+    // ── Update view ───────────────────────────────────────────────────────
     {
         let mut v = view.write();
-        let is_running = matches!(acq_state, AcquisitionState::Running);
-        if sample_count > 0 {
-            v.clamp_view(sample_count, is_running);
-        }
-
-        if let Some(dt) = &digital {
-            v.feed_decoder(dt);
-        }
+        if sample_count > 0 { v.clamp_view(sample_count, is_running); }
+        let dcc = digital.as_ref().map(|dt| dt.channels().len()).unwrap_or(0);
+        v.rebuild_rows(analog.len(), dcc);
+        if let Some(ref dt) = digital { v.feed_decoder(dt); }
     }
+    { let mut s = state.borrow_mut(); s.views.insert(device_id.clone(), view.read().clone()); }
 
-    // Write view back to app state.
+    // ── Derived ───────────────────────────────────────────────────────────
+    let rows = view.read().rows.clone();
+    let range_start = view.read().view_start;
+    let range_end = (view.read().view_start + view.read().view_samples).min(sample_count);
+    let range_len = (range_end - range_start).max(1) as f64;
+
+    let sample_rate_hz = 1_000_000.0; // TODO: real sample rate
+    let tick_elements = compute_ticks(range_start, range_end, range_len, sample_rate_hz);
+
+    let short_id = device_id.as_str().replace(':', "-");
+
+    // ── Single drawing effect ─────────────────────────────────────────────
     {
-        let mut s = state.borrow_mut();
-        s.views.insert(device_id.clone(), view.read().clone());
+        let short_id = short_id.clone();
+        let data_version = data_version;
+        let sample_count_sig = sample_count_sig;
+        let state = state.clone();
+        let device_id = device_id.clone();
+        let view = view;
+        use_effect(move || {
+            let _ver = data_version();
+            let sc = sample_count_sig();
+            // Re-read fresh analog/digital data from state on every effect run.
+            // This avoids the stale-closure bug where the first render (before
+            // data arrives) captures empty Vec/None permanently.
+            let (analog, digital) = {
+                let s = state.borrow();
+                if let Some(acq) = s.acquisitions.get(&device_id) {
+                    (acq.analog_traces().to_vec(), acq.digital_trace().cloned())
+                } else if let Some(h) = s.session.device(&device_id) {
+                    (h.analog_traces().to_vec(), h.digital_trace().cloned())
+                } else { (Vec::new(), None) }
+            };
+            let v = view.read();
+            let rs = v.view_start;
+            let re = (v.view_start + v.view_samples).min(sc);
+            let rl = (re - rs).max(1) as f64;
+            let rows_snap = v.rows.clone();
+            let annotations_snap = v.annotations.clone();
+            drop(v);
+            draw_all_canvases(&short_id, &analog, &digital, &rows_snap, &annotations_snap, rs, re, rl);
+        });
     }
 
-    // Canvas drawing effect: re-runs when data_version changes.
-    let canvas_id = format!("waveform-{}", device_id.as_str().replace(':', "-"));
-    let canvas_id_for_effect = canvas_id.clone();
-    let device_id_for_effect = device_id.clone();
-    let state_for_effect = state.clone();
-    use_effect(move || {
-        // Subscribe to data_version so effect re-runs on changes.
-        data_version();
-
-        // Read current state.
-        let s = state_for_effect.borrow();
-        let (acq_state, analog, digital, sample_count) =
-            if let Some(acq) = s.acquisitions.get(&device_id_for_effect) {
-                (
-                    acq.state().clone(),
-                    acq.analog_traces().to_vec(),
-                    acq.digital_trace().cloned(),
-                    acq.sample_count(),
-                )
-            } else if let Some(handle) = s.session.device(&device_id_for_effect) {
-                (
-                    handle.state().clone(),
-                    handle.analog_traces().to_vec(),
-                    handle.digital_trace().cloned(),
-                    handle.sample_count(),
-                )
-            } else {
-                (AcquisitionState::Idle, Vec::new(), None, 0)
-            };
-        drop(s);
-
-        let is_running = matches!(acq_state, AcquisitionState::Running);
-        let view_state = view.read();
-        let draw_js = build_draw_script(
-            &canvas_id_for_effect,
-            &view_state,
-            &analog,
-            &digital,
-            sample_count,
-            is_running,
-        );
-
-        log::info!("Canvas eval: id={canvas_id_for_effect}, js_len={}", draw_js.len());
-        dioxus::document::eval(&draw_js);
-    });
-
-    // Pan state for drag handling.
     let mut drag_active = use_signal(|| false);
     let mut drag_start_x = use_signal(|| 0.0f64);
+    let mut divider_drag_row = use_signal(|| None::<usize>);
+    let mut divider_drag_start_y = use_signal(|| 0.0f64);
+    let mut divider_drag_start_h = use_signal(|| 0.0f64);
+    // Current live height during a divider drag (CSS only, not committed to view).
+    let mut divider_drag_live_h = use_signal(|| None::<f64>);
+    let mut cursor_px = use_signal(|| None::<f64>);
+    let mut cursor_label = use_signal(|| String::new());
 
+    // ── Pre-compute visible row data for rendering ────────────────────────
+    let visible_rows: Vec<_> = rows.iter().enumerate()
+        .filter(|(_, r)| r.visible)
+        .map(|(idx, row)| {
+            let signal_id = format!("sig-{short_id}-{idx}");
+            let row_h = row.total_height();
+            let sig_h = row.signal_height_px;
+            let kind = row.kind;
+            let ci = row.channel_index;
+            let label_el = match kind {
+                RowKind::Analog => {
+                    let name = analog.get(ci)
+                        .map(|t| t.channel().name.clone())
+                        .unwrap_or_default();
+                    rsx! { span { class: "text-[9px] text-zinc-300 truncate", "{name}" } }
+                }
+                RowKind::Digital => {
+                    let name = digital.as_ref()
+                        .and_then(|dt| dt.channels().get(ci))
+                        .map(|c| c.name.clone())
+                        .unwrap_or_else(|| format!("D{}", ci));
+                    rsx! { span { class: "text-[9px] text-zinc-400 truncate", "{name}" } }
+                }
+                RowKind::Decoder => {
+                    rsx! { span { class: "text-[9px] text-zinc-500 truncate", "DEC" } }
+                }
+            };
+            (idx, signal_id, label_el, row_h, sig_h)
+        })
+        .collect();
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  Render
+    // ═══════════════════════════════════════════════════════════════════════
     rsx! {
-        div { class: "flex flex-col h-full",
-            // Canvas
-            div { class: "flex-1 relative",
-                canvas {
-                    id: "{canvas_id}",
-                    class: "absolute inset-0 w-full h-full",
-                    width: "100%",
-                    height: "100%",
-                    onwheel: move |evt| {
-                        let dy = match evt.data().delta() {
-                            dioxus::html::geometry::WheelDelta::Pixels(v) => v.y,
-                            dioxus::html::geometry::WheelDelta::Lines(v) => v.y * 20.0,
-                            dioxus::html::geometry::WheelDelta::Pages(v) => v.y * 200.0,
-                        };
-                        let factor: f64 = if dy < 0.0 { 0.8 } else { 1.25 };
-                        view.write().zoom(factor, sample_count);
-                    },
-                    onmousedown: move |evt| {
-                        drag_active.set(true);
-                        drag_start_x.set(evt.data().coordinates().client().x);
-                    },
-                    onmousemove: move |evt| {
-                        if drag_active() {
-                            let cx = evt.data().coordinates().client().x;
-                            let dx = (drag_start_x() - cx) as f32;
-                            drag_start_x.set(cx);
-                            view.write().pan(dx, 800.0, sample_count);
+        div { class: "flex flex-col h-full bg-[#0d1117]",
+            // ── Time ruler ────────────────────────────────────────────
+            TimeRuler { tick_elements }
+
+            // ── Marker bar ────────────────────────────────────────────
+            MarkerBar {
+                markers: view.read().markers.clone(),
+                range_start,
+                range_len,
+            }
+
+            // ── Rows container ────────────────────────────────────────────
+            div {
+                id: "rows-{short_id}",
+                class: "flex-1 overflow-y-auto relative",
+                onmounted: {
+                    #[cfg_attr(not(target_arch = "wasm32"), allow(unused_mut, unused_variables))]
+                    let mut canvas_width_px = canvas_width_px;
+                    move |_evt| {
+                        #[cfg(target_arch = "wasm32")]
+                        if let Some(el) = _evt.data().get_raw_element().downcast_ref::<web_sys::Element>()
+                        {
+                            let w = el.client_width() as f64;
+                            if w > 0.0 {
+                                canvas_width_px.set((w - LABEL_W).max(100.0));
+                            }
                         }
-                    },
-                    onmouseup: move |_| drag_active.set(false),
-                    onmouseleave: move |_| drag_active.set(false),
+                    }
+                },
+                onwheel: move |evt| {
+                    evt.prevent_default();
+                    let dy = match evt.data().delta() {
+                        dioxus::html::geometry::WheelDelta::Pixels(v) => v.y,
+                        dioxus::html::geometry::WheelDelta::Lines(v) => v.y * 20.0,
+                        dioxus::html::geometry::WheelDelta::Pages(v) => v.y * 200.0,
+                    };
+                    let factor: f64 = if dy < 0.0 { 0.8 } else { 1.25 };
+                    view.write().zoom(factor, sample_count);
+                    data_version += 1;
+                },
+                onmousedown: move |evt| {
+                    let coords = evt.data().coordinates();
+                    let px = coords.page().x;
+                    let py = coords.page().y;
+                    let el_y = coords.element().y;
+                    let v = view.read();
+                    if let Some(ri) = v.row_at_y(el_y) {
+                        let rt = v.row_y_offset(ri);
+                        let rh = v.rows[ri].total_height();
+                        if el_y >= rt + rh - DIVIDER_H && el_y < rt + rh {
+                            let sh = v.rows.get(ri).map(|r| r.signal_height_px).unwrap_or(22.0);
+                            drop(v);
+                            divider_drag_row.set(Some(ri));
+                            divider_drag_start_y.set(py);
+                            divider_drag_start_h.set(sh);
+                            return;
+                        }
+                    }
+                    drop(v);
+                    drag_active.set(true);
+                    drag_start_x.set(px);
+                },
+                onmousemove: move |evt| {
+                    let coords = evt.data().coordinates();
+                    let px = coords.page().x;
+                    let py = coords.page().y;
+                    let cx = coords.element().x;
+                    if let Some(_ri) = divider_drag_row() {
+                        let dy = py - divider_drag_start_y();
+                        let new_h = (divider_drag_start_h() + dy).max(10.0);
+                        divider_drag_live_h.set(Some(new_h));
+                        return;
+                    }
+                    if drag_active() {
+                        let dx = (px - drag_start_x()) as f32;
+                        drag_start_x.set(px);
+                        view.write().pan(dx, (canvas_width_px() + LABEL_W) as f32, sample_count);
+                        data_version += 1;
+                    }
+                    let v = view.read();
+                    let rs = v.view_start;
+                    let re = (v.view_start + v.view_samples).min(sample_count);
+                    let rl = (re - rs).max(1) as f64;
+                    let cw = canvas_width_px();
+                    let sp = if cx >= LABEL_W {
+                        rs as u64 + (((cx - LABEL_W) / cw.max(1.0)).clamp(0.0, 1.0) * rl) as u64
+                    } else { rs as u64 };
+                    drop(v);
+                    view.write().cursor = Some(CursorState { sample_pos: Some(sp), px_x: Some(cx), shift_held: false });
+                    cursor_px.set(Some(cx));
+                    cursor_label.set(fmt_time_ns((sp as f64 / 1_000_000.0) * 1e9));
+                },
+                onmouseup: move |_| {
+                    if let (Some(ri), Some(h)) = (divider_drag_row(), divider_drag_live_h()) {
+                        view.write().set_row_height(ri, h);
+                        data_version += 1;
+                    }
+                    drag_active.set(false);
+                    divider_drag_row.set(None);
+                    divider_drag_live_h.set(None);
+                },
+                onmouseleave: move |_| {
+                    // Commit any in-progress resize on leave
+                    if let (Some(ri), Some(h)) = (divider_drag_row(), divider_drag_live_h()) {
+                        view.write().set_row_height(ri, h);
+                        data_version += 1;
+                    }
+                    drag_active.set(false); divider_drag_row.set(None); divider_drag_live_h.set(None);
+                    view.write().clear_cursor(); cursor_px.set(None);
+                },
+
+                // ── Cursor overlay ────────────────────────────────────
+                CursorLine {
+                    cursor_px: cursor_px(),
+                    cursor_label: cursor_label(),
+                }
+
+                // ── Signal rows ───────────────────────────────────────
+                for (row_idx_c, signal_id, label_el, row_h, sig_h) in &visible_rows {
+                    {
+                        let row_idx_c = *row_idx_c;
+                        let row_h = *row_h;
+                        let sig_h = if divider_drag_row() == Some(row_idx_c) {
+                            divider_drag_live_h().unwrap_or(*sig_h)
+                        } else { *sig_h };
+                        let effective_row_h = if divider_drag_row() == Some(row_idx_c) {
+                            sig_h + 2.0 * MEASUREMENT_ZONE_H + DIVIDER_H
+                        } else { row_h };
+                        rsx! {
+                            div {
+                                class: "flex relative",
+                                style: "height: {effective_row_h}px",
+                                // Label
+                                div {
+                                    class: "flex-shrink-0 bg-[#0a0e14] border-r border-[#1a1a2e] flex items-center px-1 select-none",
+                                    style: "width: {LABEL_W}px",
+                                    oncontextmenu: {
+                                        let mut view = view;
+                                        let ri = row_idx_c;
+                                        move |evt| {
+                                            evt.prevent_default();
+                                            evt.stop_propagation();
+                                            if let Some(r) = view.write().rows.get_mut(ri) {
+                                                r.visible = !r.visible;
+                                            }
+                                        }
+                                    },
+                                    {label_el}
+                                }
+                                // Canvas
+                                canvas {
+                                    id: "{signal_id}",
+                                    class: "flex-1 pointer-events-none",
+                                    style: "height: {sig_h}px; margin-top: {MEASUREMENT_ZONE_H}px; margin-bottom: {MEASUREMENT_ZONE_H}px",
+                                    width: "100%",
+                                    height: "{sig_h}",
+                                }
+                                // Divider handle (events handled by parent onmousedown/onmousemove)
+                                div {
+                                    class: "absolute left-0 right-0 cursor-ns-resize bg-[#21262d] hover:bg-zinc-500/40",
+                                    style: "height: 1px; bottom: 0",
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 }
 
-// ── Canvas drawing script builder ─────────────────────────────────────────────
+// ── Tick computation ─────────────────────────────────────────────────────────
 
-/// Color palette for analog channels (CSS colors).
-const ANALOG_COLORS: &[&str] = &[
-    "#facc15", // yellow
-    "#60a5fa", // blue
-    "#f87171", // red
-    "#34d399", // green
-    "#c084fc", // purple
-    "#fb923c", // orange
-    "#2dd4bf", // teal
-    "#f472b6", // pink
-];
+fn compute_ticks(
+    range_start: usize,
+    range_end: usize,
+    range_len: f64,
+    sample_rate_hz: f64,
+) -> Vec<(f64, String, Vec<f64>)> {
+    let view_dur = range_len / sample_rate_hz;
+    let (tick_s, minors) = adaptive_tick_spacing(view_dur);
+    let first_tick = (range_start as f64 / sample_rate_hz / tick_s).ceil() * tick_s;
+    let max_ts = range_end as f64 / sample_rate_hz;
+    let mut elements = Vec::new();
+    let mut ts = first_tick;
+    while ts <= max_ts {
+        let pct = ((ts * sample_rate_hz - range_start as f64) / range_len * 100.0).clamp(0.0, 100.0);
+        let label = fmt_tick(ts);
+        let mut minor_els = Vec::new();
+        for m in 1..minors {
+            let ms = ts + m as f64 * tick_s / minors as f64;
+            let mpct =
+                ((ms * sample_rate_hz - range_start as f64) / range_len * 100.0).clamp(0.0, 100.0);
+            if mpct < 100.0 {
+                minor_els.push(mpct);
+            }
+        }
+        elements.push((pct, label, minor_els));
+        ts += tick_s;
+    }
+    elements
+}
 
-fn build_draw_script(
-    canvas_id: &str,
-    view: &WaveformView,
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Sub-components
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Time ruler showing major and minor ticks as HTML elements.
+#[component]
+fn TimeRuler(tick_elements: Vec<(f64, String, Vec<f64>)>) -> Element {
+    rsx! {
+        div {
+            class: "w-full flex-shrink-0 relative bg-[#0a0e14] border-b border-[#30363d] select-none",
+            style: "height: {TIME_RULER_H}px",
+            for (pct, label, minor_pcts) in &tick_elements {
+                // Major tick
+                div {
+                    class: "absolute top-1/2 bottom-0 border-l border-[#30363d]",
+                    style: "left: calc({LABEL_W}px + {pct:.2}% * (100% - {LABEL_W}px) / 100%)"
+                }
+                span {
+                    class: "absolute text-[9px] text-[#8b949e]",
+                    style: "left: calc({LABEL_W}px + {pct:.2}% * (100% - {LABEL_W}px) / 100% + 2px); top: 0",
+                    "{label}"
+                }
+                // Minor ticks
+                for mpct in minor_pcts {
+                    div {
+                        class: "absolute top-[70%] bottom-0 border-l border-[#30363d] opacity-50",
+                        style: "left: calc({LABEL_W}px + {mpct:.2}% * (100% - {LABEL_W}px) / 100%)"
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Marker bar showing user-placed time markers as HTML overlays.
+#[component]
+fn MarkerBar(markers: Vec<TimeMarker>, range_start: usize, range_len: f64) -> Element {
+    rsx! {
+        div {
+            class: "relative flex-shrink-0 border-b border-[#1a1a2e]",
+            style: "height: {MARKER_BAR_H}px",
+            for m in &markers {
+                {
+                    let sp = m.sample_pos;
+                    let lbl = m.label.clone().unwrap_or_else(|| format!("M{}", m.id));
+                    let rs = range_start as u64;
+                    let rl = range_len;
+                    let pct = if rl > 0.0 {
+                        ((sp.saturating_sub(rs)) as f64 / rl * 100.0).clamp(0.0, 100.0)
+                    } else {
+                        0.0
+                    };
+                    rsx! {
+                        div {
+                            class: "absolute top-0 bottom-0 flex items-center select-none",
+                            style: "left: calc({LABEL_W}px + {pct:.2}% * (100% - {LABEL_W}px) / 100%)",
+                            span { class: "text-[9px] text-amber-400", "\u{25C6}" }
+                            span { class: "text-[9px] text-amber-400 ml-0.5", "{lbl}" }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Vertical cursor line with time label, shown on mouse hover.
+#[component]
+fn CursorLine(cursor_px: Option<f64>, cursor_label: String) -> Element {
+    rsx! {
+        if let Some(px) = cursor_px {
+            div {
+                class: "pointer-events-none absolute top-0 bottom-0 z-20",
+                style: "left: {px}px",
+                div {
+                    class: "absolute top-0 bottom-0 border-l border-dashed",
+                    style: "border-color: {CURSOR_COLOR}; opacity: 0.7"
+                }
+                div {
+                    class: "absolute text-[9px] whitespace-nowrap px-1 rounded",
+                    style: "top: 0; left: 4px; color: {CURSOR_COLOR}; background: #0d1117aa",
+                    "{cursor_label}"
+                }
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Canvas drawing
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn draw_all_canvases(
+    short_id: &str,
     analog: &[AnalogTrace],
     digital: &Option<rb_model::DigitalTrace>,
-    sample_count: usize,
-    is_running: bool,
-) -> String {
-    if sample_count == 0 {
-        let msg = if is_running {
-            "Waiting for samples..."
-        } else {
-            "Click \u{25B6} Run to start"
+    rows: &[crate::waveform_state::RowDescriptor],
+    annotations: &[rb_decode::Annotation],
+    range_start: usize,
+    range_end: usize,
+    range_len: f64,
+) {
+    let mut all_js = String::new();
+
+    // ── Signal rows ───────────────────────────────────────────────────────
+    for (row_idx, row) in rows.iter().enumerate() {
+        if !row.visible { continue; }
+        let cid = format!("sig-{short_id}-{row_idx}");
+        let row_js = match row.kind {
+            RowKind::Analog => {
+                if let Some(trace) = analog.get(row.channel_index) {
+                    let color = ANALOG_COLORS[row.channel_index % ANALOG_COLORS.len()];
+                    build_analog_signal_js(&cid, trace, range_start, range_end, range_len, row, color)
+                } else { String::new() }
+            }
+            RowKind::Digital => {
+                if let Some(dt) = digital {
+                    if let Some(ch) = dt.channels().get(row.channel_index) {
+                        build_digital_signal_js(&cid, dt, ch.bit as usize, range_start, range_end, range_len, row)
+                    } else { String::new() }
+                } else { String::new() }
+            }
+            RowKind::Decoder => {
+                build_decoder_signal_js(&cid, annotations, range_start, range_end, range_len, row)
+            }
         };
-        return format!(
-            "var c=document.getElementById('{}');if(c){{c.width=c.clientWidth;c.height=c.clientHeight;var ctx=c.getContext('2d');ctx.fillStyle='#0d1117';ctx.fillRect(0,0,c.width,c.height);ctx.fillStyle='#666';ctx.font='12px monospace';ctx.fillText('{}',10,30);}}",
-            canvas_id, msg,
-        );
+        if !row_js.is_empty() {
+            all_js.push_str(&wrap_with_resize_observer(row_js));
+        }
     }
 
-    let range = {
-        let start = view.view_start;
-        let end = (view.view_start + view.view_samples).min(sample_count);
-        start..end
+    log::info!("Canvas draw: {} signal canvases, total js_len={}", rows.iter().filter(|r| r.visible).count(), all_js.len());
+    if !all_js.is_empty() {
+        dioxus::document::eval(&all_js);
+    }
+}
+
+// ── Individual canvas JS builders ────────────────────────────────────────────
+
+/// Wrap canvas JS so it self-redraws on element resize via ResizeObserver.
+/// Works cross-platform (browser + desktop webview).
+fn wrap_with_resize_observer(js: String) -> String {
+    if js.len() < 3 { return js; }
+    // Replace `var c=` with `let c=` so each canvas block has its own scope.
+    // `var` is function-scoped and would cause all blocks to share one `c`.
+    let js = js.replace("var c=", "let c=");
+    let inner = &js[1..js.len()-1];
+
+    // Find the "if(!c)" guard and split after it.
+    // Handles both old-style `if(!c)return;` and new-style `if(!c){...;return;}`.
+    let guard_start = inner.find("if(!c)").unwrap_or(0);
+    let after_guard = if inner[guard_start..].starts_with("if(!c){") {
+        // New style with brace block: find the closing `}`
+        if let Some(brace_pos) = inner[guard_start..].find('}') {
+            guard_start + brace_pos + 1
+        } else {
+            guard_start
+        }
+    } else {
+        // Old style without braces: `if(!c)return;`
+        if let Some(ret_pos) = inner[guard_start..].find("return;") {
+            guard_start + ret_pos + "return;".len()
+        } else {
+            guard_start
+        }
     };
 
+    let preamble = &inner[..after_guard];
+    let body = &inner[after_guard..];
+    format!(
+        "{{{}c.__rbDraw=function(){{try{{{}}}catch(e){{console.error('Redraw error for '+c.id,e);}}}};(window.requestAnimationFrame||function(f){{setTimeout(f,0);}})(function(){{c.__rbDraw();}});if(!c.__rbObs){{c.__rbObs=new ResizeObserver(function(){{c.__rbDraw();}});c.__rbObs.observe(c);}}}}",
+        preamble, body
+    )
+}
+
+fn build_analog_signal_js(
+    canvas_id: &str, trace: &AnalogTrace,
+    range_start: usize, range_end: usize, range_len: f64,
+    row: &crate::waveform_state::RowDescriptor, color: &str,
+) -> String {
+    let sig_h = row.signal_height_px;
+    let range = range_start..range_end;
+    let buckets = trace.buckets(range.clone(), 1200usize.max(1));
+    if buckets.is_empty() {
+        log::warn!("Analog canvas {canvas_id}: no buckets for range {range_start}..{range_end}, trace len={}", trace.len());
+        return String::new();
+    }
+    let (raw_lo, raw_hi) = buckets.iter().fold((i32::MAX, i32::MIN), |(lo, hi), b| (lo.min(b.min), hi.max(b.max)));
+    let phys_lo = trace.to_physical(raw_lo);
+    let phys_hi = trace.to_physical(raw_hi);
+    let margin = (phys_hi - phys_lo).abs() * 0.1 + 1e-12;
+    let p_lo = phys_lo - margin;
+    let p_hi = phys_hi + margin;
+    let p_span = (p_hi - p_lo).max(1e-12);
+
     let mut js = format!(
-        "var c=document.getElementById('{}');if(!c)return;c.width=c.clientWidth;c.height=c.clientHeight;var ctx=c.getContext('2d');var w=c.width,h=c.height;var sx=w/800;ctx.fillStyle='#0d1117';ctx.fillRect(0,0,w,h);",
-        canvas_id
+        "{{var c=document.getElementById('{canvas_id}');if(!c){{console.warn('Canvas not found: {canvas_id}');return;}}var dpr=window.devicePixelRatio||1;var w=c.clientWidth;var h={sig_h};c.width=w*dpr;c.height=h*dpr;var ctx=c.getContext('2d');ctx.scale(dpr,dpr);ctx.fillStyle='{BG_COLOR}';ctx.fillRect(0,0,w,h);"
     );
-
-    let range_len = (range.end - range.start).max(1) as f64;
-
-    // ═══ Scaled drawing: all X coordinates use *sx multiplier ═══════════
-    // (no ctx.scale — we multiply X by sx manually to keep line widths consistent)
-
-    // ── Time grid ─────────────────────────────────────────────────────────
-    let grid_count = 10;
-    for i in 0..=grid_count {
-        let gx = (i as f64 / grid_count as f64) * 800.0;
-        js.push_str(&format!(
-            "ctx.strokeStyle='#1a1a2e';ctx.lineWidth=0.5;ctx.beginPath();ctx.moveTo({gx:.1}*sx,0);ctx.lineTo({gx:.1}*sx,h);ctx.stroke();"
-        ));
+    // Grid
+    js.push_str(&format!("ctx.strokeStyle='{GRID_COLOR}';ctx.lineWidth=0.5;"));
+    for i in 0..=5 { let gy = i as f64 / 5.0 * sig_h; js.push_str(&format!("ctx.beginPath();ctx.moveTo(0,{gy:.1});ctx.lineTo(w,{gy:.1});ctx.stroke();")); }
+    // Zero line
+    if p_lo < 0.0 && p_hi > 0.0 {
+        let zy = sig_h - ((0.0 - p_lo) / p_span * sig_h);
+        js.push_str(&format!("ctx.strokeStyle='#30363d';ctx.lineWidth=1;ctx.setLineDash([4,4]);ctx.beginPath();ctx.moveTo(0,{zy:.1});ctx.lineTo(w,{zy:.1});ctx.stroke();ctx.setLineDash([]);"));
     }
-
-    let mut y_offset: f64 = 0.0;
-
-    // ── Analog traces (scaled drawing only) ───────────────────────────────
-    for (ch_idx, trace) in analog.iter().enumerate() {
-        let color = ANALOG_COLORS[ch_idx % ANALOG_COLORS.len()];
-        draw_analog_scaled(&mut js, trace, range.clone(), &mut y_offset, range_len, color);
-        y_offset += ANALOG_ROW_H + 2.0;
+    // Data arrays
+    let mut xv = String::from("[");
+    let mut mxv = String::from("[");
+    let mut mnv = String::from("[");
+    for b in &buckets {
+        xv.push_str(&format!("{},", b.start));
+        mxv.push_str(&format!("{:.1},", trace.to_physical(b.max).clamp(p_lo, p_hi)));
+        mnv.push_str(&format!("{:.1},", trace.to_physical(b.min).clamp(p_lo, p_hi)));
     }
-
-    // ── Digital traces ────────────────────────────────────────────────────
-    if let Some(dt) = digital {
-        let channels = dt.channels();
-        if !channels.is_empty() {
-            let mip = dt.transitions();
-
-            for (ch_idx, ch) in channels.iter().enumerate() {
-                let row_top = y_offset + ch_idx as f64 * DIGITAL_ROW_H;
-                let bit = ch.bit as usize;
-                let initial = mip.value_at(bit, range.start as u64);
-                let edges: Vec<u64> = mip
-                    .edges_in(bit, range.start as u64..range.end as u64)
-                    .to_vec();
-
-                let high_y = row_top + 3.0;
-                let low_y = row_top + DIGITAL_ROW_H - 4.0;
-                let signal_left = LABEL_W;
-                let signal_width = 800.0 - signal_left;
-
-                let mut current_y = if initial { high_y } else { low_y };
-                let mut prev_x = signal_left;
-
-                js.push_str("ctx.strokeStyle='#58a6ff';ctx.lineWidth=1.5;ctx.beginPath();");
-
-                for &edge_idx in &edges {
-                    let edge_x = signal_left
-                        + (edge_idx as f64 - range.start as f64) / range_len * signal_width;
-                    js.push_str(&format!(
-                        "ctx.moveTo({:.1}*sx,{:.1});ctx.lineTo({:.1}*sx,{:.1});",
-                        prev_x, current_y, edge_x, current_y
-                    ));
-                    let next_y = if (current_y - high_y).abs() < 0.5 { low_y } else { high_y };
-                    js.push_str(&format!(
-                        "ctx.moveTo({:.1}*sx,{:.1});ctx.lineTo({:.1}*sx,{:.1});",
-                        edge_x, current_y, edge_x, next_y
-                    ));
-                    current_y = next_y;
-                    prev_x = edge_x;
-                }
-
-                let end_x = signal_left
-                    + (range.end - range.start) as f64 / range_len * signal_width;
-                js.push_str(&format!(
-                    "ctx.moveTo({:.1}*sx,{:.1});ctx.lineTo({:.1}*sx,{:.1});",
-                    prev_x, current_y, end_x, current_y
-                ));
-                js.push_str("ctx.stroke();");
-            }
-
-            y_offset += channels.len() as f64 * DIGITAL_ROW_H + 4.0;
-        }
-    }
-
-    // ── Annotations ───────────────────────────────────────────────────────
-    if !view.annotations.is_empty() {
-        let ann_top = y_offset;
-        js.push_str(&format!(
-            "ctx.fillStyle='#161b22';ctx.fillRect(0,{:.1},800*sx,{:.1});",
-            ann_top, ANNOTATION_ROW_H
-        ));
-
-        for ann in &view.annotations {
-            if ann.range.end <= range.start || ann.range.start >= range.end {
-                continue;
-            }
-            let x0 = (ann.range.start.max(range.start)).saturating_sub(range.start) as f64
-                / range_len * 800.0;
-            let x1 = (ann.range.end.min(range.end)).saturating_sub(range.start) as f64
-                / range_len * 800.0;
-            if x1 - x0 < 1.0 {
-                continue;
-            }
-
-            let color = match ann.kind {
-                rb_decode::AnnotationKind::Data => "'#1f3a6b'",
-                rb_decode::AnnotationKind::Address => "'#6b3d1f'",
-                rb_decode::AnnotationKind::Frame => "'#2d2d2d'",
-                rb_decode::AnnotationKind::Error => "'#6b1f1f'",
-            };
-            js.push_str(&format!(
-                "ctx.fillStyle={};ctx.fillRect({:.1}*sx,{:.1},{:.1}*sx,{:.1});",
-                color,
-                x0,
-                (x1 - x0).max(1.0),
-                ann_top + 1.0,
-                ANNOTATION_ROW_H - 2.0
-            ));
-
-            if x1 - x0 > 24.0 {
-                let label = ann.label.replace('\'', "\\'");
-                js.push_str(&format!(
-                    "ctx.fillStyle='#c9d1d9';ctx.font='9px monospace';ctx.fillText('{}',{:.1}*sx,{:.1});",
-                    label, x0 + 2.0, ann_top + 12.0
-                ));
-            }
-        }
-    }
-
-    // ═══ Unscaled section: text labels (real pixel coordinates) ══════════
-    let mut label_y: f64 = 0.0;
-
-    // Analog channel labels
-    for (ch_idx, trace) in analog.iter().enumerate() {
-        draw_analog_labels(&mut js, trace, label_y, ch_idx);
-        label_y += ANALOG_ROW_H + 2.0;
-    }
-
-    // Digital channel labels
-    if let Some(dt) = digital {
-        for (ch_idx, ch) in dt.channels().iter().enumerate() {
-            let row_top = label_y + ch_idx as f64 * DIGITAL_ROW_H;
-            let label = ch.name.replace('\'', "\\'");
-            js.push_str(&format!(
-                "ctx.fillStyle='#8b949e';ctx.font='10px monospace';ctx.fillText('{}',4*sx,{:.1});",
-                label,
-                row_top + DIGITAL_ROW_H * 0.5 + 4.0
-            ));
-        }
-    }
-
+    xv.push(']'); mxv.push(']'); mnv.push(']');
+    // JS: scale sample index to pixel
+    js.push_str(&format!("var xv={xv},mv={mxv},lv={mnv},n=xv.length;"));
+    js.push_str(&format!("function ty(v){{return {sig_h}-((v-{p_lo})/{p_span}*{sig_h});}}"));
+    js.push_str(&format!("function xs(s){{return((s-{range_start})/{range_len})*w;}}"));
+    // Fill
+    js.push_str(&format!("ctx.fillStyle='{color}1a';ctx.beginPath();ctx.moveTo(xs(xv[0]),ty(mv[0]));"));
+    js.push_str("for(var i=1;i<n;i++)ctx.lineTo(xs(xv[i]),ty(mv[i]));for(var i=n-1;i>=0;i--)ctx.lineTo(xs(xv[i]),ty(lv[i]));ctx.closePath();ctx.fill();");
+    // Center line
+    js.push_str(&format!("ctx.strokeStyle='{color}';ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(xs(xv[0]),ty((mv[0]+lv[0])/2));"));
+    js.push_str("for(var i=1;i<n;i++)ctx.lineTo(xs(xv[i]),ty((mv[i]+lv[i])/2));ctx.stroke();");
+    js.push('}');
     js
 }
 
-/// Draws the scaled portion of one analog trace row: background, grid, zero-line, fill, center line.
-fn draw_analog_scaled(
-    js: &mut String,
-    trace: &AnalogTrace,
-    range: std::ops::Range<usize>,
-    y_offset: &mut f64,
-    range_len: f64,
-    color: &str,
-) {
-    let pixel_width: usize = 800;
-    let buckets = trace.buckets(range.clone(), pixel_width.max(1));
-    if buckets.is_empty() {
-        return;
-    }
+fn build_digital_signal_js(
+    canvas_id: &str, dt: &rb_model::DigitalTrace, bit: usize,
+    range_start: usize, range_end: usize, range_len: f64,
+    row: &crate::waveform_state::RowDescriptor,
+) -> String {
+    let sig_h = row.signal_height_px;
+    let mip = dt.transitions();
+    let initial = mip.value_at(bit, range_start as u64);
+    let edges: Vec<u64> = mip.edges_in(bit, range_start as u64..range_end as u64).to_vec();
+    let high_y = sig_h * 0.25;
+    let low_y = sig_h * 0.75;
+    let mid_y = sig_h * 0.5;
 
-    let (raw_lo, raw_hi) = buckets.iter().fold((i32::MAX, i32::MIN), |(lo, hi), b| {
-        (lo.min(b.min), hi.max(b.max))
-    });
-    let phys_lo = trace.to_physical(raw_lo);
-    let phys_hi = trace.to_physical(raw_hi);
-    let margin = (phys_hi - phys_lo).abs() * 0.1 + 1e-12;
-    let p_lo = phys_lo - margin;
-    let p_hi = phys_hi + margin;
-    let p_span = (p_hi - p_lo).max(1e-12);
+    let mut js = format!(
+        "{{var c=document.getElementById('{canvas_id}');if(!c){{console.warn('Canvas not found: {canvas_id}');return;}}var dpr=window.devicePixelRatio||1;var w=c.clientWidth;var h={sig_h};c.width=w*dpr;c.height=h*dpr;var ctx=c.getContext('2d');ctx.scale(dpr,dpr);ctx.fillStyle='{BG_COLOR}';ctx.fillRect(0,0,w,h);"
+    );
+    js.push_str(&format!("ctx.strokeStyle='{GRID_COLOR}';ctx.lineWidth=0.5;ctx.beginPath();ctx.moveTo(0,{mid_y:.1});ctx.lineTo(w,{mid_y:.1});ctx.stroke();"));
 
-    let top = *y_offset;
-
-    let to_y = |phys: f64| -> f64 {
-        top + ANALOG_ROW_H - ((phys - p_lo) / p_span * ANALOG_ROW_H)
-    };
-
-    // Row background
-    js.push_str(&format!(
-        "ctx.fillStyle='#0d1117';ctx.fillRect(0,{top:.1},800*sx,{ANALOG_ROW_H:.1});"
-    ));
-
-    // Voltage grid (horizontal lines)
-    let grid_steps = 5;
-    for i in 0..=grid_steps {
-        let frac = i as f64 / grid_steps as f64;
-        let gy = top + frac * ANALOG_ROW_H;
+    if !edges.is_empty() || initial {
+        js.push_str(&format!("ctx.strokeStyle='{DIGITAL_COLOR}';ctx.lineWidth=1.5;ctx.beginPath();"));
+        let mut cy = if initial { high_y } else { low_y };
+        let mut px = range_start as u64;
+        for &ei in &edges {
+            // Horizontal line: from previous edge to this edge at current level
+            js.push_str(&format!(
+                "ctx.moveTo((({px}-{range_start})/{range_len})*w,{cy:.1});ctx.lineTo((({ei}-{range_start})/{range_len})*w,{cy:.1});"
+            ));
+            // Vertical line: toggle level at this edge
+            let next_y = if (cy - high_y).abs() < 0.5 { low_y } else { high_y };
+            js.push_str(&format!(
+                "ctx.moveTo((({ei}-{range_start})/{range_len})*w,{cy:.1});ctx.lineTo((({ei}-{range_start})/{range_len})*w,{next_y:.1});"
+            ));
+            cy = next_y;
+            px = ei;
+        }
+        // Final horizontal to end of visible range
         js.push_str(&format!(
-            "ctx.strokeStyle='#1a1a2e';ctx.lineWidth=0.5;ctx.beginPath();ctx.moveTo({LABEL_W:.1}*sx,{gy:.1});ctx.lineTo(800*sx,{gy:.1});ctx.stroke();"
+            "ctx.moveTo((({px}-{range_start})/{range_len})*w,{cy:.1});ctx.lineTo((({range_end}-{range_start})/{range_len})*w,{cy:.1});ctx.stroke();"
         ));
     }
-
-    // Zero line (dashed)
-    if p_lo < 0.0 && p_hi > 0.0 {
-        let zy = to_y(0.0);
-        js.push_str(&format!(
-            "ctx.strokeStyle='#30363d';ctx.lineWidth=1;ctx.setLineDash([4,4]);ctx.beginPath();ctx.moveTo(0,{zy:.1});ctx.lineTo(800*sx,{zy:.1});ctx.stroke();ctx.setLineDash([]);"
-        ));
-    }
-
-    // Filled area (min → max polygon)
-    js.push_str(&format!("ctx.fillStyle='{color}1a';ctx.beginPath();"));
-
-    let first_x = (buckets[0].start as f64 - range.start as f64) / range_len * 800.0;
-    js.push_str(&format!("ctx.moveTo({first_x:.1}*sx,{:.1});", to_y(trace.to_physical(buckets[0].max))));
-    for b in &buckets[1..] {
-        let x = (b.start as f64 - range.start as f64) / range_len * 800.0;
-        js.push_str(&format!("ctx.lineTo({x:.1}*sx,{:.1});", to_y(trace.to_physical(b.max))));
-    }
-    for b in buckets.iter().rev() {
-        let x = (b.start as f64 - range.start as f64) / range_len * 800.0;
-        js.push_str(&format!("ctx.lineTo({x:.1}*sx,{:.1});", to_y(trace.to_physical(b.min))));
-    }
-    js.push_str("ctx.closePath();ctx.fill();");
-
-    // Center line
-    js.push_str(&format!("ctx.strokeStyle='{color}';ctx.lineWidth=1.5;ctx.beginPath();"));
-    let first_avg = (trace.to_physical(buckets[0].min) + trace.to_physical(buckets[0].max)) / 2.0;
-    js.push_str(&format!("ctx.moveTo({first_x:.1}*sx,{:.1});", to_y(first_avg)));
-    for b in &buckets[1..] {
-        let x = (b.start as f64 - range.start as f64) / range_len * 800.0;
-        let avg = (trace.to_physical(b.min) + trace.to_physical(b.max)) / 2.0;
-        js.push_str(&format!("ctx.lineTo({x:.1}*sx,{:.1});", to_y(avg)));
-    }
-    js.push_str("ctx.stroke();");
+    js.push('}');
+    js
 }
 
-/// Draws text labels for one analog trace row (unscaled — uses real pixel coords via `sx`).
-fn draw_analog_labels(
-    js: &mut String,
-    trace: &AnalogTrace,
-    y_offset: f64,
-    _ch_idx: usize,
-) {
-    // Voltage labels for this row
-    let buckets = trace.buckets(0..trace.len(), 800.max(1));
-    if buckets.is_empty() {
-        return;
+fn build_decoder_signal_js(
+    canvas_id: &str, annotations: &[rb_decode::Annotation],
+    range_start: usize, range_end: usize, range_len: f64,
+    row: &crate::waveform_state::RowDescriptor,
+) -> String {
+    let sig_h = row.signal_height_px;
+    let mut js = format!(
+        "{{var c=document.getElementById('{canvas_id}');if(!c){{console.warn('Canvas not found: {canvas_id}');return;}}var dpr=window.devicePixelRatio||1;var w=c.clientWidth;var h={sig_h};c.width=w*dpr;c.height=h*dpr;var ctx=c.getContext('2d');ctx.scale(dpr,dpr);ctx.fillStyle='#161b22';ctx.fillRect(0,0,w,h);"
+    );
+    for ann in annotations {
+        if ann.range.end <= range_start || ann.range.start >= range_end { continue; }
+        let rs = range_start;
+        let x0 = ann.range.start.saturating_sub(rs) as f64 / range_len;
+        let x1 = ann.range.end.min(range_end).saturating_sub(rs) as f64 / range_len;
+        let ww = (x1 - x0).max(0.001);
+        let color = match ann.kind {
+            AnnotationKind::Data => "#1f3a6b",
+            AnnotationKind::Address => "#6b3d1f",
+            AnnotationKind::Frame => "#2d2d2d",
+            AnnotationKind::Error => "#6b1f1f",
+        };
+        js.push_str(&format!("ctx.fillStyle='{color}';ctx.fillRect({x0}*w,1,{ww}*w,{:.1});", sig_h - 2.0));
+        if ww > 0.03 {
+            let label = ann.label.replace('\'', "\\'").replace('\\', "\\\\");
+            js.push_str(&format!("ctx.fillStyle='#c9d1d9';ctx.font='9px monospace';ctx.fillText('{label}',{x0}*w+2,{:.1});", sig_h * 0.5 + 3.0));
+        }
     }
-    let (raw_lo, raw_hi) = buckets.iter().fold((i32::MAX, i32::MIN), |(lo, hi), b| {
-        (lo.min(b.min), hi.max(b.max))
-    });
-    let phys_lo = trace.to_physical(raw_lo);
-    let phys_hi = trace.to_physical(raw_hi);
-    let margin = (phys_hi - phys_lo).abs() * 0.1 + 1e-12;
-    let p_lo = phys_lo - margin;
-    let p_hi = phys_hi + margin;
-    let p_span = (p_hi - p_lo).max(1e-12);
-
-    let top = y_offset;
-    let grid_steps = 5;
-    for i in 0..=grid_steps {
-        let frac = i as f64 / grid_steps as f64;
-        let gy = top + frac * ANALOG_ROW_H;
-        let volt = p_lo + frac * p_span;
-        let v_label = format_voltage(volt);
-        js.push_str(&format!(
-            "ctx.fillStyle='#484f58';ctx.font='9px monospace';ctx.fillText('{v_label}',2*sx,{:.1});",
-            gy - 2.0
-        ));
-    }
-
-    // Channel name label
-    let unit = trace.channel().unit.as_deref().unwrap_or("");
-    let label = if unit.is_empty() {
-        trace.channel().name.clone()
-    } else {
-        format!("{} [{}]", trace.channel().name, unit)
-    };
-    let label_safe = label.replace('\'', "\\'");
-    js.push_str(&format!(
-        "ctx.fillStyle='#c9d1d9';ctx.font='bold 11px monospace';ctx.fillText('{}',{:.1}*sx,{:.1});",
-        label_safe,
-        LABEL_W + 4.0,
-        top + 14.0
-    ));
-}
-
-/// Format a voltage value for display.
-fn format_voltage(v: f64) -> String {
-    let abs_v = v.abs();
-    if abs_v >= 1.0 {
-        format!("{:.1}V", v)
-    } else if abs_v >= 1e-3 {
-        format!("{:.1}mV", v * 1e3)
-    } else if abs_v >= 1e-6 {
-        format!("{:.1}µV", v * 1e6)
-    } else if abs_v == 0.0 {
-        "0V".to_string()
-    } else {
-        format!("{:.1}nV", v * 1e9)
-    }
+    js.push('}');
+    js
 }

@@ -1,4 +1,4 @@
-//! Canvas toolbar: Run/Stop, timebase display, zoom, follow toggle.
+//! Canvas toolbar: Run/Stop, marker controls.
 //! Sits directly above the waveform canvas.
 
 use dioxus::prelude::*;
@@ -7,7 +7,7 @@ use crate::waveform_state::WaveformView;
 
 use super::app::AppStateRef;
 
-/// Toolbar above the canvas with acquisition controls and timebase info.
+/// Toolbar above the canvas with acquisition controls and marker buttons.
 #[component]
 pub fn CanvasToolbar(
     device_id: rb_device::DeviceId,
@@ -29,14 +29,9 @@ pub fn CanvasToolbar(
     };
 
     let is_running = matches!(acq_state, AcquisitionState::Running);
-    let view_samples = view.read().view_samples;
-
-    // Estimate time/div from view window (assuming ~1400px canvas width, ~10 divisions)
-    let approx_div_samples = (view_samples as f64 / 10.0).max(1.0);
-    let time_div_str = format_samples_to_time(approx_div_samples as u64, 1_000_000.0); // TODO: real sample rate
 
     rsx! {
-        div { class: "flex items-center gap-3 px-3 py-1.5 border-b border-zinc-800 bg-zinc-900/80 flex-shrink-0",
+        div { class: "flex items-center gap-2 px-3 py-1.5 border-b border-zinc-800 bg-zinc-900/80 flex-shrink-0",
             // Run / Stop
             if is_running {
                 button {
@@ -70,121 +65,92 @@ pub fn CanvasToolbar(
                 }
             }
 
-            // Separator
             span { class: "text-zinc-700", "|" }
 
-            // Timebase
-            div { class: "flex items-center gap-1 text-xs",
-                span { class: "text-zinc-500", "Time/Div:" }
-                span { class: "text-zinc-300 font-mono", "{time_div_str}" }
+            // Marker A button
+            button {
+                class: "px-2 py-0.5 bg-zinc-800 hover:bg-zinc-700 text-amber-400 rounded text-xs font-medium transition-colors",
+                title: "Add Marker A at cursor position",
+                onclick: {
+                    let mut view = view;
+                    move |_| {
+                        let mut v = view.write();
+                        if let Some(ref cursor) = v.cursor {
+                            if let Some(pos) = cursor.sample_pos {
+                                v.add_marker(pos);
+                            }
+                        }
+                    }
+                },
+                "\u{25C6} +A"
             }
 
-            // Separator
-            span { class: "text-zinc-700", "|" }
-
-            // Zoom controls
-            div { class: "flex items-center gap-0.5",
-                button {
-                    class: "px-1.5 py-0.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded text-xs transition-colors",
-                    title: "Zoom in",
-                    onclick: {
-                        let mut view = view;
-                        move |_| {
-                            let mut v = view.write();
-                            v.view_samples = (v.view_samples as f64 * 0.5) as usize;
-                            if v.view_samples < 16 { v.view_samples = 16; }
+            // Marker B button
+            button {
+                class: "px-2 py-0.5 bg-zinc-800 hover:bg-zinc-700 text-amber-400 rounded text-xs font-medium transition-colors",
+                title: "Add Marker B at cursor position",
+                onclick: {
+                    let mut view = view;
+                    move |_| {
+                        let mut v = view.write();
+                        if let Some(ref cursor) = v.cursor {
+                            if let Some(pos) = cursor.sample_pos {
+                                v.add_marker(pos);
+                            }
                         }
-                    },
-                    "+"
-                }
-                button {
-                    class: "px-1.5 py-0.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded text-xs transition-colors",
-                    title: "Zoom out",
-                    onclick: {
-                        let mut view = view;
-                        let max_samples = sample_count;
-                        move |_| {
-                            let mut v = view.write();
-                            v.view_samples = (v.view_samples as f64 * 2.0) as usize;
-                            if v.view_samples > max_samples { v.view_samples = max_samples; }
-                        }
-                    },
-                    "\u{2212}"
-                }
-                button {
-                    class: "px-1.5 py-0.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded text-xs transition-colors",
-                    title: "Reset zoom",
-                    onclick: {
-                        let mut view = view;
-                        let max_samples = sample_count;
-                        move |_| {
-                            let mut v = view.write();
-                            v.view_samples = max_samples;
-                            v.view_start = 0;
-                        }
-                    },
-                    "\u{21BA}"
-                }
+                    }
+                },
+                "\u{25C6} +B"
             }
 
-            // Separator
+            // Create Pair button
+            button {
+                class: "px-2 py-0.5 bg-zinc-800 hover:bg-zinc-700 text-emerald-400 rounded text-xs font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed",
+                title: "Create Marker Pair from last two markers",
+                disabled: {
+                    let v = view.read();
+                    v.markers.len() < 2
+                },
+                onclick: {
+                    let mut view = view;
+                    move |_| {
+                        let mut v = view.write();
+                        let len = v.markers.len();
+                        if len >= 2 {
+                            let a = v.markers[len - 2].id;
+                            let b = v.markers[len - 1].id;
+                            v.add_marker_pair(a, b);
+                        }
+                    }
+                },
+                "\u{2194} Pair"
+            }
+
             span { class: "text-zinc-700", "|" }
 
-            // Follow / auto-scroll
-            label { class: "flex items-center gap-1 cursor-pointer text-xs text-zinc-400 hover:text-zinc-200 select-none",
-                input {
-                    r#type: "checkbox",
-                    class: "accent-blue-600 w-3 h-3",
-                    checked: view.read().auto_scroll,
-                    onchange: {
-                        let mut view = view;
-                        move |evt| {
-                            view.write().auto_scroll = evt.checked();
-                        }
-                    },
-                }
-                "Follow"
+            // Clear all markers
+            button {
+                class: "px-2 py-0.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-400 rounded text-xs transition-colors",
+                title: "Clear all markers and pairs",
+                onclick: {
+                    let mut view = view;
+                    move |_| {
+                        let mut v = view.write();
+                        v.markers.clear();
+                        v.marker_pairs.clear();
+                    }
+                },
+                "\u{2715} Clear"
             }
 
             div { class: "flex-1" }
 
             // Sample count
-            span { class: "text-xs text-zinc-500 font-mono",
-                "{sample_count} samples"
-            }
-
-            // Status indicator
-            match &acq_state {
-                AcquisitionState::Running => rsx! {
-                    span { class: "text-xs text-green-400 font-medium", "\u{25CF} Running" }
-                },
-                AcquisitionState::Idle => rsx! {
-                    span { class: "text-xs text-zinc-500", "\u{25CB} Idle" }
-                },
-                AcquisitionState::Stopped => rsx! {
-                    span { class: "text-xs text-zinc-500", "\u{25CB} Stopped" }
-                },
-                AcquisitionState::Error(msg) => rsx! {
-                    span { class: "text-xs text-red-400", title: "{msg}", "\u{26A0} Error" }
-                },
+            if sample_count > 0 {
+                span { class: "text-[10px] text-zinc-600 font-mono",
+                    "{sample_count} samples"
+                }
             }
         }
-    }
-}
-
-/// Format a sample count as a human-readable time at the given sample rate.
-fn format_samples_to_time(samples: u64, rate_hz: f64) -> String {
-    if rate_hz <= 0.0 {
-        return format!("{samples} samp");
-    }
-    let seconds = samples as f64 / rate_hz;
-    if seconds >= 1.0 {
-        format!("{seconds:.2} s")
-    } else if seconds >= 1e-3 {
-        format!("{:.2} ms", seconds * 1e3)
-    } else if seconds >= 1e-6 {
-        format!("{:.2} µs", seconds * 1e6)
-    } else {
-        format!("{:.2} ns", seconds * 1e9)
     }
 }

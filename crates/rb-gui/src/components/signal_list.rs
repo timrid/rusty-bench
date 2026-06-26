@@ -1,8 +1,8 @@
-//! Signal list panel: channel names, colors, visibility toggles, and decoder
-//! configuration. Lives left of the waveform canvas.
+//! Signal list panel: channel names, colors, visibility toggles (right-click),
+//! and decoder configuration. Lives left of the waveform canvas.
 
 use dioxus::prelude::*;
-use crate::waveform_state::WaveformView;
+use crate::waveform_state::{RowKind, WaveformView};
 
 use super::app::AppStateRef;
 use crate::components::decoder_config::DecoderConfig;
@@ -11,52 +11,36 @@ use crate::components::decoder_config::DecoderConfig;
 #[component]
 pub fn SignalList(
     device_id: rb_device::DeviceId,
-    view: Signal<WaveformView>,
+    mut view: Signal<WaveformView>,
     data_version: Signal<u64>,
 ) -> Element {
     let state: AppStateRef = use_context();
     let _version = data_version();
 
-    let (analog, digital, sample_count) = {
+    let (analog_names, digital_names, sample_count) = {
         let s = state.borrow();
         if let Some(acq) = s.acquisitions.get(&device_id) {
-            (
-                acq.analog_traces().to_vec(),
-                acq.digital_trace().cloned(),
-                acq.sample_count(),
-            )
+            let anames: Vec<String> = acq.analog_traces().iter().map(|t| t.channel().name.clone()).collect();
+            let dnames: Vec<String> = acq.digital_trace()
+                .map(|dt| dt.channels().iter().map(|ch| ch.name.clone()).collect())
+                .unwrap_or_default();
+            (anames, dnames, acq.sample_count())
         } else if let Some(handle) = s.session.device(&device_id) {
-            (
-                handle.analog_traces().to_vec(),
-                handle.digital_trace().cloned(),
-                handle.sample_count(),
-            )
+            let anames: Vec<String> = handle.analog_traces().iter().map(|t| t.channel().name.clone()).collect();
+            let dnames: Vec<String> = handle.digital_trace()
+                .map(|dt| dt.channels().iter().map(|ch| ch.name.clone()).collect())
+                .unwrap_or_default();
+            (anames, dnames, handle.sample_count())
         } else {
-            (Vec::new(), None, 0)
+            (Vec::new(), Vec::new(), 0)
         }
     };
 
-    let has_analog = !analog.is_empty();
-    let has_digital = digital.is_some();
+    let has_analog = !analog_names.is_empty();
+    let has_digital = !digital_names.is_empty();
 
-    // Pre-compute channel infos for rendering.
-    let analog_infos: Vec<_> = analog
-        .iter()
-        .enumerate()
-        .map(|(i, trace)| {
-            let name = trace.channel().name.clone();
-            (i, name, true) // (index, name, enabled)
-        })
-        .collect();
-
-    let digital_infos: Vec<_> = digital
-        .as_ref()
-        .map(|dt| {
-            (0..dt.channels().len())
-                .map(|i| (i, format!("D{i}")))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    // Read current rows to get visibility state.
+    let rows = view.read().rows.clone();
 
     rsx! {
         div { class: "w-36 flex-shrink-0 border-r border-zinc-800 bg-zinc-900/50 flex flex-col h-full overflow-y-auto select-none",
@@ -64,22 +48,39 @@ pub fn SignalList(
             // Analog channel section
             if has_analog {
                 div { class: "px-2 pt-2 pb-0.5",
-                    span { class: "text-[9px] font-bold text-zinc-500 uppercase tracking-wider",
-                        "Analog"
-                    }
+                    span { class: "text-[9px] font-bold text-zinc-500 uppercase tracking-wider", "Analog" }
                 }
-                for (i, name, enabled) in &analog_infos {
-                    div {
-                        class: if *enabled {
-                            "flex items-center gap-1.5 px-2 py-1 text-xs text-zinc-300 cursor-pointer hover:bg-zinc-800/30 rounded mx-1"
-                        } else {
-                            "flex items-center gap-1.5 px-2 py-1 text-xs text-zinc-600 cursor-pointer hover:bg-zinc-800/30 rounded mx-1"
-                        },
-                        span {
-                            class: "w-2.5 h-2.5 rounded-full flex-shrink-0",
-                            style: "background-color: {channel_color(*i, true)}"
+                for (i, name) in analog_names.iter().enumerate() {
+                    {
+                        let is_visible = rows.iter().any(|r| {
+                            match r.kind { RowKind::Analog => r.channel_index == i && r.visible, _ => false }
+                        });
+                        let mut view = view;
+                        let i = i;
+                        rsx! {
+                            div {
+                                class: if is_visible {
+                                    "flex items-center gap-1.5 px-2 py-1 text-xs text-zinc-300 cursor-pointer hover:bg-zinc-800/30 rounded mx-1"
+                                } else {
+                                    "flex items-center gap-1.5 px-2 py-1 text-xs text-zinc-600 cursor-pointer hover:bg-zinc-800/30 rounded mx-1 line-through"
+                                },
+                                oncontextmenu: move |evt| {
+                                    evt.prevent_default();
+                                    evt.stop_propagation();
+                                    let mut v = view.write();
+                                    if let Some(row) = v.rows.iter_mut()
+                                        .find(|r| matches!(r.kind, RowKind::Analog) && r.channel_index == i)
+                                    {
+                                        row.visible = !row.visible;
+                                    }
+                                },
+                                span {
+                                    class: "w-2.5 h-2.5 rounded-full flex-shrink-0",
+                                    style: "background-color: {channel_color(i, true)}"
+                                }
+                                span { class: "truncate flex-1", "{name}" }
+                            }
                         }
-                        span { class: "truncate flex-1", "{name}" }
                     }
                 }
             }
@@ -90,17 +91,39 @@ pub fn SignalList(
                     div { class: "border-t border-zinc-800 mx-2 my-1" }
                 }
                 div { class: "px-2 pt-1 pb-0.5",
-                    span { class: "text-[9px] font-bold text-zinc-500 uppercase tracking-wider",
-                        "Digital"
-                    }
+                    span { class: "text-[9px] font-bold text-zinc-500 uppercase tracking-wider", "Digital" }
                 }
-                for (i, label) in &digital_infos {
-                    div { class: "flex items-center gap-1.5 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800/30 rounded mx-1",
-                        span {
-                            class: "w-2.5 h-2.5 rounded flex-shrink-0",
-                            style: "background-color: {digital_channel_color(*i)}"
+                for (i, name) in digital_names.iter().enumerate() {
+                    {
+                        let is_visible = rows.iter().any(|r| {
+                            match r.kind { RowKind::Digital => r.channel_index == i && r.visible, _ => false }
+                        });
+                        let mut view = view;
+                        let i = i;
+                        rsx! {
+                            div {
+                                class: if is_visible {
+                                    "flex items-center gap-1.5 px-2 py-1 text-xs text-zinc-300 cursor-pointer hover:bg-zinc-800/30 rounded mx-1"
+                                } else {
+                                    "flex items-center gap-1.5 px-2 py-1 text-xs text-zinc-600 cursor-pointer hover:bg-zinc-800/30 rounded mx-1 line-through"
+                                },
+                                oncontextmenu: move |evt| {
+                                    evt.prevent_default();
+                                    evt.stop_propagation();
+                                    let mut v = view.write();
+                                    if let Some(row) = v.rows.iter_mut()
+                                        .find(|r| matches!(r.kind, RowKind::Digital) && r.channel_index == i)
+                                    {
+                                        row.visible = !row.visible;
+                                    }
+                                },
+                                span {
+                                    class: "w-2.5 h-2.5 rounded flex-shrink-0",
+                                    style: "background-color: {digital_channel_color(i)}"
+                                }
+                                span { class: "truncate flex-1", "{name}" }
+                            }
                         }
-                        span { class: "truncate flex-1", "{label}" }
                     }
                 }
             }
@@ -112,45 +135,31 @@ pub fn SignalList(
 
             // Decoder section
             div { class: "px-2 pt-1 pb-0.5",
-                span { class: "text-[9px] font-bold text-zinc-500 uppercase tracking-wider",
-                    "Decoder"
-                }
+                span { class: "text-[9px] font-bold text-zinc-500 uppercase tracking-wider", "Decoder" }
             }
             div { class: "px-2 pb-2",
                 DecoderConfig { view }
             }
 
-            // Spacer
             div { class: "flex-1" }
 
-            // Sample info at bottom
             if sample_count > 0 {
                 div { class: "border-t border-zinc-800 px-2 py-1.5",
-                    p { class: "text-[10px] text-zinc-600",
-                        "{sample_count} samples"
-                    }
+                    p { class: "text-[10px] text-zinc-600", "{sample_count} samples" }
                 }
             }
         }
     }
 }
 
-/// Analog channel color palette.
 fn channel_color(index: usize, _analog: bool) -> &'static str {
     const COLORS: &[&str] = &[
-        "#facc15", // yellow
-        "#60a5fa", // blue
-        "#f87171", // red
-        "#34d399", // green
-        "#c084fc", // purple
-        "#fb923c", // orange
-        "#2dd4bf", // teal
-        "#f472b6", // pink
+        "#facc15", "#60a5fa", "#f87171", "#34d399",
+        "#c084fc", "#fb923c", "#2dd4bf", "#f472b6",
     ];
     COLORS[index % COLORS.len()]
 }
 
-/// Digital channel color palette (greens/cyans).
 fn digital_channel_color(index: usize) -> &'static str {
     const COLORS: &[&str] = &[
         "#34d399", "#2dd4bf", "#22d3ee", "#38bdf8",
