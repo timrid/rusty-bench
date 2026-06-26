@@ -12,6 +12,7 @@ use super::app::AppStateRef;
 pub fn CanvasToolbar(
     device_id: rb_device::DeviceId,
     view: Signal<WaveformView>,
+    cursor_sample_pos: Signal<Option<u64>>,
     data_version: Signal<u64>,
 ) -> Element {
     let state: AppStateRef = use_context();
@@ -73,12 +74,10 @@ pub fn CanvasToolbar(
                 title: "Add Marker A at cursor position",
                 onclick: {
                     let mut view = view;
+                    let cursor_sample_pos = cursor_sample_pos;
                     move |_| {
-                        let mut v = view.write();
-                        if let Some(ref cursor) = v.cursor {
-                            if let Some(pos) = cursor.sample_pos {
-                                v.add_marker(pos);
-                            }
+                        if let Some(pos) = cursor_sample_pos() {
+                            view.write().add_marker(pos);
                         }
                     }
                 },
@@ -91,12 +90,10 @@ pub fn CanvasToolbar(
                 title: "Add Marker B at cursor position",
                 onclick: {
                     let mut view = view;
+                    let cursor_sample_pos = cursor_sample_pos;
                     move |_| {
-                        let mut v = view.write();
-                        if let Some(ref cursor) = v.cursor {
-                            if let Some(pos) = cursor.sample_pos {
-                                v.add_marker(pos);
-                            }
+                        if let Some(pos) = cursor_sample_pos() {
+                            view.write().add_marker(pos);
                         }
                     }
                 },

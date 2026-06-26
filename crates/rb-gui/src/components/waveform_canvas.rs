@@ -10,7 +10,7 @@ use rb_decode::AnnotationKind;
 use rb_model::AnalogTrace;
 
 use crate::waveform_state::{
-    CursorState, RowKind, TimeMarker, WaveformView, DIVIDER_H, LABEL_W,
+    RowKind, TimeMarker, WaveformView, DIVIDER_H, LABEL_W,
     MARKER_BAR_H, MEASUREMENT_ZONE_H, TIME_RULER_H,
 };
 
@@ -65,6 +65,7 @@ pub fn WaveformCanvas(
     device_id: rb_device::DeviceId,
     data_version: Signal<u64>,
     mut view: Signal<WaveformView>,
+    mut cursor_sample_pos: Signal<Option<u64>>,
 ) -> Element {
     let _version = data_version();
     let state: AppStateRef = use_context();
@@ -286,7 +287,7 @@ pub fn WaveformCanvas(
                         rs as u64 + (((cx - LABEL_W) / cw.max(1.0)).clamp(0.0, 1.0) * rl) as u64
                     } else { rs as u64 };
                     drop(v);
-                    view.write().cursor = Some(CursorState { sample_pos: Some(sp), px_x: Some(cx), shift_held: false });
+                    cursor_sample_pos.set(Some(sp));
                     cursor_px.set(Some(cx));
                     cursor_label.set(fmt_time_ns((sp as f64 / 1_000_000.0) * 1e9));
                 },
@@ -306,13 +307,13 @@ pub fn WaveformCanvas(
                         data_version += 1;
                     }
                     drag_active.set(false); divider_drag_row.set(None); divider_drag_live_h.set(None);
-                    view.write().clear_cursor(); cursor_px.set(None);
+                    cursor_sample_pos.set(None); cursor_px.set(None);
                 },
 
                 // ── Cursor overlay ────────────────────────────────────
                 CursorLine {
-                    cursor_px: cursor_px(),
-                    cursor_label: cursor_label(),
+                    cursor_px,
+                    cursor_label,
                 }
 
                 // ── Signal rows ───────────────────────────────────────
@@ -469,9 +470,11 @@ fn MarkerBar(markers: Vec<TimeMarker>, range_start: usize, range_len: f64) -> El
 
 /// Vertical cursor line with time label, shown on mouse hover.
 #[component]
-fn CursorLine(cursor_px: Option<f64>, cursor_label: String) -> Element {
+fn CursorLine(cursor_px: Signal<Option<f64>>, cursor_label: Signal<String>) -> Element {
+    let px = cursor_px();
+    let label = cursor_label();
     rsx! {
-        if let Some(px) = cursor_px {
+        if let Some(px) = px {
             div {
                 class: "pointer-events-none absolute top-0 bottom-0 z-20",
                 style: "left: {px}px",
@@ -482,7 +485,7 @@ fn CursorLine(cursor_px: Option<f64>, cursor_label: String) -> Element {
                 div {
                     class: "absolute text-[9px] whitespace-nowrap px-1 rounded",
                     style: "top: 0; left: 4px; color: {CURSOR_COLOR}; background: #0d1117aa",
-                    "{cursor_label}"
+                    "{label}"
                 }
             }
         }

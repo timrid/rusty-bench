@@ -117,6 +117,7 @@ pub fn DeviceView(data_version: Signal<u64>) -> Element {
         s.views.get(device_id).cloned().unwrap_or_default()
     };
     let view_signal = use_signal(move || view);
+    let cursor_sample_pos = use_signal(|| None::<u64>);
 
     rsx! {
         div { class: "flex-1 flex flex-col overflow-hidden",
@@ -126,6 +127,7 @@ pub fn DeviceView(data_version: Signal<u64>) -> Element {
             CanvasToolbar {
                 device_id: device_id.clone(),
                 view: view_signal,
+                cursor_sample_pos,
                 data_version,
             }
 
@@ -141,6 +143,7 @@ pub fn DeviceView(data_version: Signal<u64>) -> Element {
                         device_id: device_id.clone(),
                         data_version,
                         view: view_signal,
+                        cursor_sample_pos,
                     }
                 }
             }
