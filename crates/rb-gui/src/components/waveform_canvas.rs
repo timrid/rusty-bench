@@ -641,8 +641,9 @@ fn build_digital_signal_js(
 ) -> String {
     let sig_h = row.signal_height_px;
     let mip = dt.transitions();
-    let initial = mip.value_at(bit, range_start as u64);
-    let edges: Vec<u64> = mip.edges_in(bit, range_start as u64..range_end as u64).to_vec();
+    let rs_u64 = range_start as u64;
+    let initial = mip.value_at(bit, rs_u64);
+    let edges: Vec<u64> = mip.edges_in(bit, rs_u64..range_end as u64).to_vec();
     let high_y = sig_h * 0.25;
     let low_y = sig_h * 0.75;
     let mid_y = sig_h * 0.5;

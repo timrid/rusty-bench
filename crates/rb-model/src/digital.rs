@@ -191,7 +191,9 @@ impl DigitalMipMap {
     /// The transition sample indices of channel `ch` lying in `range`.
     ///
     /// Each returned index is the sample at which the level becomes the new
-    /// value (the edge sits between `index - 1` and `index`). Use
+    /// value (the edge sits between `index - 1` and `index`). Edges at
+    /// `range.start` are **excluded** because their effect is already captured
+    /// by [`DigitalMipMap::value_at`] at `range.start`.  Use
     /// [`DigitalMipMap::value_at`] at `range.start` to get the level the run
     /// begins with.
     ///
@@ -200,7 +202,7 @@ impl DigitalMipMap {
     #[must_use]
     pub fn edges_in(&self, ch: usize, range: Range<u64>) -> &[u64] {
         let t = &self.transitions[ch];
-        let lo = t.partition_point(|&x| x < range.start);
+        let lo = t.partition_point(|&x| x <= range.start);
         let hi = t.partition_point(|&x| x < range.end);
         &t[lo..hi]
     }
@@ -337,7 +339,8 @@ mod tests {
         let words = [0b0, 0b1, 0b0, 0b1, 0b0, 0b1, 0b0];
         let m = DigitalMipMap::build(&words, 1);
         // All edges: 1,2,3,4,5,6
-        assert_eq!(m.edges_in(0, 2..5), &[2, 3, 4]);
+        // Edge at 2 is excluded because value_at(2) already reflects it.
+        assert_eq!(m.edges_in(0, 2..5), &[3, 4]);
         assert_eq!(m.edges_in(0, 0..1), &[] as &[u64]);
     }
 
