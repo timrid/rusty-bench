@@ -143,7 +143,7 @@ pub fn WaveformCanvas(
             let rows_snap = v.rows.clone();
             let annotations_snap = v.annotations.clone();
             drop(v);
-            draw_all_canvases(&short_id, &analog, &digital, &rows_snap, &annotations_snap, rs, re, rl);
+            draw_all_canvases(&short_id, &analog, &digital, &rows_snap, &annotations_snap, rs, re, rl, canvas_width_px());
         });
     }
 
@@ -528,6 +528,7 @@ fn draw_all_canvases(
     range_start: usize,
     range_end: usize,
     range_len: f64,
+    signal_width: f64,
 ) {
     let mut all_js = String::new();
 
@@ -545,7 +546,7 @@ fn draw_all_canvases(
             RowKind::Digital => {
                 if let Some(dt) = digital {
                     if let Some(ch) = dt.channels().get(row.channel_index) {
-                        build_digital_signal_js(&cid, dt, ch.bit as usize, range_start, range_end, range_len, row)
+                        build_digital_signal_js(&cid, dt, ch.bit as usize, range_start, range_end, range_len, row, signal_width)
                     } else { String::new() }
                 } else { String::new() }
             }
@@ -661,42 +662,87 @@ fn build_digital_signal_js(
     canvas_id: &str, dt: &rb_model::DigitalTrace, bit: usize,
     range_start: usize, range_end: usize, range_len: f64,
     row: &crate::waveform_state::RowDescriptor,
+    signal_width: f64,
 ) -> String {
     let sig_h = row.signal_height_px;
     let mip = dt.transitions();
     let rs_u64 = range_start as u64;
     let initial = mip.value_at(bit, rs_u64);
     let edges: Vec<u64> = mip.edges_in(bit, rs_u64..range_end as u64).to_vec();
-    let high_y = sig_h * 0.25;
-    let low_y = sig_h * 0.75;
-    let mid_y = sig_h * 0.5;
+    // Integer pixel rows for fillRect (no half-pixel offsets needed).
+    let high_row = (sig_h * 0.25).round();
+    let low_row = (sig_h * 0.75).round();
+    let mid_y = (sig_h * 0.5).round();
+    let full_h = low_row - high_row + 1.0; // full-height block when both levels seen
+
+    let num_pixels = signal_width.ceil() as usize;
+    let dense = edges.len() > num_pixels;
 
     let mut js = format!(
-        "{{var c=document.getElementById('{canvas_id}');if(!c){{console.warn('Canvas not found: {canvas_id}');return;}}var dpr=window.devicePixelRatio||1;var w=c.clientWidth;var h={sig_h};c.width=w*dpr;c.height=h*dpr;var ctx=c.getContext('2d');ctx.scale(dpr,dpr);ctx.fillStyle='{BG_COLOR}';ctx.fillRect(0,0,w,h);"
+        "{{var c=document.getElementById('{canvas_id}');if(!c){{console.warn('Canvas not found: {canvas_id}');return;}}var dpr=window.devicePixelRatio||1;var w=c.clientWidth;var h={sig_h};c.width=w*dpr;c.height=h*dpr;var ctx=c.getContext('2d');ctx.scale(dpr,dpr);ctx.imageSmoothingEnabled=false;ctx.fillStyle='{BG_COLOR}';ctx.fillRect(0,0,w,h);"
     );
-    js.push_str(&format!("ctx.strokeStyle='{GRID_COLOR}';ctx.lineWidth=0.5;ctx.beginPath();ctx.moveTo(0,{mid_y:.1});ctx.lineTo(w,{mid_y:.1});ctx.stroke();"));
+    js.push_str(&format!(
+        "ctx.strokeStyle='{GRID_COLOR}';ctx.lineWidth=0.5;ctx.beginPath();ctx.moveTo(0,{mid_y:.1});ctx.lineTo(w,{mid_y:.1});ctx.stroke();"
+    ));
+    js.push_str(&format!("ctx.fillStyle='{DIGITAL_COLOR}';"));
 
-    if !edges.is_empty() || initial {
-        js.push_str(&format!("ctx.strokeStyle='{DIGITAL_COLOR}';ctx.lineWidth=1.5;ctx.beginPath();"));
-        let mut cy = if initial { high_y } else { low_y };
-        let mut px = range_start as u64;
-        for &ei in &edges {
-            // Horizontal line: from previous edge to this edge at current level
-            js.push_str(&format!(
-                "ctx.moveTo((({px}-{range_start})/{range_len})*w,{cy:.1});ctx.lineTo((({ei}-{range_start})/{range_len})*w,{cy:.1});"
-            ));
-            // Vertical line: toggle level at this edge
-            let next_y = if (cy - high_y).abs() < 0.5 { low_y } else { high_y };
-            js.push_str(&format!(
-                "ctx.moveTo((({ei}-{range_start})/{range_len})*w,{cy:.1});ctx.lineTo((({ei}-{range_start})/{range_len})*w,{next_y:.1});"
-            ));
-            cy = next_y;
-            px = ei;
+    if dense {
+        // ── Dense mode: bucket edges per pixel column ─────────────────
+        // When more edges than pixels, aggregate into min/max per column.
+        // Columns with ≥1 transition draw a full-height block; quiet
+        // columns use value_at() for the correct single-row level.
+        let mut col_has_edge = vec![false; num_pixels];
+        for &e in &edges {
+            let px = (((e as f64 - range_start as f64) / range_len) * signal_width)
+                .round() as usize;
+            if px < num_pixels {
+                col_has_edge[px] = true;
+            }
         }
-        // Final horizontal to end of visible range
+        // Pre-compute correct level per column via value_at (O(log n) each).
+        let samples_per_col = range_len / num_pixels as f64;
+        let mut col_level = vec![false; num_pixels];
+        for col in 0..num_pixels {
+            let s = rs_u64 + ((col as f64 + 0.5) * samples_per_col) as u64;
+            col_level[col] = mip.value_at(bit, s);
+        }
+        // Encode as compact '0'/'1' strings.
+        let edge_str: String = col_has_edge.iter()
+            .map(|&b| if b { '1' } else { '0' }).collect();
+        let lvl_str: String = col_level.iter()
+            .map(|&b| if b { '1' } else { '0' }).collect();
         js.push_str(&format!(
-            "ctx.moveTo((({px}-{range_start})/{range_len})*w,{cy:.1});ctx.lineTo((({range_end}-{range_start})/{range_len})*w,{cy:.1});ctx.stroke();"
+            "var E='{edge_str}',L='{lvl_str}',hH={high_row:.0},lL={low_row:.0},fH={full_h:.0};\
+             for(var x=0;x<E.length;x++){{\
+               if(E[x]=='1'){{ctx.fillRect(x,hH,1,fH);}}\
+               else{{ctx.fillRect(x,L[x]=='1'?hH:lL,1,1);}}\
+             }}"
         ));
+    } else {
+        // ── Sparse mode: draw individual edges ────────────────────────
+        js.push_str(&format!(
+            "function xp(s){{return Math.round(((s-{range_start})/{range_len})*w);}}"
+        ));
+        if !edges.is_empty() || initial {
+            let mut cur: f64 = if initial { high_row } else { low_row };
+            let mut px = rs_u64;
+            for &ei in &edges {
+                js.push_str(&format!(
+                    "ctx.fillRect(xp({px}),{cur:.0},xp({ei})-xp({px}),1);"
+                ));
+                let next: f64 = if (cur - high_row).abs() < 0.5 { low_row } else { high_row };
+                let top = cur.min(next);
+                let h = (next - cur).abs() + 1.0;
+                js.push_str(&format!(
+                    "ctx.fillRect(xp({ei}),{top:.0},1,{h:.0});"
+                ));
+                cur = next;
+                px = ei;
+            }
+            js.push_str(&format!(
+                "ctx.fillRect(xp({px}),{cur:.0},xp({range_end})-xp({px}),1);"
+            ));
+        }
     }
     js.push('}');
     js
