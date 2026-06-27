@@ -84,8 +84,8 @@ pub fn WaveformCanvas(
     let is_running = matches!(acq_state, AcquisitionState::Running);
 
     // ── Dynamic canvas width (replaces hardcoded 800.0) ────────────────
-    // Default 764 = 800 – LABEL_W (36). Updated on wasm32 via onmounted
-    // ResizeObserver; desktop TODO: measure via webview DOM bridge.
+    // Default 764 = 800 – LABEL_W (36). Updated async on mount via
+    // get_client_rect (works cross-platform: wasm32 + desktop webview).
     let canvas_width_px = use_signal(|| 764.0f64);
 
     // Signal-ized sample_count so the drawing effect always sees the
@@ -148,7 +148,8 @@ pub fn WaveformCanvas(
     }
 
     let mut drag_active = use_signal(|| false);
-    let mut drag_start_x = use_signal(|| 0.0f64);
+    // Sample position under the cursor at mousedown (grab point).
+    let mut grab_sample = use_signal(|| None::<u64>);
     let mut divider_drag_row = use_signal(|| None::<usize>);
     let mut divider_drag_start_y = use_signal(|| 0.0f64);
     let mut divider_drag_start_h = use_signal(|| 0.0f64);
@@ -208,17 +209,20 @@ pub fn WaveformCanvas(
                 id: "rows-{short_id}",
                 class: "flex-1 overflow-y-auto relative",
                 onmounted: {
-                    #[cfg_attr(not(target_arch = "wasm32"), allow(unused_mut, unused_variables))]
-                    let mut canvas_width_px = canvas_width_px;
-                    move |_evt| {
-                        #[cfg(target_arch = "wasm32")]
-                        if let Some(el) = _evt.data().downcast::<web_sys::Element>()
-                        {
-                            let w = el.client_width() as f64;
-                            if w > 0.0 {
-                                canvas_width_px.set((w - LABEL_W).max(100.0));
+                    let canvas_width_px = canvas_width_px;
+                    move |data| {
+                        let mut cw = canvas_width_px;
+                        // get_client_rect is async; spawn a task to read the
+                        // actual width once the DOM has settled. Works on both
+                        // wasm32 and desktop webview.
+                        spawn(async move {
+                            if let Ok(rect) = data.get_client_rect().await {
+                                let w = rect.width();
+                                if w > 0.0 {
+                                    cw.set((w - LABEL_W).max(100.0));
+                                }
                             }
-                        }
+                        });
                     }
                 },
                 onwheel: move |evt| {
@@ -232,7 +236,7 @@ pub fn WaveformCanvas(
                     if dx.abs() > 0.01 {
                         // Positive dx (scroll right) → show newer data → increase view_start.
                         // pan() with positive delta_px decreases view_start, so negate.
-                        view.write().pan(-dx as f32, (canvas_width_px() + LABEL_W) as f32, sample_count);
+                        view.write().pan(-dx as f32, canvas_width_px() as f32, sample_count);
                     } else {
                         let factor: f64 = if dy < 0.0 { 0.8 } else { 1.25 };
                         view.write().zoom(factor, sample_count);
@@ -241,9 +245,9 @@ pub fn WaveformCanvas(
                 },
                 onmousedown: move |evt| {
                     let coords = evt.data().coordinates();
-                    let px = coords.page().x;
                     let py = coords.page().y;
                     let el_y = coords.element().y;
+                    let el_x = coords.element().x;
                     let v = view.read();
                     if let Some(ri) = v.row_at_y(el_y) {
                         let rt = v.row_y_offset(ri);
@@ -257,13 +261,21 @@ pub fn WaveformCanvas(
                             return;
                         }
                     }
+                    // Grab: remember the sample under the cursor so it
+                    // follows the mouse 1:1 during drag.
+                    let gs = if el_x >= LABEL_W {
+                        let cw = canvas_width_px();
+                        if cw > 0.0 {
+                            let frac = ((el_x - LABEL_W) / cw).clamp(0.0, 1.0);
+                            Some(v.view_start as u64 + (frac * v.view_samples as f64) as u64)
+                        } else { None }
+                    } else { None };
                     drop(v);
+                    grab_sample.set(gs);
                     drag_active.set(true);
-                    drag_start_x.set(px);
                 },
                 onmousemove: move |evt| {
                     let coords = evt.data().coordinates();
-                    let px = coords.page().x;
                     let py = coords.page().y;
                     let cx = coords.element().x;
                     if let Some(_ri) = divider_drag_row() {
@@ -273,9 +285,18 @@ pub fn WaveformCanvas(
                         return;
                     }
                     if drag_active() {
-                        let dx = (px - drag_start_x()) as f32;
-                        drag_start_x.set(px);
-                        view.write().pan(dx, (canvas_width_px() + LABEL_W) as f32, sample_count);
+                        if let Some(gs) = grab_sample() {
+                            let mut v = view.write();
+                            let cw = canvas_width_px();
+                            if cw > 0.0 && cx >= LABEL_W {
+                                let frac = ((cx - LABEL_W) / cw).clamp(0.0, 1.0);
+                                let offset = (frac * v.view_samples as f64) as u64;
+                                let new_vs = gs.saturating_sub(offset);
+                                let max_vs = sample_count.saturating_sub(v.view_samples);
+                                v.view_start = (new_vs as usize).min(max_vs);
+                            }
+                            v.auto_scroll = false;
+                        }
                         data_version += 1;
                     }
                     let v = view.read();
@@ -297,6 +318,7 @@ pub fn WaveformCanvas(
                         data_version += 1;
                     }
                     drag_active.set(false);
+                    grab_sample.set(None);
                     divider_drag_row.set(None);
                     divider_drag_live_h.set(None);
                 },
@@ -306,7 +328,8 @@ pub fn WaveformCanvas(
                         view.write().set_row_height(ri, h);
                         data_version += 1;
                     }
-                    drag_active.set(false); divider_drag_row.set(None); divider_drag_live_h.set(None);
+                    drag_active.set(false); grab_sample.set(None);
+                    divider_drag_row.set(None); divider_drag_live_h.set(None);
                     cursor_sample_pos.set(None); cursor_px.set(None);
                 },
 
