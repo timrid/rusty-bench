@@ -96,12 +96,34 @@ impl DigitalStore {
     }
 }
 
-/// Per-channel transition index over a [`DigitalStore`], maintained incrementally.
+/// Aggregation radix for the digital mip-map pyramid.  Larger than the
+/// analog radix because digital chunks are tiny (2 bools each).
+const DIGITAL_RADIX: usize = 64;
+
+/// One aggregated chunk in the digital multi-resolution pyramid.
+#[derive(Clone, Copy, Debug, Default)]
+struct Chunk {
+    /// At least one transition occurred within this chunk's sample range.
+    has_edge: bool,
+    /// The number of transitions in this chunk is odd.
+    parity: bool,
+}
+
+/// Result of [`DigitalMipMap::query_dense`] – per-bucket activity and
+/// toggle parity for efficient dense-mode waveform drawing.
+#[derive(Clone, Debug)]
+pub struct DenseQuery {
+    /// `has_edge[i]` is true when bucket `i` contains ≥ 1 transition.
+    pub has_edge: Vec<bool>,
+    /// `parity[i]` is true when bucket `i` contains an odd number of
+    /// transitions (used to track level toggles across buckets).
+    pub parity: Vec<bool>,
+}
+
+/// Per-channel transition index *and* multi-resolution chunk pyramid.
 ///
-/// For each channel it stores the value at sample `0` and the sorted sample
-/// indices at which the channel's level differs from the previous sample. This
-/// lets the GUI find all visible edges in a range with a binary search and
-/// reconstruct the level between them.
+/// The transition list gives O(log n) single-sample queries; the pyramid
+/// gives O(k) dense queries (k ≈ pixel columns), independent of edge count.
 #[derive(Clone, Debug)]
 pub struct DigitalMipMap {
     channel_count: u8,
@@ -109,10 +131,14 @@ pub struct DigitalMipMap {
     initial: Vec<bool>,
     last: Vec<bool>,
     transitions: Vec<Vec<u64>>,
+    /// `levels[channel][level][chunk]`.  Level 0 chunks span
+    /// [`DIGITAL_RADIX`] samples; each higher level aggregates
+    /// `DIGITAL_RADIX` chunks of the level below.
+    levels: Vec<Vec<Vec<Chunk>>>,
 }
 
 impl DigitalMipMap {
-    /// Creates an empty transition index for `channel_count` channels.
+    /// Creates an empty index + pyramid for `channel_count` channels.
     ///
     /// # Panics
     /// Panics if `channel_count` is `0` or greater than [`MAX_DIGITAL_CHANNELS`].
@@ -129,10 +155,11 @@ impl DigitalMipMap {
             initial: vec![false; n],
             last: vec![false; n],
             transitions: vec![Vec::new(); n],
+            levels: vec![Vec::new(); n],
         }
     }
 
-    /// Builds a transition index over `words` in one shot.
+    /// Builds the index and pyramid over `words` in one shot.
     #[must_use]
     pub fn build(words: &[LogicWord], channel_count: u8) -> Self {
         let mut m = Self::new(channel_count);
@@ -152,16 +179,20 @@ impl DigitalMipMap {
         self.base_len
     }
 
-    /// Brings the index up to date with `words`.
+    /// Brings the index and pyramid up to date with `words`.
     ///
-    /// `words` is the full, append-only logic word slice (e.g.
-    /// [`DigitalStore::words`]). Only the newly appended samples are scanned, so
-    /// repeated calls always match a single [`DigitalMipMap::build`].
+    /// `words` is the full, append-only logic word slice.  Only newly
+    /// appended samples are scanned; repeated calls are cheap and match
+    /// a single [`DigitalMipMap::build`].
     pub fn extend(&mut self, words: &[LogicWord]) {
         debug_assert!(
             words.len() >= self.base_len,
             "DigitalMipMap base is append-only"
         );
+        let radix = DIGITAL_RADIX;
+        let prev_base_len = self.base_len;
+
+        // ── Update transitions ─────────────────────────────────────────
         for (idx, &word) in words.iter().enumerate().skip(self.base_len) {
             for ch in 0..self.channel_count as usize {
                 let v = (word >> ch) & 1 != 0;
@@ -175,9 +206,45 @@ impl DigitalMipMap {
             }
         }
         self.base_len = words.len();
+
+        // ── Rebuild pyramid levels ─────────────────────────────────────
+        // Same incremental strategy as the analog mip-map: only chunks
+        // affected by newly appended base samples are recomputed.
+        for ch in 0..self.channel_count as usize {
+            if self.levels[ch].is_empty() {
+                self.levels[ch].push(Vec::new());
+            }
+        }
+
+        let mut from = prev_base_len / radix;
+        for ch in 0..self.channel_count as usize {
+            rebuild_level0(&self.transitions[ch], &mut self.levels[ch][0], from, radix, self.base_len);
+        }
+
+        let mut lvl = 1;
+        loop {
+            let below_len = self.levels[0][lvl - 1].len();
+            if below_len <= 1 {
+                for ch in 0..self.channel_count as usize {
+                    self.levels[ch].truncate(lvl);
+                }
+                break;
+            }
+            from /= radix;
+
+            for ch in 0..self.channel_count as usize {
+                if self.levels[ch].len() == lvl {
+                    self.levels[ch].push(Vec::new());
+                }
+                // Safe split: levels[ch][..lvl] and levels[ch][lvl..]
+                let (lower_slice, upper_slice) = self.levels[ch].split_at_mut(lvl);
+                rebuild_level(&lower_slice[lvl - 1], &mut upper_slice[0], from, radix);
+            }
+            lvl += 1;
+        }
     }
 
-    /// Level of channel `ch` at sample `index`.
+    /// Level of channel `ch` at sample `index`.  O(log n) via binary search.
     ///
     /// # Panics
     /// Panics if `ch` is out of range.
@@ -190,12 +257,8 @@ impl DigitalMipMap {
 
     /// The transition sample indices of channel `ch` lying in `range`.
     ///
-    /// Each returned index is the sample at which the level becomes the new
-    /// value (the edge sits between `index - 1` and `index`). Edges at
-    /// `range.start` are **excluded** because their effect is already captured
-    /// by [`DigitalMipMap::value_at`] at `range.start`.  Use
-    /// [`DigitalMipMap::value_at`] at `range.start` to get the level the run
-    /// begins with.
+    /// Edges at `range.start` are **excluded** – [`value_at`] already
+    /// captures their effect.  For sparse (zoomed-in) drawing.
     ///
     /// # Panics
     /// Panics if `ch` is out of range.
@@ -207,6 +270,19 @@ impl DigitalMipMap {
         &t[lo..hi]
     }
 
+    /// Number of transitions in `range`.  O(log n), does not materialise
+    /// the edge slice.
+    ///
+    /// # Panics
+    /// Panics if `ch` is out of range.
+    #[must_use]
+    pub fn edge_count_in(&self, ch: usize, range: Range<u64>) -> usize {
+        let t = &self.transitions[ch];
+        let lo = t.partition_point(|&x| x <= range.start);
+        let hi = t.partition_point(|&x| x < range.end);
+        hi - lo
+    }
+
     /// Total number of transitions recorded for channel `ch`.
     ///
     /// # Panics
@@ -214,6 +290,131 @@ impl DigitalMipMap {
     #[must_use]
     pub fn transition_count(&self, ch: usize) -> usize {
         self.transitions[ch].len()
+    }
+
+    /// Dense query: per-bucket activity and toggle parity for drawing at
+    /// a fixed pixel budget.  Picks the appropriate pyramid level so that
+    /// `has_edge` lookups are O(1) per bucket; `parity` is resolved via
+    /// binary search on the transition list.  Total O(k · log n).
+    ///
+    /// Caller supplies `value_at(ch, range.start)` separately for the
+    /// starting level.
+    ///
+    /// # Panics
+    /// Panics if `ch` is out of range or `num_buckets == 0`.
+    #[must_use]
+    pub fn query_dense(
+        &self,
+        ch: usize,
+        range: Range<u64>,
+        num_buckets: usize,
+    ) -> DenseQuery {
+        assert!(num_buckets > 0, "num_buckets must be > 0");
+        let span = range.end.saturating_sub(range.start) as f64;
+        let bucket_size = (span / num_buckets as f64).max(1.0);
+
+        // Pick coarsest level whose chunk size ≤ bucket size.
+        let radix = DIGITAL_RADIX;
+        let mut lvl = 0;
+        let mut chunk_size = radix;
+        while lvl + 1 < self.levels[ch].len() {
+            let next_size = chunk_size * radix;
+            if (next_size as f64) <= bucket_size {
+                lvl += 1;
+                chunk_size = next_size;
+            } else {
+                break;
+            }
+        }
+
+        let level = &self.levels[ch][lvl];
+        let t = &self.transitions[ch];
+
+        let mut has_edge = Vec::with_capacity(num_buckets);
+        let mut parity = Vec::with_capacity(num_buckets);
+
+        let cs = chunk_size as u64;
+        for i in 0..num_buckets {
+            let b_start = range.start + (i as f64 * bucket_size) as u64;
+            let b_end = range.start + ((i + 1) as f64 * bucket_size) as u64;
+
+            // has_edge: OR of covering chunks  O(1–3)
+            let c_start = ((b_start / cs) as usize).min(level.len());
+            let c_end = ((b_end.saturating_sub(1) / cs + 1) as usize).min(level.len());
+            let mut he = false;
+            for ci in c_start..c_end {
+                he |= level[ci].has_edge;
+            }
+
+            // parity: binary search on transitions  O(log n)
+            let lo = t.partition_point(|&x| x <= b_start);
+            let hi = t.partition_point(|&x| x < b_end);
+            let p = (hi - lo) % 2 == 1;
+
+            has_edge.push(he);
+            parity.push(p);
+        }
+
+        DenseQuery { has_edge, parity }
+    }
+}
+
+// ── Level-rebuild helpers ────────────────────────────────────────────────────
+
+fn rebuild_level0(
+    transitions: &[u64],
+    out: &mut Vec<Chunk>,
+    from_bucket: usize,
+    radix: usize,
+    base_len: usize,
+) {
+    out.truncate(from_bucket);
+    let mut b = from_bucket;
+    // Start of the transition slice for the current chunk.
+    let mut ti = transitions.partition_point(|&x| (x as usize) < b * radix);
+    loop {
+        let start = b * radix;
+        if start >= base_len {
+            break;
+        }
+        let end = (start + radix).min(base_len);
+        let mut has_edge = false;
+        let mut count: u64 = 0;
+        while ti < transitions.len() && (transitions[ti] as usize) < end {
+            if (transitions[ti] as usize) > start {
+                has_edge = true;
+                count += 1;
+            }
+            ti += 1;
+        }
+        out.push(Chunk { has_edge, parity: count % 2 == 1 });
+        b += 1;
+    }
+}
+
+fn rebuild_level(
+    children: &[Chunk],
+    out: &mut Vec<Chunk>,
+    from_bucket: usize,
+    radix: usize,
+) {
+    out.truncate(from_bucket);
+    let n = children.len();
+    let mut b = from_bucket;
+    loop {
+        let start = b * radix;
+        if start >= n {
+            break;
+        }
+        let end = (start + radix).min(n);
+        let mut has_edge = children[start].has_edge;
+        let mut parity = children[start].parity;
+        for c in &children[start + 1..end] {
+            has_edge |= c.has_edge;
+            parity ^= c.parity;
+        }
+        out.push(Chunk { has_edge, parity });
+        b += 1;
     }
 }
 

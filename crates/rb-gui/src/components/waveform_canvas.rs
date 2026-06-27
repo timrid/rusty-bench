@@ -668,15 +668,16 @@ fn build_digital_signal_js(
     let mip = dt.transitions();
     let rs_u64 = range_start as u64;
     let initial = mip.value_at(bit, rs_u64);
-    let edges: Vec<u64> = mip.edges_in(bit, rs_u64..range_end as u64).to_vec();
     // Integer pixel rows for fillRect (no half-pixel offsets needed).
     let high_row = (sig_h * 0.25).round();
     let low_row = (sig_h * 0.75).round();
     let mid_y = (sig_h * 0.5).round();
-    let full_h = low_row - high_row + 1.0; // full-height block when both levels seen
+    let full_h = low_row - high_row + 1.0;
+    let initial_row = if initial { high_row } else { low_row };
 
     let num_pixels = signal_width.ceil() as usize;
-    let dense = edges.len() > num_pixels;
+    let edge_count = mip.edge_count_in(bit, rs_u64..range_end as u64);
+    let dense = edge_count > num_pixels;
 
     let mut js = format!(
         "{{var c=document.getElementById('{canvas_id}');if(!c){{console.warn('Canvas not found: {canvas_id}');return;}}var dpr=window.devicePixelRatio||1;var w=c.clientWidth;var h={sig_h};c.width=w*dpr;c.height=h*dpr;var ctx=c.getContext('2d');ctx.scale(dpr,dpr);ctx.imageSmoothingEnabled=false;ctx.fillStyle='{BG_COLOR}';ctx.fillRect(0,0,w,h);"
@@ -687,44 +688,32 @@ fn build_digital_signal_js(
     js.push_str(&format!("ctx.fillStyle='{DIGITAL_COLOR}';"));
 
     if dense {
-        // ── Dense mode: bucket edges per pixel column ─────────────────
-        // When more edges than pixels, aggregate into min/max per column.
-        // Columns with ≥1 transition draw a full-height block; quiet
-        // columns use value_at() for the correct single-row level.
-        let mut col_has_edge = vec![false; num_pixels];
-        for &e in &edges {
-            let px = (((e as f64 - range_start as f64) / range_len) * signal_width)
-                .round() as usize;
-            if px < num_pixels {
-                col_has_edge[px] = true;
-            }
-        }
-        // Pre-compute correct level per column via value_at (O(log n) each).
-        let samples_per_col = range_len / num_pixels as f64;
-        let mut col_level = vec![false; num_pixels];
-        for col in 0..num_pixels {
-            let s = rs_u64 + ((col as f64 + 0.5) * samples_per_col) as u64;
-            col_level[col] = mip.value_at(bit, s);
-        }
-        // Encode as compact '0'/'1' strings.
-        let edge_str: String = col_has_edge.iter()
+        // ── Dense: mip-map pyramid query, O(k · log n) ────────────────
+        // has_edge from chunk OR (O(1)/bucket), parity from binary
+        // search (O(log n)/bucket).  No per-column value_at needed.
+        let q = mip.query_dense(bit, rs_u64..range_end as u64, num_pixels);
+        let edge_str: String = q.has_edge.iter()
             .map(|&b| if b { '1' } else { '0' }).collect();
-        let lvl_str: String = col_level.iter()
+        let parity_str: String = q.parity.iter()
             .map(|&b| if b { '1' } else { '0' }).collect();
         js.push_str(&format!(
-            "var E='{edge_str}',L='{lvl_str}',hH={high_row:.0},lL={low_row:.0},fH={full_h:.0};\
+            "var E='{edge_str}',P='{parity_str}',hH={high_row:.0},lL={low_row:.0},fH={full_h:.0},cur={initial_row:.0},bw=w/E.length;\
              for(var x=0;x<E.length;x++){{\
-               if(E[x]=='1'){{ctx.fillRect(x,hH,1,fH);}}\
-               else{{ctx.fillRect(x,L[x]=='1'?hH:lL,1,1);}}\
+               var px=Math.round(x*bw),nx=Math.round((x+1)*bw),pw=nx-px;\
+               if(pw<=0)continue;\
+               if(E[x]=='1'){{ctx.fillRect(px,hH,pw,fH);}}\
+               else{{ctx.fillRect(px,cur,pw,1);}}\
+               if(P[x]=='1')cur=cur==hH?lL:hH;\
              }}"
         ));
     } else {
-        // ── Sparse mode: draw individual edges ────────────────────────
+        // ── Sparse: draw individual edges ─────────────────────────────
+        let edges: Vec<u64> = mip.edges_in(bit, rs_u64..range_end as u64).to_vec();
         js.push_str(&format!(
             "function xp(s){{return Math.round(((s-{range_start})/{range_len})*w);}}"
         ));
         if !edges.is_empty() || initial {
-            let mut cur: f64 = if initial { high_row } else { low_row };
+            let mut cur: f64 = initial_row;
             let mut px = rs_u64;
             for &ei in &edges {
                 js.push_str(&format!(

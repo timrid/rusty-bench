@@ -24,5 +24,5 @@ mod timebase;
 pub use analog::{AnalogMipMap, AnalogStore, AnalogTrace, Bucket, DEFAULT_RADIX, MinMax};
 pub use channel::{AnalogChannel, AnalogFormat, ChannelId, DigitalChannel};
 pub use chunk::SampleChunk;
-pub use digital::{DigitalMipMap, DigitalStore, DigitalTrace, LogicWord, MAX_DIGITAL_CHANNELS};
+pub use digital::{DenseQuery, DigitalMipMap, DigitalStore, DigitalTrace, LogicWord, MAX_DIGITAL_CHANNELS};
 pub use timebase::Timebase;
