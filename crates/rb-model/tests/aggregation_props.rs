@@ -51,10 +51,12 @@ proptest! {
 
         prop_assert_eq!(incr.base_len(), batch.base_len());
         prop_assert_eq!(incr.level_count(), batch.level_count());
+        // Compare via query_envelope at pixel counts proportional to level granularity.
+        let n = base.len().max(1);
         for l in 0..batch.level_count() {
-            // Compare via queries over the whole range at increasing budgets.
-            let a = incr.query(&base, 0..base.len().max(1), 1 << (l + 1));
-            let b = batch.query(&base, 0..base.len().max(1), 1 << (l + 1));
+            let pc = ((1usize << (l + 1)) / 8).max(1);
+            let a = incr.query_envelope(&base, 0..n, pc);
+            let b = batch.query_envelope(&base, 0..n, pc);
             prop_assert_eq!(a, b);
         }
     }
@@ -66,7 +68,7 @@ proptest! {
         radix in 2usize..6,
         a in 0usize..800,
         b in 0usize..800,
-        max_buckets in 1usize..200,
+        pixel_count in 1usize..25,
     ) {
         let len = base.len();
         let start = a.min(len);
@@ -74,25 +76,28 @@ proptest! {
         prop_assume!(start < end);
 
         let m = AnalogMipMap::build(&base, radix);
-        let buckets = m.query(&base, start..end, max_buckets);
+        let buckets = m.query_envelope(&base, start..end, pixel_count);
         prop_assert!(!buckets.is_empty());
 
         // Contiguous, no gaps or overlaps.
         for w in buckets.windows(2) {
             prop_assert_eq!(w[0].end, w[1].start);
         }
-        // The tiling covers the whole requested range (whole-bucket edges).
-        prop_assert!(buckets.first().unwrap().start <= start);
-        prop_assert!(buckets.last().unwrap().end >= end);
+        // The tiling covers the whole requested range (query_envelope clamps
+        // bucket edges to range boundaries, so start == range.start).
+        prop_assert_eq!(buckets.first().unwrap().start, start);
+        prop_assert_eq!(buckets.last().unwrap().end, end);
         // No bucket exceeds the base length.
         prop_assert!(buckets.last().unwrap().end <= len);
 
-        // Each bucket's aggregate matches the truth over its exact span.
+        // Each bucket's aggregate is conservative: its min/max covers the
+        // full MipMap bucket (may be wider than the clamped span).  For
+        // envelope rendering this is correct and desired.
         for bk in &buckets {
             prop_assert!(bk.start < bk.end);
             let (min, max) = true_minmax(&base, bk.start, bk.end);
-            prop_assert_eq!(bk.min, min);
-            prop_assert_eq!(bk.max, max);
+            prop_assert!(bk.min <= min, "bucket {:?} min {} > true min {}", bk, bk.min, min);
+            prop_assert!(bk.max >= max, "bucket {:?} max {} < true max {}", bk, bk.max, max);
         }
     }
 

@@ -540,7 +540,7 @@ fn draw_all_canvases(
             RowKind::Analog => {
                 if let Some(trace) = analog.get(row.channel_index) {
                     let color = ANALOG_COLORS[row.channel_index % ANALOG_COLORS.len()];
-                    build_analog_signal_js(&cid, trace, range_start, range_end, range_len, row, color)
+                    build_analog_signal_js(&cid, trace, range_start, range_end, range_len, row, color, signal_width)
                 } else { String::new() }
             }
             RowKind::Digital => {
@@ -607,15 +607,40 @@ fn build_analog_signal_js(
     canvas_id: &str, trace: &AnalogTrace,
     range_start: usize, range_end: usize, range_len: f64,
     row: &crate::waveform_state::RowDescriptor, color: &str,
+    signal_width: f64,
 ) -> String {
     let sig_h = row.signal_height_px;
-    let range = range_start..range_end;
-    let buckets = trace.buckets(range.clone(), 1200usize.max(1));
-    if buckets.is_empty() {
-        log::warn!("Analog canvas {canvas_id}: no buckets for range {range_start}..{range_end}, trace len={}", trace.len());
+    let samples_per_px = range_len / signal_width.max(1.0);
+
+    // ── Per-sample mode: zoomed in, ≤ 1 sample per pixel ──────────────
+    if samples_per_px < 1.0 {
+        return build_analog_per_sample(canvas_id, trace, range_start, range_end,
+                                        range_len, sig_h, color, samples_per_px);
+    }
+
+    // ── Envelope mode: zoomed out, min/max fill per pixel ─────────────
+    build_analog_envelope(canvas_id, trace, range_start, range_end, range_len,
+                          sig_h, color, signal_width)
+}
+
+/// Per-sample line/point rendering for close-up zoom.
+fn build_analog_per_sample(
+    canvas_id: &str, trace: &AnalogTrace,
+    range_start: usize, range_end: usize, range_len: f64,
+    sig_h: f64, color: &str, samples_per_px: f64,
+) -> String {
+    let store = trace.store();
+    let raw = store.raw();
+    let r_start = range_start.min(raw.len());
+    let r_end = range_end.min(raw.len());
+    if r_start >= r_end {
         return String::new();
     }
-    let (raw_lo, raw_hi) = buckets.iter().fold((i32::MAX, i32::MIN), |(lo, hi), b| (lo.min(b.min), hi.max(b.max)));
+    let samples = &raw[r_start..r_end];
+
+    // Compute physical range.
+    let (raw_lo, raw_hi) = samples.iter()
+        .fold((i32::MAX, i32::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
     let phys_lo = trace.to_physical(raw_lo);
     let phys_hi = trace.to_physical(raw_hi);
     let margin = (phys_hi - phys_lo).abs() * 0.1 + 1e-12;
@@ -623,37 +648,156 @@ fn build_analog_signal_js(
     let p_hi = phys_hi + margin;
     let p_span = (p_hi - p_lo).max(1e-12);
 
+    let show_dots = samples_per_px < 0.1; // ≥ 10 px between samples
+
     let mut js = format!(
         "{{var c=document.getElementById('{canvas_id}');if(!c){{console.warn('Canvas not found: {canvas_id}');return;}}var dpr=window.devicePixelRatio||1;var w=c.clientWidth;var h={sig_h};c.width=w*dpr;c.height=h*dpr;var ctx=c.getContext('2d');ctx.scale(dpr,dpr);ctx.fillStyle='{BG_COLOR}';ctx.fillRect(0,0,w,h);"
     );
     // Grid
     js.push_str(&format!("ctx.strokeStyle='{GRID_COLOR}';ctx.lineWidth=0.5;"));
-    for i in 0..=5 { let gy = i as f64 / 5.0 * sig_h; js.push_str(&format!("ctx.beginPath();ctx.moveTo(0,{gy:.1});ctx.lineTo(w,{gy:.1});ctx.stroke();")); }
+    for i in 0..=5 {
+        let gy = i as f64 / 5.0 * sig_h;
+        js.push_str(&format!(
+            "ctx.beginPath();ctx.moveTo(0,{gy:.1});ctx.lineTo(w,{gy:.1});ctx.stroke();"
+        ));
+    }
+    // Zero line
+    if p_lo < 0.0 && p_hi > 0.0 {
+        let zy = sig_h - ((0.0 - p_lo) / p_span * sig_h);
+        js.push_str(&format!(
+            "ctx.strokeStyle='#30363d';ctx.lineWidth=1;ctx.setLineDash([4,4]);ctx.beginPath();ctx.moveTo(0,{zy:.1});ctx.lineTo(w,{zy:.1});ctx.stroke();ctx.setLineDash([]);"
+        ));
+    }
+
+    // Build JS coordinate arrays.
+    let mut xv = String::from("[");
+    let mut yv = String::from("[");
+    let inv_range = 1.0 / range_len.max(1.0);
+    for (i, &v) in samples.iter().enumerate() {
+        let sample_idx = r_start + i;
+        let px = (sample_idx as f64 - range_start as f64) * inv_range;
+        let py = sig_h - ((trace.to_physical(v).clamp(p_lo, p_hi) - p_lo) / p_span * sig_h);
+        xv.push_str(&format!("{px:.6},"));
+        yv.push_str(&format!("{py:.3},"));
+    }
+    xv.push(']');
+    yv.push(']');
+
+    js.push_str(&format!("var xv={xv},yv={yv},n=xv.length;"));
+    // xs: 0..1 fraction → canvas pixel
+    js.push_str("function xs(f){return f*w;}");
+
+    // ── Polyline connecting consecutive samples ─────────────────────
+    js.push_str(&format!(
+        "ctx.strokeStyle='{color}';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(xs(xv[0]),yv[0]);"
+    ));
+    js.push_str("for(var i=1;i<n;i++)ctx.lineTo(xs(xv[i]),yv[i]);ctx.stroke();");
+
+    // ── Sample dots (very close zoom) ───────────────────────────────
+    if show_dots {
+        js.push_str(&format!("ctx.fillStyle='{color}';"));
+        js.push_str(
+            "for(var i=0;i<n;i++){{var px=Math.round(xs(xv[i])),py=Math.round(yv[i]);ctx.beginPath();ctx.arc(px,py,2.5,0,6.283);ctx.fill();}}",
+        );
+    }
+
+    js.push('}');
+    js
+}
+
+/// Envelope (min/max fill) rendering for zoomed-out views.
+///
+/// Envelope (min/max fill) for zoomed-out views.
+///
+/// Queries ~`pixel_count * 8` MipMap-level buckets, then in JS aggregates
+/// them onto exact pixel columns — one `fillRect` per column, always 1 px wide.
+fn build_analog_envelope(
+    canvas_id: &str, trace: &AnalogTrace,
+    range_start: usize, range_end: usize, range_len: f64,
+    sig_h: f64, color: &str, signal_width: f64,
+) -> String {
+    let pixel_count = signal_width.ceil() as usize;
+    let range = range_start..range_end;
+    let buckets = trace.envelope_buckets(range.clone(), pixel_count);
+    if buckets.is_empty() {
+        log::warn!("Envelope canvas {canvas_id}: no buckets for range {range_start}..{range_end}");
+        return String::new();
+    }
+    log::debug!("Envelope canvas {canvas_id}: {} buckets for {pixel_count} px", buckets.len());
+
+    // Compute physical Y range from all visible buckets.
+    let (raw_lo, raw_hi) = buckets.iter()
+        .filter(|b| b.min != 0 || b.max != 0) // skip empty pixels
+        .fold((i32::MAX, i32::MIN), |(lo, hi), b| (lo.min(b.min), hi.max(b.max)));
+    if raw_lo == i32::MAX {
+        // All pixels were empty (no data in range).
+        return format!(
+            "{{var c=document.getElementById('{canvas_id}');if(!c)return;var dpr=window.devicePixelRatio||1;c.width=c.clientWidth*dpr;c.height={sig_h}*dpr;var ctx=c.getContext('2d');ctx.scale(dpr,dpr);ctx.fillStyle='{BG_COLOR}';ctx.fillRect(0,0,c.clientWidth,{sig_h});}}"
+        );
+    }
+    let phys_lo = trace.to_physical(raw_lo);
+    let phys_hi = trace.to_physical(raw_hi);
+    let margin = (phys_hi - phys_lo).abs() * 0.1 + 1e-12;
+    let p_lo = phys_lo - margin;
+    let p_hi = phys_hi + margin;
+    let p_span = (p_hi - p_lo).max(1e-12);
+
+    // Build JS arrays: bucket start positions + physical min/max per bucket.
+    let mut xv = String::from("[");
+    let mut mins = String::from("[");
+    let mut maxs = String::from("[");
+    for b in &buckets {
+        let min_p = trace.to_physical(b.min);
+        let max_p = trace.to_physical(b.max);
+        let min_clamped = min_p.clamp(p_lo, p_hi);
+        let max_clamped = max_p.clamp(p_lo, p_hi);
+        xv.push_str(&format!("{},", b.start));
+        mins.push_str(&format!("{min_clamped:.5},"));
+        maxs.push_str(&format!("{max_clamped:.5},"));
+    }
+    xv.push(']');
+    mins.push(']');
+    maxs.push(']');
+
+    let mut js = format!(
+        "{{var c=document.getElementById('{canvas_id}');if(!c){{console.warn('Canvas not found: {canvas_id}');return;}}var dpr=window.devicePixelRatio||1;var w=c.clientWidth;var h={sig_h};c.width=w*dpr;c.height=h*dpr;var ctx=c.getContext('2d');ctx.scale(dpr,dpr);ctx.fillStyle='{BG_COLOR}';ctx.fillRect(0,0,w,h);"
+    );
+    // Grid lines
+    js.push_str(&format!("ctx.strokeStyle='{GRID_COLOR}';ctx.lineWidth=0.5;"));
+    for i in 0..=5 {
+        let gy = i as f64 / 5.0 * sig_h;
+        js.push_str(&format!("ctx.beginPath();ctx.moveTo(0,{gy:.1});ctx.lineTo(w,{gy:.1});ctx.stroke();"));
+    }
     // Zero line
     if p_lo < 0.0 && p_hi > 0.0 {
         let zy = sig_h - ((0.0 - p_lo) / p_span * sig_h);
         js.push_str(&format!("ctx.strokeStyle='#30363d';ctx.lineWidth=1;ctx.setLineDash([4,4]);ctx.beginPath();ctx.moveTo(0,{zy:.1});ctx.lineTo(w,{zy:.1});ctx.stroke();ctx.setLineDash([]);"));
     }
-    // Data arrays
-    let mut xv = String::from("[");
-    let mut mxv = String::from("[");
-    let mut mnv = String::from("[");
-    for b in &buckets {
-        xv.push_str(&format!("{},", b.start));
-        mxv.push_str(&format!("{:.1},", trace.to_physical(b.max).clamp(p_lo, p_hi)));
-        mnv.push_str(&format!("{:.1},", trace.to_physical(b.min).clamp(p_lo, p_hi)));
-    }
-    xv.push(']'); mxv.push(']'); mnv.push(']');
-    // JS: scale sample index to pixel
-    js.push_str(&format!("var xv={xv},mv={mxv},lv={mnv},n=xv.length;"));
+    // Y transform: physical value → canvas Y coordinate
     js.push_str(&format!("function ty(v){{return {sig_h}-((v-({p_lo}))/{p_span}*{sig_h});}}"));
+    // Data arrays: bucket start positions, mins, maxs
+    js.push_str(&format!("var xv={xv},mins={mins},maxs={maxs},n=xv.length;"));
+    // xs: sample index → canvas x (float)
     js.push_str(&format!("function xs(s){{return((s-{range_start})/{range_len})*w;}}"));
-    // Fill
-    js.push_str(&format!("ctx.fillStyle='{color}1a';ctx.beginPath();ctx.moveTo(xs(xv[0]),ty(mv[0]));"));
-    js.push_str("for(var i=1;i<n;i++)ctx.lineTo(xs(xv[i]),ty(mv[i]));for(var i=n-1;i>=0;i--)ctx.lineTo(xs(xv[i]),ty(lv[i]));ctx.closePath();ctx.fill();");
-    // Center line
-    js.push_str(&format!("ctx.strokeStyle='{color}';ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(xs(xv[0]),ty((mv[0]+lv[0])/2));"));
-    js.push_str("for(var i=1;i<n;i++)ctx.lineTo(xs(xv[i]),ty((mv[i]+lv[i])/2));ctx.stroke();");
+    // Per-pixel column accumulators
+    js.push_str("var nC=Math.round(w),cMin=new Array(nC).fill(Infinity),cMax=new Array(nC).fill(-Infinity);");
+    // Distribute each bucket to overlapping pixel columns.
+    js.push_str("for(var i=0;i<n;i++){{");
+    js.push_str("var bx=xs(xv[i]),nx=i<n-1?xs(xv[i+1]):w+1;");
+    js.push_str("var c0=Math.max(0,Math.floor(bx)),c1=Math.min(nC,Math.ceil(nx));");
+    js.push_str("for(var c=c0;c<c1;c++){{");
+    js.push_str("cMin[c]=Math.min(cMin[c],mins[i]);cMax[c]=Math.max(cMax[c],maxs[i]);");
+    js.push_str("}}");
+    js.push_str("}}");
+    // Draw: one fillRect per pixel column, always 1 px wide.
+    js.push_str(&format!("ctx.fillStyle='{color}';ctx.globalAlpha=0.8;"));
+    js.push_str("for(var c=0;c<nC;c++){{");
+    js.push_str("if(cMin[c]<=cMax[c]){{");
+    js.push_str("var y0=Math.round(ty(cMax[c])),y1=Math.round(ty(cMin[c]));");
+    js.push_str("ctx.fillRect(c,y0,1,Math.max(1,y1-y0));");
+    js.push_str("}}");
+    js.push_str("}}");
+    js.push_str("ctx.globalAlpha=1;");
     js.push('}');
     js
 }

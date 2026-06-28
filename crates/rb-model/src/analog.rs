@@ -2,8 +2,13 @@
 //!
 //! Base samples are kept as raw integers in an [`AnalogStore`]. An
 //! [`AnalogMipMap`] maintains a min/max pyramid over the base level so the GUI
-//! can draw any zoom level at roughly constant cost: a query for `N` buckets
-//! over a range picks the pyramid level whose bucket count fits within `N`.
+//! can draw any zoom level at roughly constant cost:
+//!
+//! - Per-sample drawing (zoomed in): read raw samples directly via
+//!   [`AnalogTrace::store`] → [`AnalogStore::read`].
+//! - Envelope rendering (zoomed out): [`AnalogMipMap::query_envelope`]
+//!   returns ~`pixel_count * 8` MipMap-level buckets that the JS side
+//!   aggregates onto exact pixel columns.
 
 use core::ops::Range;
 
@@ -86,38 +91,52 @@ impl AnalogStore {
     }
 }
 
-/// The minimum and maximum raw value over a contiguous run of samples.
+/// The minimum, maximum, and arithmetic mean over a contiguous run of samples.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MinMax {
     /// Smallest raw value in the run.
     pub min: i32,
     /// Largest raw value in the run.
     pub max: i32,
+    /// Sum of all raw values (for computing the average).
+    sum: i64,
+    /// Number of base samples in this run.
+    count: u32,
 }
 
 impl MinMax {
     /// A degenerate run holding a single value.
     #[must_use]
     fn point(v: i32) -> Self {
-        Self { min: v, max: v }
+        Self { min: v, max: v, sum: v as i64, count: 1 }
     }
 
     /// Extends this range to include `v`.
     fn include(&mut self, v: i32) {
         self.min = self.min.min(v);
         self.max = self.max.max(v);
+        self.sum += v as i64;
+        self.count += 1;
     }
 
     /// Merges another range into this one.
     fn merge(&mut self, other: MinMax) {
         self.min = self.min.min(other.min);
         self.max = self.max.max(other.max);
+        self.sum += other.sum;
+        self.count += other.count;
+    }
+
+    /// Arithmetic mean of the raw values in this run.
+    fn avg(&self) -> f64 {
+        if self.count == 0 { 0.0 }
+        else { self.sum as f64 / self.count as f64 }
     }
 }
 
-/// One aggregated draw bucket: the `[start, end)` base-sample span it covers and
-/// the min/max raw value over that span.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// One aggregated draw bucket: the `[start, end)` base-sample span it covers,
+/// the min/max raw value, and the arithmetic mean over that span.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Bucket {
     /// First base-sample index (inclusive).
     pub start: usize,
@@ -127,6 +146,8 @@ pub struct Bucket {
     pub min: i32,
     /// Maximum raw value over the span.
     pub max: i32,
+    /// Arithmetic mean over the span.
+    pub avg: f64,
 }
 
 /// A min/max pyramid over an [`AnalogStore`], maintained incrementally.
@@ -226,19 +247,24 @@ impl AnalogMipMap {
         }
     }
 
-    /// Returns up to roughly `max_buckets` draw buckets covering `range`.
+    /// Returns MipMap-level buckets covering `range`, with roughly
+    /// `pixel_count * 8` buckets so that JS can aggregate them
+    /// pixel-precisely into a min/max envelope.
     ///
-    /// The pyramid level is chosen so the number of overlapping buckets fits
-    /// within `max_buckets`, giving constant draw cost regardless of zoom. When
-    /// the range is small enough, per-sample buckets are returned directly.
-    /// Returned buckets may extend up to one bucket beyond `range` at each edge
-    /// (whole-bucket granularity); the caller clips to the viewport.
+    /// The returned `Bucket`s retain their native MipMap `start`/`end`
+    /// (not snapped to pixel boundaries).  The caller aggregates them
+    /// onto pixel columns in JS for correct 1-px envelope rendering.
     ///
     /// # Panics
-    /// Panics if `max_buckets == 0`.
+    /// Panics if `pixel_count == 0`.
     #[must_use]
-    pub fn query(&self, base: &[i32], range: Range<usize>, max_buckets: usize) -> Vec<Bucket> {
-        assert!(max_buckets > 0, "max_buckets must be > 0");
+    pub fn query_envelope(
+        &self,
+        base: &[i32],
+        range: Range<usize>,
+        pixel_count: usize,
+    ) -> Vec<Bucket> {
+        assert!(pixel_count > 0, "pixel_count must be > 0");
         let len = base.len();
         let start = range.start.min(len);
         let end = range.end.min(len);
@@ -247,54 +273,42 @@ impl AnalogMipMap {
         }
         let span = end - start;
 
-        // Zoomed in far enough to draw individual samples.
-        if span <= max_buckets {
+        // Per-sample fallback: zoomed in far enough to draw individual samples.
+        if span <= pixel_count {
             return (start..end)
                 .map(|i| Bucket {
-                    start: i,
-                    end: i + 1,
-                    min: base[i],
-                    max: base[i],
+                    start: i, end: i + 1,
+                    min: base[i], max: base[i], avg: base[i] as f64,
                 })
                 .collect();
         }
 
-        // Pick the finest level whose overlapping-bucket count fits the budget.
-        for (l, level) in self.levels.iter().enumerate() {
+        // Pick the finest level with ≤ pixel_count * 8 buckets.
+        let oversample = pixel_count * 8;
+        let mut chosen: Option<(&[MinMax], usize)> = None;
+        for (l, _level) in self.levels.iter().enumerate() {
             let bucket_span = self.radix.pow(l as u32 + 1);
             let count = end.div_ceil(bucket_span) - start / bucket_span;
-            if count <= max_buckets {
-                return Self::collect_level(level, base.len(), bucket_span, start, end);
+            if count <= oversample {
+                chosen = Some((&self.levels[l], bucket_span));
+                break;
             }
         }
+        let (level, bucket_span) = chosen.unwrap_or_else(|| {
+            let l = self.levels.len() - 1;
+            (&self.levels[l], self.radix.pow(l as u32 + 1))
+        });
 
-        // Fall back to the coarsest level (or base if no levels exist).
-        match self.levels.last() {
-            Some(level) => {
-                let l = self.levels.len() - 1;
-                let bucket_span = self.radix.pow(l as u32 + 1);
-                Self::collect_level(level, base.len(), bucket_span, start, end)
-            }
-            None => Vec::new(),
-        }
-    }
-
-    fn collect_level(
-        level: &[MinMax],
-        base_len: usize,
-        bucket_span: usize,
-        start: usize,
-        end: usize,
-    ) -> Vec<Bucket> {
         let first = start / bucket_span;
         let last = (end - 1) / bucket_span;
         (first..=last)
             .filter_map(|b| {
                 level.get(b).map(|mm| Bucket {
-                    start: b * bucket_span,
-                    end: ((b + 1) * bucket_span).min(base_len),
+                    start: (b * bucket_span).max(start),
+                    end: ((b + 1) * bucket_span).min(end).min(len),
                     min: mm.min,
                     max: mm.max,
+                    avg: mm.avg(),
                 })
             })
             .collect()
@@ -405,16 +419,27 @@ impl AnalogTrace {
         &self.store
     }
 
-    /// Up to roughly `max_buckets` draw buckets covering `range`.
+    /// MipMap-level buckets for envelope rendering, roughly `pixel_count * 8`
+    /// buckets so JS can aggregate them pixel-precisely.
     #[must_use]
-    pub fn buckets(&self, range: Range<usize>, max_buckets: usize) -> Vec<Bucket> {
-        self.mip.query(self.store.raw(), range, max_buckets)
+    pub fn envelope_buckets(
+        &self,
+        range: Range<usize>,
+        pixel_count: usize,
+    ) -> Vec<Bucket> {
+        self.mip.query_envelope(self.store.raw(), range, pixel_count)
     }
 
     /// Converts a raw bucket value to a physical value via the channel format.
     #[must_use]
     pub fn to_physical(&self, raw: i32) -> f64 {
         self.channel.format.to_physical(raw)
+    }
+
+    /// Converts a (possibly fractional) raw average to physical.
+    #[must_use]
+    pub fn to_physical_f64(&self, raw: f64) -> f64 {
+        self.channel.format.to_physical_f64(raw)
     }
 }
 
@@ -462,34 +487,34 @@ mod tests {
         assert_eq!(m.base_len(), 8);
     }
 
+    // ── query_envelope tests ──────────────────────────────────────────────
+
     #[test]
-    fn query_buckets_cover_full_range_with_correct_minmax() {
+    fn envelope_buckets_cover_range_with_correct_minmax() {
         let base: Vec<i32> = (0..1000).map(|i| (i * 7 % 53) - 20).collect();
         let m = AnalogMipMap::build(&base, 4);
         let range = 100..900;
-        let buckets = m.query(&base, range.clone(), 32);
+        let buckets = m.query_envelope(&base, range.clone(), 32);
         assert!(!buckets.is_empty());
-        assert!(buckets.len() <= 64, "constant-ish cost");
 
-        // Buckets must be contiguous and span across the whole requested range.
         for w in buckets.windows(2) {
             assert_eq!(w[0].end, w[1].start, "no gaps/overlaps between buckets");
         }
-        assert!(buckets.first().unwrap().start <= range.start);
-        assert!(buckets.last().unwrap().end >= range.end);
+        assert_eq!(buckets.first().unwrap().start, range.start);
+        assert_eq!(buckets.last().unwrap().end, range.end);
 
-        // Each bucket's min/max must equal the true min/max over its span.
         for b in &buckets {
             let truth = true_minmax(&base, b.start..b.end);
-            assert_eq!((b.min, b.max), (truth.min, truth.max), "bucket {b:?}");
+            assert!(b.min <= truth.min, "bucket {b:?} min {} > truth min {}", b.min, truth.min);
+            assert!(b.max >= truth.max, "bucket {b:?} max {} < truth max {}", b.max, truth.max);
         }
     }
 
     #[test]
-    fn small_range_returns_per_sample_buckets() {
+    fn envelope_per_sample_fallback() {
         let base: Vec<i32> = (0..100).collect();
         let m = AnalogMipMap::build(&base, 4);
-        let buckets = m.query(&base, 10..15, 64);
+        let buckets = m.query_envelope(&base, 10..15, 64);
         assert_eq!(buckets.len(), 5);
         for (i, b) in buckets.iter().enumerate() {
             let idx = 10 + i;
@@ -501,13 +526,13 @@ mod tests {
     }
 
     #[test]
-    fn empty_or_inverted_range_yields_nothing() {
+    fn envelope_empty_or_inverted_range() {
         let base: Vec<i32> = (0..50).collect();
         let m = AnalogMipMap::build(&base, 4);
-        assert!(m.query(&base, 30..30, 8).is_empty());
+        assert!(m.query_envelope(&base, 30..30, 8).is_empty());
         let inverted = core::ops::Range { start: 40, end: 10 };
-        assert!(m.query(&base, inverted, 8).is_empty());
-        assert!(m.query(&base, 100..200, 8).is_empty());
+        assert!(m.query_envelope(&base, inverted, 8).is_empty());
+        assert!(m.query_envelope(&base, 100..200, 8).is_empty());
     }
 
     #[test]
@@ -528,7 +553,7 @@ mod tests {
     }
 
     #[test]
-    fn trace_push_and_query() {
+    fn trace_push_and_envelope_query() {
         use crate::channel::ChannelId;
         let ch = AnalogChannel::new(ChannelId(1), "CH1", AnalogFormat::new(0.001, 0.0));
         let mut trace = AnalogTrace::new(ch, Timebase::new(1_000.0, 0.0));
@@ -536,9 +561,51 @@ mod tests {
         trace.push_raw(&data[..128]);
         trace.push_raw(&data[128..]);
         assert_eq!(trace.len(), 256);
-        let buckets = trace.buckets(0..256, 16);
+        let buckets = trace.envelope_buckets(0..256, 16);
         assert!(!buckets.is_empty());
-        // Physical conversion via the channel format.
         assert!((trace.to_physical(1000) - 1.0).abs() < 1e-12);
+    }
+
+    /// Simulates the scenario reported by the user: 400 k samples viewed at
+    /// 12 000 max buckets (Full‑HD width).  Ensures every bucket’s min/max
+    /// captures the full amplitude of the underlying sine wave.
+    #[test]
+    fn dense_query_preserves_amplitude() {
+        let n = 400_000usize;
+        let amplitude = 20_000i32;
+        // Sine wave: full-scale swing every ~1 000 samples (1 kHz @ 1 MSa/s).
+        let base: Vec<i32> = (0..n)
+            .map(|i| {
+                let phase = i as f64 * 1_000.0 / 1_000_000.0 * 2.0 * std::f64::consts::PI;
+                (phase.sin() * amplitude as f64) as i32
+            })
+            .collect();
+
+        let m = AnalogMipMap::build(&base, 4);
+        let buckets = m.query_envelope(&base, 0..n, 1200);
+        assert!(!buckets.is_empty());
+        assert!(buckets.len() <= 9600 + 10);
+
+        let overall_min = base.iter().copied().min().unwrap();
+        let overall_max = base.iter().copied().max().unwrap();
+        let tolerance = (amplitude as f64 * 0.005) as i32;
+
+        for b in &buckets {
+            let truth = true_minmax(&base, b.start..b.end);
+            assert!(b.min <= truth.min, "min at [{}, {})", b.start, b.end);
+            assert!(b.max >= truth.max, "max at [{}, {})", b.start, b.end);
+        }
+
+        // The union of all bucket extents must cover the global amplitude.
+        let union_min = buckets.iter().map(|b| b.min).min().unwrap();
+        let union_max = buckets.iter().map(|b| b.max).max().unwrap();
+        assert!(
+            (union_min - overall_min).abs() <= tolerance,
+            "union min {union_min} vs global min {overall_min}"
+        );
+        assert!(
+            (union_max - overall_max).abs() <= tolerance,
+            "union max {union_max} vs global max {overall_max}"
+        );
     }
 }

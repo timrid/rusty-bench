@@ -50,6 +50,12 @@ impl AnalogFormat {
     pub fn to_physical(&self, raw: i32) -> f64 {
         raw as f64 * self.scale + self.offset
     }
+
+    /// Converts a (possibly fractional) raw average to physical.
+    #[must_use]
+    pub fn to_physical_f64(&self, raw: f64) -> f64 {
+        raw * self.scale + self.offset
+    }
 }
 
 impl Default for AnalogFormat {
