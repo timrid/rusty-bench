@@ -37,6 +37,22 @@ dx serve --platform web
 cargo build --workspace --exclude rb-cli --target wasm32-unknown-unknown
 ```
 
+## Tests
+
+```sh
+# All tests (model + canvas + GUI + waveform rendering)
+cargo test --workspace
+
+# Only rb-canvas (virtual canvas primitives)
+cargo test -p rb-canvas
+
+# Only waveform rendering tests (generates PNG screenshots in target/test-screenshots/)
+cargo test -p rb-gui -- waveform
+
+# Run waveform tests without capturing output (see which screenshots are saved)
+cargo test -p rb-gui -- waveform --nocapture
+```
+
 ## License
 
 MIT — see [`LICENSE`](LICENSE). Drivers and decoders are written clean-room from open

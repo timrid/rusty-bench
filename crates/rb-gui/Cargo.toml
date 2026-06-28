@@ -17,6 +17,7 @@ rb-decode.workspace = true
 rb-device.workspace = true
 rb-drivers.workspace = true
 rb-model.workspace = true
+rb-canvas.workspace = true
 dioxus = { workspace = true, features = ["html"] }
 futures.workspace = true
 futures-timer.workspace = true
@@ -48,6 +49,7 @@ web-sys = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+rb-canvas = { workspace = true, features = ["png-export"] }
 rb-drivers = { workspace = true, features = ["fx2lafw"] }
 rb-transport.workspace = true
 async-trait.workspace = true

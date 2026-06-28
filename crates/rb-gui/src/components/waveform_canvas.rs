@@ -5,6 +5,7 @@
 //! A single `use_effect` draws all canvases on each `data_version` change.
 
 use dioxus::prelude::*;
+use rb_canvas::{Canvas, JsCanvasRenderer, RgbaColor};
 use rb_core::AcquisitionState;
 use rb_decode::AnnotationKind;
 use rb_model::AnalogTrace;
@@ -18,14 +19,24 @@ use super::app::AppStateRef;
 
 // ── Colors ───────────────────────────────────────────────────────────────────
 
-const ANALOG_COLORS: &[&str] = &[
-    "#facc15", "#60a5fa", "#f87171", "#34d399",
-    "#c084fc", "#fb923c", "#2dd4bf", "#f472b6",
+const ANALOG_COLORS_RGBA: [RgbaColor; 8] = [
+    RgbaColor { r: 0xfa, g: 0xcc, b: 0x15, a: 255 },
+    RgbaColor { r: 0x60, g: 0xa5, b: 0xfa, a: 255 },
+    RgbaColor { r: 0xf8, g: 0x71, b: 0x71, a: 255 },
+    RgbaColor { r: 0x34, g: 0xd3, b: 0x99, a: 255 },
+    RgbaColor { r: 0xc0, g: 0x84, b: 0xfc, a: 255 },
+    RgbaColor { r: 0xfb, g: 0x92, b: 0x3c, a: 255 },
+    RgbaColor { r: 0x2d, g: 0xd4, b: 0xbf, a: 255 },
+    RgbaColor { r: 0xf4, g: 0x72, b: 0xb6, a: 255 },
 ];
 
-const DIGITAL_COLOR: &str = "#58a6ff";
-const BG_COLOR: &str = "#0d1117";
-const GRID_COLOR: &str = "#1a1a2e";
+const DIGITAL_COLOR_RGBA: RgbaColor = RgbaColor { r: 0x58, g: 0xa6, b: 0xff, a: 255 };
+const BG_COLOR_RGBA: RgbaColor = RgbaColor { r: 0x0d, g: 0x11, b: 0x17, a: 255 };
+const GRID_COLOR_RGBA: RgbaColor = RgbaColor { r: 0x1a, g: 0x1a, b: 0x2e, a: 255 };
+const ZERO_LINE_COLOR_RGBA: RgbaColor = RgbaColor { r: 0x30, g: 0x36, b: 0x3d, a: 255 };
+const DECODER_BG_RGBA: RgbaColor = RgbaColor { r: 0x16, g: 0x1b, b: 0x22, a: 255 };
+const DECODER_TEXT_RGBA: RgbaColor = RgbaColor { r: 0xc9, g: 0xd1, b: 0xd9, a: 255 };
+
 const CURSOR_COLOR: &str = "#f0f6fc";
 
 // ── Formatting helpers ───────────────────────────────────────────────────────
@@ -532,28 +543,32 @@ fn draw_all_canvases(
 ) {
     let mut all_js = String::new();
 
-    // ── Signal rows ───────────────────────────────────────────────────────
     for (row_idx, row) in rows.iter().enumerate() {
         if !row.visible { continue; }
         let cid = format!("sig-{short_id}-{row_idx}");
-        let row_js = match row.kind {
+        let mut renderer = JsCanvasRenderer::new();
+        match row.kind {
             RowKind::Analog => {
                 if let Some(trace) = analog.get(row.channel_index) {
-                    let color = ANALOG_COLORS[row.channel_index % ANALOG_COLORS.len()];
-                    build_analog_signal_js(&cid, trace, range_start, range_end, range_len, row, color, signal_width)
-                } else { String::new() }
+                    let color = &ANALOG_COLORS_RGBA[row.channel_index % ANALOG_COLORS_RGBA.len()];
+                    build_analog_signal(&mut renderer, trace, range_start, range_end, range_len,
+                                        row, color, signal_width);
+                }
             }
             RowKind::Digital => {
                 if let Some(dt) = digital {
                     if let Some(ch) = dt.channels().get(row.channel_index) {
-                        build_digital_signal_js(&cid, dt, ch.bit as usize, range_start, range_end, range_len, row, signal_width)
-                    } else { String::new() }
-                } else { String::new() }
+                        build_digital_signal(&mut renderer, dt, ch.bit as usize,
+                                             range_start, range_end, range_len,
+                                             row, signal_width);
+                    }
+                }
             }
             RowKind::Decoder => {
-                build_decoder_signal_js(&cid, annotations, range_start, range_end, range_len, row)
+                build_decoder_signal(&mut renderer, annotations, range_start, range_end, range_len, row);
             }
         };
+        let row_js = renderer.finish(&cid, row.signal_height_px);
         if !row_js.is_empty() {
             all_js.push_str(&wrap_with_resize_observer(row_js));
         }
@@ -571,23 +586,18 @@ fn draw_all_canvases(
 /// Works cross-platform (browser + desktop webview).
 fn wrap_with_resize_observer(js: String) -> String {
     if js.len() < 3 { return js; }
-    // Replace `var c=` with `let c=` so each canvas block has its own scope.
-    // `var` is function-scoped and would cause all blocks to share one `c`.
-    let js = js.replace("var c=", "let c=");
+    // JsCanvasRenderer already uses `let c=`
     let inner = &js[1..js.len()-1];
 
     // Find the "if(!c)" guard and split after it.
-    // Handles both old-style `if(!c)return;` and new-style `if(!c){...;return;}`.
     let guard_start = inner.find("if(!c)").unwrap_or(0);
     let after_guard = if inner[guard_start..].starts_with("if(!c){") {
-        // New style with brace block: find the closing `}`
         if let Some(brace_pos) = inner[guard_start..].find('}') {
             guard_start + brace_pos + 1
         } else {
             guard_start
         }
     } else {
-        // Old style without braces: `if(!c)return;`
         if let Some(ret_pos) = inner[guard_start..].find("return;") {
             guard_start + ret_pos + "return;".len()
         } else {
@@ -603,38 +613,36 @@ fn wrap_with_resize_observer(js: String) -> String {
     )
 }
 
-fn build_analog_signal_js(
-    canvas_id: &str, trace: &AnalogTrace,
+fn build_analog_signal(
+    canvas: &mut dyn Canvas, trace: &AnalogTrace,
     range_start: usize, range_end: usize, range_len: f64,
-    row: &crate::waveform_state::RowDescriptor, color: &str,
+    row: &crate::waveform_state::RowDescriptor, color: &RgbaColor,
     signal_width: f64,
-) -> String {
+) {
     let sig_h = row.signal_height_px;
     let samples_per_px = range_len / signal_width.max(1.0);
 
-    // ── Per-sample mode: zoomed in, ≤ 1 sample per pixel ──────────────
     if samples_per_px < 1.0 {
-        return build_analog_per_sample(canvas_id, trace, range_start, range_end,
-                                        range_len, sig_h, color, samples_per_px);
+        build_analog_per_sample(canvas, trace, range_start, range_end,
+                                range_len, sig_h, signal_width, color, samples_per_px);
+    } else {
+        build_analog_envelope(canvas, trace, range_start, range_end, range_len,
+                              sig_h, color, signal_width);
     }
-
-    // ── Envelope mode: zoomed out, min/max fill per pixel ─────────────
-    build_analog_envelope(canvas_id, trace, range_start, range_end, range_len,
-                          sig_h, color, signal_width)
 }
 
 /// Per-sample line/point rendering for close-up zoom.
 fn build_analog_per_sample(
-    canvas_id: &str, trace: &AnalogTrace,
+    canvas: &mut dyn Canvas, trace: &AnalogTrace,
     range_start: usize, range_end: usize, range_len: f64,
-    sig_h: f64, color: &str, samples_per_px: f64,
-) -> String {
+    sig_h: f64, signal_width: f64, color: &RgbaColor, samples_per_px: f64,
+) {
     let store = trace.store();
     let raw = store.raw();
     let r_start = range_start.min(raw.len());
     let r_end = range_end.min(raw.len());
     if r_start >= r_end {
-        return String::new();
+        return;
     }
     let samples = &raw[r_start..r_end];
 
@@ -648,92 +656,85 @@ fn build_analog_per_sample(
     let p_hi = phys_hi + margin;
     let p_span = (p_hi - p_lo).max(1e-12);
 
-    let show_dots = samples_per_px < 0.1; // ≥ 10 px between samples
+    let show_dots = samples_per_px < 0.1;
 
-    let mut js = format!(
-        "{{var c=document.getElementById('{canvas_id}');if(!c){{console.warn('Canvas not found: {canvas_id}');return;}}var dpr=window.devicePixelRatio||1;var w=c.clientWidth;var h={sig_h};c.width=w*dpr;c.height=h*dpr;var ctx=c.getContext('2d');ctx.scale(dpr,dpr);ctx.fillStyle='{BG_COLOR}';ctx.fillRect(0,0,w,h);"
-    );
-    // Grid
-    js.push_str(&format!("ctx.strokeStyle='{GRID_COLOR}';ctx.lineWidth=0.5;"));
+    // ── Background ─────────────────────────────────────────────────────
+    canvas.set_fill_style(&BG_COLOR_RGBA);
+    canvas.clear();
+
+    // ── Grid ───────────────────────────────────────────────────────────
+    canvas.set_stroke_style(&GRID_COLOR_RGBA);
+    canvas.set_line_width(0.5);
+    canvas.clear_line_dash();
     for i in 0..=5 {
         let gy = i as f64 / 5.0 * sig_h;
-        js.push_str(&format!(
-            "ctx.beginPath();ctx.moveTo(0,{gy:.1});ctx.lineTo(w,{gy:.1});ctx.stroke();"
-        ));
+        canvas.stroke_line(0.0, gy, signal_width, gy);
     }
-    // Zero line
+
+    // ── Zero line ──────────────────────────────────────────────────────
     if p_lo < 0.0 && p_hi > 0.0 {
         let zy = sig_h - ((0.0 - p_lo) / p_span * sig_h);
-        js.push_str(&format!(
-            "ctx.strokeStyle='#30363d';ctx.lineWidth=1;ctx.setLineDash([4,4]);ctx.beginPath();ctx.moveTo(0,{zy:.1});ctx.lineTo(w,{zy:.1});ctx.stroke();ctx.setLineDash([]);"
-        ));
+        canvas.set_stroke_style(&ZERO_LINE_COLOR_RGBA);
+        canvas.set_line_width(1.0);
+        canvas.set_line_dash(&[4.0, 4.0]);
+        canvas.stroke_line(0.0, zy, signal_width, zy);
+        canvas.clear_line_dash();
     }
 
-    // Build JS coordinate arrays.
-    let mut xv = String::from("[");
-    let mut yv = String::from("[");
+    // ── Polyline ───────────────────────────────────────────────────────
     let inv_range = 1.0 / range_len.max(1.0);
+    canvas.set_stroke_style(color);
+    canvas.set_line_width(1.0);
+    canvas.begin_path();
+    let mut first = true;
     for (i, &v) in samples.iter().enumerate() {
         let sample_idx = r_start + i;
-        let px = (sample_idx as f64 - range_start as f64) * inv_range;
+        let px = (sample_idx as f64 - range_start as f64) * inv_range * signal_width;
         let py = sig_h - ((trace.to_physical(v).clamp(p_lo, p_hi) - p_lo) / p_span * sig_h);
-        xv.push_str(&format!("{px:.6},"));
-        yv.push_str(&format!("{py:.3},"));
+        if first {
+            canvas.move_to(px, py);
+            first = false;
+        } else {
+            canvas.line_to(px, py);
+        }
     }
-    xv.push(']');
-    yv.push(']');
+    canvas.stroke();
 
-    js.push_str(&format!("var xv={xv},yv={yv},n=xv.length;"));
-    // xs: 0..1 fraction → canvas pixel
-    js.push_str("function xs(f){return f*w;}");
-
-    // ── Polyline connecting consecutive samples ─────────────────────
-    js.push_str(&format!(
-        "ctx.strokeStyle='{color}';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(xs(xv[0]),yv[0]);"
-    ));
-    js.push_str("for(var i=1;i<n;i++)ctx.lineTo(xs(xv[i]),yv[i]);ctx.stroke();");
-
-    // ── Sample dots (very close zoom) ───────────────────────────────
+    // ── Sample dots (very close zoom) ──────────────────────────────────
     if show_dots {
-        js.push_str(&format!("ctx.fillStyle='{color}';"));
-        js.push_str(
-            "for(var i=0;i<n;i++){{var px=Math.round(xs(xv[i])),py=Math.round(yv[i]);ctx.beginPath();ctx.arc(px,py,2.5,0,6.283);ctx.fill();}}",
-        );
+        canvas.set_fill_style(color);
+        for (i, &v) in samples.iter().enumerate() {
+            let sample_idx = r_start + i;
+            let px = ((sample_idx as f64 - range_start as f64) * inv_range * signal_width).round();
+            let py = (sig_h - ((trace.to_physical(v).clamp(p_lo, p_hi) - p_lo) / p_span * sig_h)).round();
+            canvas.fill_circle(px, py, 2.5);
+        }
     }
-
-    js.push('}');
-    js
 }
 
 /// Envelope (min/max fill) rendering for zoomed-out views.
-///
-/// Envelope (min/max fill) for zoomed-out views.
-///
-/// Queries ~`pixel_count * 8` MipMap-level buckets, then in JS aggregates
-/// them onto exact pixel columns — one `fillRect` per column, always 1 px wide.
 fn build_analog_envelope(
-    canvas_id: &str, trace: &AnalogTrace,
+    canvas: &mut dyn Canvas, trace: &AnalogTrace,
     range_start: usize, range_end: usize, range_len: f64,
-    sig_h: f64, color: &str, signal_width: f64,
-) -> String {
+    sig_h: f64, color: &RgbaColor, signal_width: f64,
+) {
     let pixel_count = signal_width.ceil() as usize;
     let range = range_start..range_end;
     let buckets = trace.envelope_buckets(range.clone(), pixel_count);
     if buckets.is_empty() {
-        log::warn!("Envelope canvas {canvas_id}: no buckets for range {range_start}..{range_end}");
-        return String::new();
+        log::warn!("Envelope canvas: no buckets for range {range_start}..{range_end}");
+        return;
     }
-    log::debug!("Envelope canvas {canvas_id}: {} buckets for {pixel_count} px", buckets.len());
+    log::debug!("Envelope canvas: {} buckets for {pixel_count} px", buckets.len());
 
     // Compute physical Y range from all visible buckets.
     let (raw_lo, raw_hi) = buckets.iter()
-        .filter(|b| b.min != 0 || b.max != 0) // skip empty pixels
+        .filter(|b| b.min != 0 || b.max != 0)
         .fold((i32::MAX, i32::MIN), |(lo, hi), b| (lo.min(b.min), hi.max(b.max)));
     if raw_lo == i32::MAX {
-        // All pixels were empty (no data in range).
-        return format!(
-            "{{var c=document.getElementById('{canvas_id}');if(!c)return;var dpr=window.devicePixelRatio||1;c.width=c.clientWidth*dpr;c.height={sig_h}*dpr;var ctx=c.getContext('2d');ctx.scale(dpr,dpr);ctx.fillStyle='{BG_COLOR}';ctx.fillRect(0,0,c.clientWidth,{sig_h});}}"
-        );
+        canvas.set_fill_style(&BG_COLOR_RGBA);
+        canvas.clear();
+        return;
     }
     let phys_lo = trace.to_physical(raw_lo);
     let phys_hi = trace.to_physical(raw_hi);
@@ -742,77 +743,96 @@ fn build_analog_envelope(
     let p_hi = phys_hi + margin;
     let p_span = (p_hi - p_lo).max(1e-12);
 
-    // Build JS arrays: bucket start positions + physical min/max per bucket.
-    let mut xv = String::from("[");
-    let mut mins = String::from("[");
-    let mut maxs = String::from("[");
-    for b in &buckets {
-        let min_p = trace.to_physical(b.min);
-        let max_p = trace.to_physical(b.max);
-        let min_clamped = min_p.clamp(p_lo, p_hi);
-        let max_clamped = max_p.clamp(p_lo, p_hi);
-        xv.push_str(&format!("{},", b.start));
-        mins.push_str(&format!("{min_clamped:.5},"));
-        maxs.push_str(&format!("{max_clamped:.5},"));
-    }
-    xv.push(']');
-    mins.push(']');
-    maxs.push(']');
+    // ── Background ─────────────────────────────────────────────────────
+    canvas.set_fill_style(&BG_COLOR_RGBA);
+    canvas.clear();
 
-    let mut js = format!(
-        "{{var c=document.getElementById('{canvas_id}');if(!c){{console.warn('Canvas not found: {canvas_id}');return;}}var dpr=window.devicePixelRatio||1;var w=c.clientWidth;var h={sig_h};c.width=w*dpr;c.height=h*dpr;var ctx=c.getContext('2d');ctx.scale(dpr,dpr);ctx.fillStyle='{BG_COLOR}';ctx.fillRect(0,0,w,h);"
-    );
-    // Grid lines
-    js.push_str(&format!("ctx.strokeStyle='{GRID_COLOR}';ctx.lineWidth=0.5;"));
+    // ── Grid ───────────────────────────────────────────────────────────
+    canvas.set_stroke_style(&GRID_COLOR_RGBA);
+    canvas.set_line_width(0.5);
+    canvas.clear_line_dash();
     for i in 0..=5 {
         let gy = i as f64 / 5.0 * sig_h;
-        js.push_str(&format!("ctx.beginPath();ctx.moveTo(0,{gy:.1});ctx.lineTo(w,{gy:.1});ctx.stroke();"));
+        canvas.stroke_line(0.0, gy, signal_width, gy);
     }
-    // Zero line
+
+    // ── Zero line ──────────────────────────────────────────────────────
     if p_lo < 0.0 && p_hi > 0.0 {
         let zy = sig_h - ((0.0 - p_lo) / p_span * sig_h);
-        js.push_str(&format!("ctx.strokeStyle='#30363d';ctx.lineWidth=1;ctx.setLineDash([4,4]);ctx.beginPath();ctx.moveTo(0,{zy:.1});ctx.lineTo(w,{zy:.1});ctx.stroke();ctx.setLineDash([]);"));
+        canvas.set_stroke_style(&ZERO_LINE_COLOR_RGBA);
+        canvas.set_line_width(1.0);
+        canvas.set_line_dash(&[4.0, 4.0]);
+        canvas.stroke_line(0.0, zy, signal_width, zy);
+        canvas.clear_line_dash();
     }
-    // Y transform: physical value → canvas Y coordinate
-    js.push_str(&format!("function ty(v){{return {sig_h}-((v-({p_lo}))/{p_span}*{sig_h});}}"));
-    // Data arrays: bucket start positions, mins, maxs
-    js.push_str(&format!("var xv={xv},mins={mins},maxs={maxs},n=xv.length;"));
-    // xs: sample index → canvas x (float)
-    js.push_str(&format!("function xs(s){{return((s-{range_start})/{range_len})*w;}}"));
-    // Per-pixel column accumulators
-    js.push_str("var nC=Math.round(w),cMin=new Array(nC).fill(Infinity),cMax=new Array(nC).fill(-Infinity);");
-    // Distribute each bucket to overlapping pixel columns.
-    js.push_str("for(var i=0;i<n;i++){{");
-    js.push_str("var bx=xs(xv[i]),nx=i<n-1?xs(xv[i+1]):w+1;");
-    js.push_str("var c0=Math.max(0,Math.floor(bx)),c1=Math.min(nC,Math.ceil(nx));");
-    js.push_str("for(var c=c0;c<c1;c++){{");
-    js.push_str("cMin[c]=Math.min(cMin[c],mins[i]);cMax[c]=Math.max(cMax[c],maxs[i]);");
-    js.push_str("}}");
-    js.push_str("}}");
-    // Draw: one fillRect per pixel column, always 1 px wide.
-    js.push_str(&format!("ctx.fillStyle='{color}';ctx.globalAlpha=0.8;"));
-    js.push_str("for(var c=0;c<nC;c++){{");
-    js.push_str("if(cMin[c]<=cMax[c]){{");
-    js.push_str("var y0=Math.round(ty(cMax[c])),y1=Math.round(ty(cMin[c]));");
-    js.push_str("ctx.fillRect(c,y0,1,Math.max(1,y1-y0));");
-    js.push_str("}}");
-    js.push_str("}}");
-    js.push_str("ctx.globalAlpha=1;");
-    js.push('}');
-    js
+
+    // ── Per-pixel column envelope (aggregated in Rust) ─────────────────
+    let n_c: usize = signal_width.round() as usize;
+    let mut c_min = vec![f64::INFINITY; n_c];
+    let mut c_max = vec![f64::NEG_INFINITY; n_c];
+
+    for b in &buckets {
+        let min_p = trace.to_physical(b.min).clamp(p_lo, p_hi);
+        let max_p = trace.to_physical(b.max).clamp(p_lo, p_hi);
+        let bx = ((b.start as f64 - range_start as f64) / range_len) * signal_width;
+        let nx = if let Some(next) = buckets.get(buckets.iter().position(|x| x.start == b.start).map(|i| i + 1).unwrap_or(buckets.len())) {
+            ((next.start as f64 - range_start as f64) / range_len) * signal_width
+        } else {
+            signal_width + 1.0
+        };
+        // Handle end of list: use the next bucket or signal_width+1
+        let c0 = (bx.floor() as usize).min(n_c.saturating_sub(1));
+        let c1 = (nx.ceil() as usize).min(n_c);
+        for c in c0..c1 {
+            c_min[c] = c_min[c].min(min_p);
+            c_max[c] = c_max[c].max(max_p);
+        }
+    }
+
+    // redo the loop properly: iterate adjacent bucket pairs
+    let mut c_min2 = vec![f64::INFINITY; n_c];
+    let mut c_max2 = vec![f64::NEG_INFINITY; n_c];
+    for i in 0..buckets.len() {
+        let b = &buckets[i];
+        let min_p = trace.to_physical(b.min).clamp(p_lo, p_hi);
+        let max_p = trace.to_physical(b.max).clamp(p_lo, p_hi);
+        let bx = ((b.start as f64 - range_start as f64) / range_len) * signal_width;
+        let nx = if i + 1 < buckets.len() {
+            ((buckets[i + 1].start as f64 - range_start as f64) / range_len) * signal_width
+        } else {
+            signal_width + 1.0
+        };
+        let c0 = (bx.floor() as usize).min(n_c.saturating_sub(1));
+        let c1 = (nx.ceil() as usize).min(n_c);
+        for c in c0..c1 {
+            c_min2[c] = c_min2[c].min(min_p);
+            c_max2[c] = c_max2[c].max(max_p);
+        }
+    }
+
+    canvas.set_fill_style(color);
+    canvas.set_global_alpha(0.8);
+    for c in 0..n_c {
+        if c_min2[c] <= c_max2[c] {
+            let y0 = (sig_h - ((c_max2[c] - p_lo) / p_span * sig_h)).round();
+            let y1 = (sig_h - ((c_min2[c] - p_lo) / p_span * sig_h)).round();
+            let h = (y1 - y0).max(1.0);
+            canvas.fill_rect(c as f64, y0, 1.0, h);
+        }
+    }
+    canvas.set_global_alpha(1.0);
 }
 
-fn build_digital_signal_js(
-    canvas_id: &str, dt: &rb_model::DigitalTrace, bit: usize,
+fn build_digital_signal(
+    canvas: &mut dyn Canvas, dt: &rb_model::DigitalTrace, bit: usize,
     range_start: usize, range_end: usize, range_len: f64,
     row: &crate::waveform_state::RowDescriptor,
     signal_width: f64,
-) -> String {
+) {
     let sig_h = row.signal_height_px;
     let mip = dt.transitions();
     let rs_u64 = range_start as u64;
     let initial = mip.value_at(bit, rs_u64);
-    // Integer pixel rows for fillRect (no half-pixel offsets needed).
     let high_row = (sig_h * 0.25).round();
     let low_row = (sig_h * 0.75).round();
     let mid_y = (sig_h * 0.5).round();
@@ -823,73 +843,72 @@ fn build_digital_signal_js(
     let edge_count = mip.edge_count_in(bit, rs_u64..range_end as u64);
     let dense = edge_count > num_pixels;
 
-    let mut js = format!(
-        "{{var c=document.getElementById('{canvas_id}');if(!c){{console.warn('Canvas not found: {canvas_id}');return;}}var dpr=window.devicePixelRatio||1;var w=c.clientWidth;var h={sig_h};c.width=w*dpr;c.height=h*dpr;var ctx=c.getContext('2d');ctx.scale(dpr,dpr);ctx.imageSmoothingEnabled=false;ctx.fillStyle='{BG_COLOR}';ctx.fillRect(0,0,w,h);"
-    );
-    js.push_str(&format!(
-        "ctx.strokeStyle='{GRID_COLOR}';ctx.lineWidth=0.5;ctx.beginPath();ctx.moveTo(0,{mid_y:.1});ctx.lineTo(w,{mid_y:.1});ctx.stroke();"
-    ));
-    js.push_str(&format!("ctx.fillStyle='{DIGITAL_COLOR}';"));
+    // Background
+    canvas.set_fill_style(&BG_COLOR_RGBA);
+    canvas.clear();
+
+    // Mid line
+    canvas.set_stroke_style(&GRID_COLOR_RGBA);
+    canvas.set_line_width(0.5);
+    canvas.clear_line_dash();
+    canvas.stroke_line(0.0, mid_y, signal_width, mid_y);
+
+    canvas.set_fill_style(&DIGITAL_COLOR_RGBA);
 
     if dense {
-        // ── Dense: mip-map pyramid query, O(k · log n) ────────────────
-        // has_edge from chunk OR (O(1)/bucket), parity from binary
-        // search (O(log n)/bucket).  No per-column value_at needed.
         let q = mip.query_dense(bit, rs_u64..range_end as u64, num_pixels);
-        let edge_str: String = q.has_edge.iter()
-            .map(|&b| if b { '1' } else { '0' }).collect();
-        let parity_str: String = q.parity.iter()
-            .map(|&b| if b { '1' } else { '0' }).collect();
-        js.push_str(&format!(
-            "var E='{edge_str}',P='{parity_str}',hH={high_row:.0},lL={low_row:.0},fH={full_h:.0},cur={initial_row:.0},bw=w/E.length;\
-             for(var x=0;x<E.length;x++){{\
-               var px=Math.round(x*bw),nx=Math.round((x+1)*bw),pw=nx-px;\
-               if(pw<=0)continue;\
-               if(E[x]=='1'){{ctx.fillRect(px,hH,pw,fH);}}\
-               else{{ctx.fillRect(px,cur,pw,1);}}\
-               if(P[x]=='1')cur=cur==hH?lL:hH;\
-             }}"
-        ));
+        let bw = signal_width / q.has_edge.len() as f64;
+        let mut cur = initial_row;
+        for (x, (&has_edge, &parity)) in q.has_edge.iter().zip(q.parity.iter()).enumerate() {
+            let px = (x as f64 * bw).round();
+            let nx = ((x + 1) as f64 * bw).round();
+            let pw = (nx - px).max(0.0);
+            if pw <= 0.0 { continue; }
+            if has_edge {
+                canvas.fill_rect(px, high_row, pw, full_h);
+            } else {
+                canvas.fill_rect(px, cur, pw, 1.0);
+            }
+            if parity {
+                cur = if (cur - high_row).abs() < 0.5 { low_row } else { high_row };
+            }
+        }
     } else {
-        // ── Sparse: draw individual edges ─────────────────────────────
         let edges: Vec<u64> = mip.edges_in(bit, rs_u64..range_end as u64).to_vec();
-        js.push_str(&format!(
-            "function xp(s){{return Math.round(((s-{range_start})/{range_len})*w);}}"
-        ));
+        let xp = |s: u64| -> f64 {
+            ((s.saturating_sub(range_start as u64) as f64) / range_len * signal_width).round()
+        };
         if !edges.is_empty() || initial {
             let mut cur: f64 = initial_row;
             let mut px = rs_u64;
             for &ei in &edges {
-                js.push_str(&format!(
-                    "ctx.fillRect(xp({px}),{cur:.0},xp({ei})-xp({px}),1);"
-                ));
+                canvas.fill_rect(xp(px), cur, xp(ei) - xp(px), 1.0);
                 let next: f64 = if (cur - high_row).abs() < 0.5 { low_row } else { high_row };
                 let top = cur.min(next);
                 let h = (next - cur).abs() + 1.0;
-                js.push_str(&format!(
-                    "ctx.fillRect(xp({ei}),{top:.0},1,{h:.0});"
-                ));
+                canvas.fill_rect(xp(ei), top, 1.0, h);
                 cur = next;
                 px = ei;
             }
-            js.push_str(&format!(
-                "ctx.fillRect(xp({px}),{cur:.0},xp({range_end})-xp({px}),1);"
-            ));
+            canvas.fill_rect(xp(px), cur, xp(range_end as u64) - xp(px), 1.0);
         }
     }
-    js.push('}');
-    js
 }
 
-fn build_decoder_signal_js(
-    canvas_id: &str, annotations: &[rb_decode::Annotation],
+fn build_decoder_signal(
+    canvas: &mut dyn Canvas, annotations: &[rb_decode::Annotation],
     range_start: usize, range_end: usize, range_len: f64,
     row: &crate::waveform_state::RowDescriptor,
-) -> String {
+) {
     let sig_h = row.signal_height_px;
-    let mut js = format!(
-        "{{var c=document.getElementById('{canvas_id}');if(!c){{console.warn('Canvas not found: {canvas_id}');return;}}var dpr=window.devicePixelRatio||1;var w=c.clientWidth;var h={sig_h};c.width=w*dpr;c.height=h*dpr;var ctx=c.getContext('2d');ctx.scale(dpr,dpr);ctx.fillStyle='#161b22';ctx.fillRect(0,0,w,h);"
-    );
+    canvas.set_fill_style(&DECODER_BG_RGBA);
+    canvas.clear();
+
+    let data_color = RgbaColor { r: 0x1f, g: 0x3a, b: 0x6b, a: 255 };
+    let addr_color = RgbaColor { r: 0x6b, g: 0x3d, b: 0x1f, a: 255 };
+    let frame_color = RgbaColor { r: 0x2d, g: 0x2d, b: 0x2d, a: 255 };
+    let error_color = RgbaColor { r: 0x6b, g: 0x1f, b: 0x1f, a: 255 };
+
     for ann in annotations {
         if ann.range.end <= range_start || ann.range.start >= range_end { continue; }
         let rs = range_start;
@@ -897,17 +916,420 @@ fn build_decoder_signal_js(
         let x1 = ann.range.end.min(range_end).saturating_sub(rs) as f64 / range_len;
         let ww = (x1 - x0).max(0.001);
         let color = match ann.kind {
-            AnnotationKind::Data => "#1f3a6b",
-            AnnotationKind::Address => "#6b3d1f",
-            AnnotationKind::Frame => "#2d2d2d",
-            AnnotationKind::Error => "#6b1f1f",
+            AnnotationKind::Data => &data_color,
+            AnnotationKind::Address => &addr_color,
+            AnnotationKind::Frame => &frame_color,
+            AnnotationKind::Error => &error_color,
         };
-        js.push_str(&format!("ctx.fillStyle='{color}';ctx.fillRect({x0}*w,1,{ww}*w,{:.1});", sig_h - 2.0));
+        canvas.set_fill_style(color);
+        canvas.fill_rect(x0, 1.0, ww, sig_h - 2.0);
         if ww > 0.03 {
-            let label = ann.label.replace('\'', "\\'").replace('\\', "\\\\");
-            js.push_str(&format!("ctx.fillStyle='#c9d1d9';ctx.font='9px monospace';ctx.fillText('{label}',{x0}*w+2,{:.1});", sig_h * 0.5 + 3.0));
+            canvas.set_fill_style(&DECODER_TEXT_RGBA);
+            canvas.fill_text(&ann.label, x0 + 2.0, sig_h * 0.5 + 3.0);
         }
     }
-    js.push('}');
-    js
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rb_canvas::PixelCanvas;
+    use rb_model::{
+        AnalogChannel, AnalogFormat, AnalogTrace,
+        DigitalChannel, DigitalTrace,
+        ChannelId, Timebase,
+    };
+    use crate::waveform_state::{RowDescriptor, RowKind};
+
+    // ── Helpers ──────────────────────────────────────────────────────────
+
+    fn make_analog_row(sig_h: f64) -> RowDescriptor {
+        RowDescriptor {
+            kind: RowKind::Analog,
+            signal_height_px: sig_h,
+            channel_index: 0,
+            visible: true,
+            decoder_kind: None,
+        }
+    }
+
+    fn make_digital_row(sig_h: f64, ch_idx: usize) -> RowDescriptor {
+        RowDescriptor {
+            kind: RowKind::Digital,
+            signal_height_px: sig_h,
+            channel_index: ch_idx,
+            visible: true,
+            decoder_kind: None,
+        }
+    }
+
+    /// Count how many pixels in the canvas match `color` exactly.
+    fn count_pixels(canvas: &PixelCanvas, color: RgbaColor) -> usize {
+        let mut n = 0;
+        for y in 0..canvas.height() {
+            for x in 0..canvas.width() {
+                if canvas.pixel(x, y) == color {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    /// Check that a horizontal line of grid-colored pixels exists at row `y`
+    /// spanning at least `min_len` pixels.
+    fn assert_grid_line_at(canvas: &PixelCanvas, y: u32, min_len: u32) {
+        let mut run = 0u32;
+        for x in 0..canvas.width() {
+            if canvas.pixel(x, y) == GRID_COLOR_RGBA {
+                run += 1;
+            } else {
+                run = 0;
+            }
+            if run >= min_len {
+                return;
+            }
+        }
+        panic!("no grid line at y={y} with length ≥ {min_len}");
+    }
+
+    /// Check that any pixel in the canvas matches `color`.
+    fn any_pixel_is(canvas: &PixelCanvas, color: RgbaColor) -> bool {
+        for y in 0..canvas.height() {
+            for x in 0..canvas.width() {
+                if canvas.pixel(x, y) == color {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  Analog – per-sample mode
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// A 50-sample sine drawn at 400 px width → 0.125 samples/px
+    /// triggers per-sample mode without dots.
+    #[test]
+    fn analog_per_sample_sine_no_dots() {
+        let ch = AnalogChannel::new(ChannelId(0), "CH0", AnalogFormat::identity());
+        let mut trace = AnalogTrace::new(ch, Timebase::new(1_000_000.0, 0.0));
+        let amplitude = 10_000i32;
+        let data: Vec<i32> = (0..50)
+            .map(|i| {
+                let phase = i as f64 * 2.0 / 50.0 * 2.0 * std::f64::consts::PI;
+                (phase.sin() * amplitude as f64) as i32
+            })
+            .collect();
+        trace.push_raw(&data[..25]);
+        trace.push_raw(&data[25..]);
+
+        let row = make_analog_row(80.0);
+        let color = ANALOG_COLORS_RGBA[0];
+        let mut canvas = PixelCanvas::new(400, 80);
+
+        build_analog_signal(&mut canvas, &trace, 0, 50, 50.0, &row, &color, 400.0);
+
+        // Top grid line at y=0 is safe from signal overlap (margin keeps
+        // signal away from edges).
+        assert_grid_line_at(&canvas, 0, 200);
+
+        // The polyline should paint signal-colored pixels.
+        let signal_px = count_pixels(&canvas, color);
+        assert!(signal_px > 20, "expected signal polyline, found {signal_px} pixels");
+
+        // At x=200 (middle), the ramp value 25 maps to ~mid-height.
+        let mid_x = 200u32;
+        let mut found_signal_at_mid = false;
+        for y in 0..canvas.height() {
+            if canvas.pixel(mid_x, y) == color {
+                found_signal_at_mid = true;
+                break;
+            }
+        }
+        assert!(found_signal_at_mid, "signal polyline not found at x=200");
+
+        save_canvas_png(&canvas, "analog_per_sample_sine.png");
+    }
+
+    /// Very zoomed in: 10-sample sine over 200 px → 0.05 samples/px → dots.
+    #[test]
+    fn analog_per_sample_with_dots() {
+        let ch = AnalogChannel::new(ChannelId(0), "CH0", AnalogFormat::identity());
+        let mut trace = AnalogTrace::new(ch, Timebase::new(1_000_000.0, 0.0));
+        let amplitude = 5_000i32;
+        let data: Vec<i32> = (0..10)
+            .map(|i| {
+                let phase = i as f64 * 2.0 / 10.0 * 2.0 * std::f64::consts::PI;
+                (phase.sin() * amplitude as f64) as i32
+            })
+            .collect();
+        trace.push_raw(&data);
+
+        let row = make_analog_row(80.0);
+        let color = ANALOG_COLORS_RGBA[0];
+        let mut canvas = PixelCanvas::new(200, 80);
+
+        // samples_per_px = 10/200 = 0.05 → per-sample with dots
+        build_analog_signal(&mut canvas, &trace, 0, 10, 10.0, &row, &color, 200.0);
+
+        // Dots are filled circles of radius 2.5. Each circle has ~20 pixels.
+        let signal_px = count_pixels(&canvas, color);
+        assert!(signal_px > 50, "expected dots with many signal pixels, got {signal_px}");
+
+        // Top grid line safe from signal overlap.
+        assert_grid_line_at(&canvas, 0, 100);
+
+        save_canvas_png(&canvas, "analog_per_sample_dots.png");
+    }
+
+    /// Empty data range → only background drawn.
+    #[test]
+    fn analog_per_sample_empty() {
+        let ch = AnalogChannel::new(ChannelId(0), "CH0", AnalogFormat::identity());
+        let trace = AnalogTrace::new(ch, Timebase::new(1_000_000.0, 0.0));
+
+        let row = make_analog_row(80.0);
+        let color = ANALOG_COLORS_RGBA[0];
+        let mut canvas = PixelCanvas::new(200, 80);
+
+        build_analog_signal(&mut canvas, &trace, 0, 0, 1.0, &row, &color, 200.0);
+
+        let signal_px = count_pixels(&canvas, color);
+        assert_eq!(signal_px, 0);
+        assert_eq!(canvas.pixel(50, 40), RgbaColor::TRANSPARENT);
+
+        save_canvas_png(&canvas, "analog_per_sample_empty.png");
+    }
+
+    /// Data crossing zero → dashed zero line drawn.
+    #[test]
+    fn analog_per_sample_zero_line() {
+        let ch = AnalogChannel::new(ChannelId(0), "CH0", AnalogFormat::identity());
+        let mut trace = AnalogTrace::new(ch, Timebase::new(1_000_000.0, 0.0));
+        let amplitude = 3_000i32;
+        let data: Vec<i32> = (0..20)
+            .map(|i| {
+                let phase = i as f64 * 1.0 / 20.0 * 2.0 * std::f64::consts::PI;
+                (phase.sin() * amplitude as f64) as i32
+            })
+            .collect();
+        trace.push_raw(&data);
+
+        let row = make_analog_row(80.0);
+        let color = ANALOG_COLORS_RGBA[0];
+        let mut canvas = PixelCanvas::new(200, 80);
+
+        build_analog_signal(&mut canvas, &trace, 0, 20, 20.0, &row, &color, 200.0);
+
+        // Zero line is dashed ZERO_LINE_COLOR on a background of BG_COLOR.
+        assert!(any_pixel_is(&canvas, ZERO_LINE_COLOR_RGBA),
+            "dashed zero line should be visible");
+
+        save_canvas_png(&canvas, "analog_per_sample_zero_line.png");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  Analog – envelope mode
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// 1000-sample sine wave at 800 px → 1.25 samples/px → envelope mode.
+    #[test]
+    fn analog_envelope_sine() {
+        let amplitude = 20_000i32;
+        let data: Vec<i32> = (0..1000)
+            .map(|i| {
+                let phase = i as f64 * 10.0 / 1000.0 * 2.0 * std::f64::consts::PI;
+                (phase.sin() * amplitude as f64) as i32
+            })
+            .collect();
+
+        let ch = AnalogChannel::new(ChannelId(0), "CH0", AnalogFormat::new(0.001, 0.0));
+        let mut trace = AnalogTrace::new(ch, Timebase::new(1_000_000.0, 0.0));
+        trace.push_raw(&data[..500]);
+        trace.push_raw(&data[500..]);
+
+        let row = make_analog_row(80.0);
+        let color = ANALOG_COLORS_RGBA[0];
+        let mut canvas = PixelCanvas::new(800, 80);
+
+        build_analog_signal(&mut canvas, &trace, 0, 1000, 1000.0, &row, &color, 800.0);
+
+        // Top grid line at y=0 — safe from signal overlap.
+        assert_grid_line_at(&canvas, 0, 400);
+
+        // Envelope mode uses globalAlpha=0.8 → blended pixels.
+        let bg_count = count_pixels(&canvas, BG_COLOR_RGBA);
+        assert!(bg_count < canvas.width() as usize * canvas.height() as usize,
+            "envelope should draw over background, but all pixels are BG");
+
+        // The envelope should span most of the vertical range.
+        let mut min_y = canvas.height();
+        let mut max_y = 0u32;
+        for y in 0..canvas.height() {
+            for x in 0..canvas.width() {
+                let p = canvas.pixel(x, y);
+                if p != BG_COLOR_RGBA && p != GRID_COLOR_RGBA && p != RgbaColor::TRANSPARENT {
+                    min_y = min_y.min(y);
+                    max_y = max_y.max(y);
+                }
+            }
+        }
+        let span = max_y - min_y;
+        assert!(span > 30, "envelope should span >30 px vertically, got {span}");
+
+        // Zero line present (data crosses zero).
+        assert!(any_pixel_is(&canvas, ZERO_LINE_COLOR_RGBA),
+            "zero line should appear for AC signal");
+
+        save_canvas_png(&canvas, "analog_envelope_sine.png");
+    }
+
+    /// Empty envelope range → only background.
+    #[test]
+    fn analog_envelope_empty() {
+        let ch = AnalogChannel::new(ChannelId(0), "CH0", AnalogFormat::identity());
+        let trace = AnalogTrace::new(ch, Timebase::new(1_000_000.0, 0.0));
+
+        let row = make_analog_row(80.0);
+        let color = ANALOG_COLORS_RGBA[0];
+        let mut canvas = PixelCanvas::new(800, 80);
+
+        build_analog_signal(&mut canvas, &trace, 0, 0, 1.0, &row, &color, 800.0);
+
+        assert_eq!(canvas.pixel(400, 40), RgbaColor::TRANSPARENT);
+
+        save_canvas_png(&canvas, "analog_envelope_empty.png");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  Digital – sparse mode
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// A few transitions on a wide canvas → sparse rendering.
+    #[test]
+    fn digital_sparse_few_edges() {
+        let channels = vec![DigitalChannel::new(ChannelId(0), "D0", 0)];
+        let mut trace = DigitalTrace::new(channels, Timebase::new(1_000_000.0, 0.0));
+        // Pattern: 0,0,0,1,1,1,0,0,1,1 → edges at sample 3, 6, 8
+        let words: Vec<u64> = vec![0b0, 0b0, 0b0, 0b1, 0b1, 0b1, 0b0, 0b0, 0b1, 0b1];
+        trace.push_words(&words[..5]);
+        trace.push_words(&words[5..]);
+
+        let row = make_digital_row(40.0, 0);
+        let mut canvas = PixelCanvas::new(400, 40);
+
+        build_digital_signal(&mut canvas, &trace, 0, 0, 10, 10.0, &row, 400.0);
+
+        // Signal pixels present.
+        let sig = count_pixels(&canvas, DIGITAL_COLOR_RGBA);
+        assert!(sig > 0, "no digital signal pixels drawn, got {sig}");
+
+        // At x=120 (edge at sample 3), there should be a vertical edge
+        // from high_row=10 to low_row=30.
+        let edge_x = 120u32;
+        let mut edge_pixels = 0;
+        for y in 10..=30 {
+            if canvas.pixel(edge_x, y) == DIGITAL_COLOR_RGBA {
+                edge_pixels += 1;
+            }
+        }
+        assert!(edge_pixels > 0,
+            "vertical edge expected at x={edge_x}, found {edge_pixels} signal pixels in [10..30]");
+
+        save_canvas_png(&canvas, "digital_sparse.png");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  Digital – dense mode
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Rapid toggling on a narrow canvas → dense rendering via MipMap.
+    #[test]
+    fn digital_dense_many_edges() {
+        let channels = vec![DigitalChannel::new(ChannelId(0), "D0", 0)];
+        let mut trace = DigitalTrace::new(channels, Timebase::new(1_000_000.0, 0.0));
+        let words: Vec<u64> = (0..50).map(|i| if i % 2 == 0 { 0b0 } else { 0b1 }).collect();
+        trace.push_words(&words[..25]);
+        trace.push_words(&words[25..]);
+
+        let row = make_digital_row(40.0, 0);
+        let mut canvas = PixelCanvas::new(20, 40);
+
+        // edge_count=49, num_pixels=20 → dense mode
+        build_digital_signal(&mut canvas, &trace, 0, 0, 50, 50.0, &row, 20.0);
+
+        // Background present.
+        assert!(count_pixels(&canvas, BG_COLOR_RGBA) > 0);
+
+        // Signal pixels present.
+        let sig = count_pixels(&canvas, DIGITAL_COLOR_RGBA);
+        assert!(sig > 0, "no digital signal pixels in dense mode, got {sig}");
+
+        save_canvas_png(&canvas, "digital_dense.png");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  End-to-end: MipMap pipeline via envelope
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Verifies the full AnalogTrace → AnalogMipMap → envelope_buckets →
+    /// PixelCanvas pipeline with incremental pushes.
+    #[test]
+    fn analog_mipmap_pipeline_incremental() {
+        let ch = AnalogChannel::new(ChannelId(0), "CH0", AnalogFormat::identity());
+        let mut trace = AnalogTrace::new(ch, Timebase::new(1_000_000.0, 0.0));
+
+        let total = 800usize;
+        for chunk_start in (0..total).step_by(200) {
+            let chunk_end = (chunk_start + 200).min(total);
+            let chunk: Vec<i32> = (chunk_start..chunk_end)
+                .map(|i| ((i as f64 * 0.05).sin() * 5000.0) as i32)
+                .collect();
+            trace.push_raw(&chunk);
+        }
+
+        let row = make_analog_row(80.0);
+        let color = ANALOG_COLORS_RGBA[2];
+        let mut canvas = PixelCanvas::new(600, 80);
+
+        build_analog_signal(&mut canvas, &trace, 0, total, total as f64,
+                            &row, &color, 600.0);
+
+        // Top grid line safe from signal.
+        assert_grid_line_at(&canvas, 0, 300);
+
+        // The mip-map should faithfully preserve amplitude.
+        let mut min_y = canvas.height();
+        let mut max_y = 0u32;
+        for y in 0..canvas.height() {
+            for x in 0..canvas.width() {
+                let p = canvas.pixel(x, y);
+                if p != BG_COLOR_RGBA && p != GRID_COLOR_RGBA && p != RgbaColor::TRANSPARENT {
+                    min_y = min_y.min(y);
+                    max_y = max_y.max(y);
+                }
+            }
+        }
+        let span = max_y.saturating_sub(min_y);
+        assert!(span > 20,
+            "mip-map envelope should span >20 px, got {span} (y {min_y}..{max_y})");
+
+        save_canvas_png(&canvas, "analog_mipmap_pipeline.png");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  Screenshot export — run with `cargo test screenshot -- --nocapture`
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Save a `PixelCanvas` as a PNG file in `target/test-screenshots/`.
+    fn save_canvas_png(canvas: &PixelCanvas, name: &str) {
+        let out_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent().unwrap().parent().unwrap()
+            .join("target").join("test-screenshots");
+        std::fs::create_dir_all(&out_dir).expect("create screenshot dir");
+        canvas.save_png(out_dir.join(name)).expect("save png");
+    }
+
 }

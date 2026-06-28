@@ -11,6 +11,7 @@ members = [
     "crates/rb-io",
     "crates/rb-cli",
     "crates/rb-gui",
+    "crates/rb-canvas",
 ]
 
 [workspace.package]
@@ -32,6 +33,7 @@ rb-core = { path = "crates/rb-core" }
 rb-drivers = { path = "crates/rb-drivers" }
 rb-io = { path = "crates/rb-io" }
 rb-gui = { path = "crates/rb-gui" }
+rb-canvas = { path = "crates/rb-canvas" }
 
 # Shared third-party (wasm-safe unless noted)
 thiserror = "2"

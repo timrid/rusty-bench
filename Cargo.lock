@@ -4569,6 +4569,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rb-canvas"
+version = "0.0.0"
+dependencies = [
+ "png",
+]
+
+[[package]]
 name = "rb-cli"
 version = "0.0.0"
 dependencies = [
@@ -4652,6 +4659,7 @@ dependencies = [
  "futures-timer",
  "getrandom 0.3.4",
  "log",
+ "rb-canvas",
  "rb-core",
  "rb-decode",
  "rb-device",

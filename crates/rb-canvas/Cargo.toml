@@ -1,0 +1,18 @@
+[package]
+name = "rb-canvas"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# NOTE: rb-canvas must stay free of I/O and async-runtime dependencies.
+# It must compile to wasm32-unknown-unknown with no feature flags.
+[dependencies]
+png = { version = "0.17", optional = true }
+
+[features]
+png-export = ["dep:png"]
+
+[dev-dependencies]
