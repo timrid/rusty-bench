@@ -1,16 +1,15 @@
 //! Signal list panel: channel names, colors, visibility toggles (right-click),
-//! and decoder configuration. Lives left of the waveform canvas.
+//! and sample rate input. Lives left of the waveform canvas.
 
 use dioxus::prelude::*;
 use crate::waveform_state::{RowKind, WaveformView};
 
 use super::app::AppStateRef;
-use crate::components::decoder_config::DecoderConfig;
 
-/// Left panel showing channel labels and decoder configuration.
+/// Left panel showing channel labels and sample rate configuration.
 #[component]
 pub fn SignalList(
-    device_id: rb_device::DeviceId,
+    session_id: crate::state::SessionId,
     mut view: Signal<WaveformView>,
     data_version: Signal<u64>,
 ) -> Element {
@@ -19,7 +18,7 @@ pub fn SignalList(
 
     let (analog_names, digital_names, sample_count, analog_enabled, digital_enabled, sample_rate_hz) = {
         let s = state.borrow();
-        if let Some(acq) = s.acquisitions.get(&device_id) {
+        if let Some(acq) = s.acq_for_session(session_id) {
             let anames: Vec<String> = acq.analog_traces().iter().map(|t| t.channel().name.clone()).collect();
             let dnames: Vec<String> = acq.digital_trace()
                 .map(|dt| dt.channels().iter().map(|ch| ch.name.clone()).collect())
@@ -27,7 +26,7 @@ pub fn SignalList(
             let aen: Vec<bool> = acq.config.analog_enabled.clone();
             let den: Vec<bool> = acq.config.digital_enabled.clone();
             (anames, dnames, acq.sample_count(), aen, den, acq.config.sample_rate_hz)
-        } else if let Some(handle) = s.session.device(&device_id) {
+        } else if let Some(handle) = s.handle_for_session(session_id) {
             let anames: Vec<String> = handle.analog_traces().iter().map(|t| t.channel().name.clone()).collect();
             let dnames: Vec<String> = handle.digital_trace()
                 .map(|dt| dt.channels().iter().map(|ch| ch.name.clone()).collect())
@@ -57,11 +56,11 @@ pub fn SignalList(
                     value: "{fmt_rate(sample_rate_hz)}",
                     oninput: {
                         let state = state.clone();
-                        let id = device_id.clone();
+                        let sid = session_id;
                         move |evt| {
                             if let Some(hz) = parse_rate(&evt.value()) {
                                 let mut s = state.borrow_mut();
-                                if let Some(acq) = s.acquisitions.get_mut(&id) {
+                                if let Some(acq) = s.acq_for_session_mut(sid) {
                                     acq.config.sample_rate_hz = hz;
                                 }
                             }
@@ -82,7 +81,7 @@ pub fn SignalList(
                         let is_enabled = analog_enabled.get(i).copied().unwrap_or(true);
                         let mut view = view;
                         let state = state.clone();
-                        let device_id = device_id.clone();
+                        let sid = session_id;
                         let i = i;
                         rsx! {
                             div {
@@ -103,7 +102,7 @@ pub fn SignalList(
                                     }
                                     // Toggle acquisition config.
                                     let mut s = state.borrow_mut();
-                                    if let Some(acq) = s.acquisitions.get_mut(&device_id) {
+                                    if let Some(acq) = s.acq_for_session_mut(sid) {
                                         if let Some(en) = acq.config.analog_enabled.get_mut(i) {
                                             *en = !*en;
                                         }
@@ -133,7 +132,7 @@ pub fn SignalList(
                         let is_enabled = digital_enabled.get(i).copied().unwrap_or(true);
                         let mut view = view;
                         let state = state.clone();
-                        let device_id = device_id.clone();
+                        let sid = session_id;
                         let i = i;
                         rsx! {
                             div {
@@ -154,7 +153,7 @@ pub fn SignalList(
                                     }
                                     // Toggle acquisition config.
                                     let mut s = state.borrow_mut();
-                                    if let Some(acq) = s.acquisitions.get_mut(&device_id) {
+                                    if let Some(acq) = s.acq_for_session_mut(sid) {
                                         if let Some(en) = acq.config.digital_enabled.get_mut(i) {
                                             *en = !*en;
                                         }
@@ -171,19 +170,7 @@ pub fn SignalList(
                 }
             }
 
-            // Divider
-            if has_analog || has_digital {
-                div { class: "border-t border-zinc-800 mx-2 my-1" }
-            }
-
-            // Decoder section
-            div { class: "px-2 pt-1 pb-0.5",
-                span { class: "text-[9px] font-bold text-zinc-500 uppercase tracking-wider", "Decoder" }
-            }
-            div { class: "px-2 pb-2",
-                DecoderConfig { view }
-            }
-
+            // Bottom spacer
             div { class: "flex-1" }
 
             if sample_count > 0 {

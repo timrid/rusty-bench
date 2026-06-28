@@ -73,7 +73,7 @@ fn fmt_time_ns(ns: f64) -> String {
 
 #[component]
 pub fn WaveformCanvas(
-    device_id: rb_device::DeviceId,
+    session_id: crate::state::SessionId,
     data_version: Signal<u64>,
     mut view: Signal<WaveformView>,
     mut cursor_sample_pos: Signal<Option<u64>>,
@@ -84,10 +84,10 @@ pub fn WaveformCanvas(
     // ── Gather data ───────────────────────────────────────────────────────
     let (acq_state, analog, digital, sample_count) = {
         let s = state.borrow();
-        if let Some(acq) = s.acquisitions.get(&device_id) {
+        if let Some(acq) = s.acq_for_session(session_id) {
             (acq.state().clone(), acq.analog_traces().to_vec(),
              acq.digital_trace().cloned(), acq.sample_count())
-        } else if let Some(h) = s.session.device(&device_id) {
+        } else if let Some(h) = s.handle_for_session(session_id) {
             (h.state().clone(), h.analog_traces().to_vec(),
              h.digital_trace().cloned(), h.sample_count())
         } else { (AcquisitionState::Idle, Vec::new(), None, 0) }
@@ -112,7 +112,7 @@ pub fn WaveformCanvas(
         v.rebuild_rows(analog.len(), dcc);
         if let Some(ref dt) = digital { v.feed_decoder(dt); }
     }
-    { let mut s = state.borrow_mut(); s.views.insert(device_id.clone(), view.read().clone()); }
+    { let mut s = state.borrow_mut(); if let Some(session_state) = s.sessions.get_mut(&session_id) { session_state.view = view.read().clone(); } }
 
     // ── Derived ───────────────────────────────────────────────────────────
     let rows = view.read().rows.clone();
@@ -123,7 +123,7 @@ pub fn WaveformCanvas(
     let sample_rate_hz = 1_000_000.0; // TODO: real sample rate
     let tick_elements = compute_ticks(range_start, range_end, range_len, sample_rate_hz);
 
-    let short_id = device_id.as_str().replace(':', "-");
+    let short_id = format!("sess-{}", session_id.0);
 
     // ── Single drawing effect ─────────────────────────────────────────────
     {
@@ -131,19 +131,16 @@ pub fn WaveformCanvas(
         let data_version = data_version;
         let sample_count_sig = sample_count_sig;
         let state = state.clone();
-        let device_id = device_id.clone();
+        let sid = session_id;
         let view = view;
         use_effect(move || {
             let _ver = data_version();
             let sc = sample_count_sig();
-            // Re-read fresh analog/digital data from state on every effect run.
-            // This avoids the stale-closure bug where the first render (before
-            // data arrives) captures empty Vec/None permanently.
             let (analog, digital) = {
                 let s = state.borrow();
-                if let Some(acq) = s.acquisitions.get(&device_id) {
+                if let Some(acq) = s.acq_for_session(sid) {
                     (acq.analog_traces().to_vec(), acq.digital_trace().cloned())
-                } else if let Some(h) = s.session.device(&device_id) {
+                } else if let Some(h) = s.handle_for_session(sid) {
                     (h.analog_traces().to_vec(), h.digital_trace().cloned())
                 } else { (Vec::new(), None) }
             };

@@ -10,7 +10,7 @@ use super::app::AppStateRef;
 /// Toolbar above the canvas with acquisition controls and marker buttons.
 #[component]
 pub fn CanvasToolbar(
-    device_id: rb_device::DeviceId,
+    session_id: crate::state::SessionId,
     view: Signal<WaveformView>,
     cursor_sample_pos: Signal<Option<u64>>,
     data_version: Signal<u64>,
@@ -20,9 +20,9 @@ pub fn CanvasToolbar(
 
     let (acq_state, sample_count) = {
         let s = state.borrow();
-        if let Some(acq) = s.acquisitions.get(&device_id) {
+        if let Some(acq) = s.acq_for_session(session_id) {
             (acq.state().clone(), acq.sample_count())
-        } else if let Some(handle) = s.session.device(&device_id) {
+        } else if let Some(handle) = s.handle_for_session(session_id) {
             (handle.state().clone(), handle.sample_count())
         } else {
             (AcquisitionState::Idle, 0)
@@ -40,9 +40,9 @@ pub fn CanvasToolbar(
                     title: "Stop acquisition",
                     onclick: {
                         let state = state.clone();
-                        let id = device_id.clone();
+                        let sid = session_id;
                         move |_| {
-                            state.borrow_mut().stop_blocking(&id);
+                            state.borrow_mut().stop_blocking(sid);
                             data_version += 1;
                         }
                     },
@@ -55,9 +55,9 @@ pub fn CanvasToolbar(
                     title: "Start acquisition",
                     onclick: {
                         let state = state.clone();
-                        let id = device_id.clone();
+                        let sid = session_id;
                         move |_| {
-                            state.borrow_mut().start_blocking(&id);
+                            state.borrow_mut().start_blocking(sid);
                             data_version.set(data_version() + 1);
                         }
                     },

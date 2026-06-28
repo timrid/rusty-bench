@@ -1,61 +1,50 @@
-//! Device view: the main content area for a single connected device.
+//! Session view: the main content area for the active session.
 //!
 //! Layout:
-//! ┌──────────────────────────────┐
-//! │ Device Tabs (if multiple)    │
-//! ├──────────────────────────────┤
-//! │ Canvas Toolbar               │
-//! ├────────┬─────────────────────┤
-//! │ Signal │                     │
-//! │ List   │    Canvas           │
-//! │        │                     │
-//! ├────────┴─────────────────────┤
-//! │ Control Cards                │
-//! └──────────────────────────────┘
+//! ┌──────────────────────────────────────┐
+//! │ Canvas Toolbar                       │
+//! ├────────┬───────────────┬─────────────┤
+//! │ Signal │               │  Decoder    │
+//! │ List   │    Canvas     │  Config     │
+//! │        │               │             │
+//! └────────┴───────────────┴─────────────┘
 
 use dioxus::prelude::*;
 
 use super::app::AppStateRef;
 use super::canvas_toolbar::CanvasToolbar;
-use super::control_cards::ControlCards;
+use super::decoder_config::DecoderConfig;
 use super::signal_list::SignalList;
 use super::waveform_canvas::WaveformCanvas;
 
-/// The device view for the currently selected device.
+/// The main content view for the active session.
 #[component]
 pub fn DeviceView(data_version: Signal<u64>) -> Element {
     let state: AppStateRef = use_context();
     let _version = data_version();
 
-    // Determine which device to show.
-    // If selected_device is set and connected, use it. Otherwise pick first connected.
     let s = state.borrow();
-    let device_ids = s.connected_device_ids();
-
-    let selected_id = {
-        let sel = s.selected_device.clone();
-        if sel.as_ref().is_some_and(|sid| device_ids.contains(sid)) {
-            sel
-        } else {
-            device_ids.first().cloned()
-        }
-    };
+    let active_session = s.active_session;
+    let device_id = s
+        .active_session_state()
+        .and_then(|ss| ss.connected_device_id());
+    let connect_error = s.connect_error.clone();
     drop(s);
 
-    // Persist the computed selection so sidebar stays in sync.
-    {
-        let mut s = state.borrow_mut();
-        s.selected_device = selected_id.clone();
-    }
-
-    let Some(ref device_id) = selected_id else {
+    // No device connected — show placeholder.
+    let Some(ref device_id) = device_id else {
         return rsx! {
             div { class: "flex-1 flex flex-col items-center justify-center",
                 div { class: "text-center space-y-3",
                     div { class: "text-5xl mb-2", "\u{1F50C}" }
-                    h2 { class: "text-lg font-bold text-zinc-400", "No Device Connected" }
+                    h2 { class: "text-lg font-bold text-zinc-400", "No Device" }
                     p { class: "text-xs text-zinc-600 max-w-sm",
-                        "Use the sidebar to scan for devices and connect one, or enable demo devices to get started without hardware."
+                        "Select a device from the dropdown above. It will be connected automatically."
+                    }
+                    if let Some(ref err) = connect_error {
+                        p { class: "text-xs text-red-400 bg-red-900/20 border border-red-800 rounded px-3 py-1.5 mt-2 max-w-sm",
+                            "{err}"
+                        }
                     }
                     button {
                         class: "bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded text-sm font-medium transition-colors mt-2",
@@ -70,88 +59,74 @@ pub fn DeviceView(data_version: Signal<u64>) -> Element {
         };
     };
 
-    // Tab bar (only show if multiple devices)
-    let tab_elements = if device_ids.len() > 1 {
-        let tab_infos: Vec<_> = {
-            let s = state.borrow();
-            device_ids
-                .iter()
-                .map(|id| {
-                    let label = s.device_label(id);
-                    let is_active = Some(id) == selected_id.as_ref();
-                    (id.clone(), label, is_active)
-                })
-                .collect()
-        };
-
-        rsx! {
-            div { class: "flex border-b border-zinc-800 px-1 pt-1 gap-0.5 flex-shrink-0",
-                for (id, label, is_active) in &tab_infos {
-                    div {
-                        class: if *is_active {
-                            "px-3 py-1 text-xs bg-zinc-800 text-zinc-200 rounded-t cursor-pointer border-t border-x border-zinc-700"
-                        } else {
-                            "px-3 py-1 text-xs text-zinc-500 hover:text-zinc-300 cursor-pointer rounded-t"
-                        },
-                        onclick: {
-                            let state = state.clone();
-                            let id = id.clone();
-                            move |_| {
-                                state.borrow_mut().selected_device = Some(id.clone());
-                                data_version += 1;
-                            }
-                        },
-                        "{label}"
-                    }
-                }
-                div { class: "flex-1 border-b border-zinc-800" }
-            }
-        }
-    } else {
-        rsx! {}
-    };
-
-    // Per-device view state — created once, shared with all children.
+    // Device connected — show full view.
+    // Per-session view state from the active session.
     let view = {
         let s = state.borrow();
-        s.views.get(device_id).cloned().unwrap_or_default()
+        s.active_session_state()
+            .map(|ss| ss.view.clone())
+            .unwrap_or_default()
     };
-    let view_signal = use_signal(move || view);
+    let mut view_signal = use_signal(move || view);
     let cursor_sample_pos = use_signal(|| None::<u64>);
+
+    // Persist view state across tab switches.
+    // When the active session changes: save the current view to the
+    // previous session and load the new session's saved view.
+    let mut prev_session = use_signal(|| active_session);
+    if prev_session() != active_session {
+        // Save current view to the old session.
+        {
+            let mut s = state.borrow_mut();
+            if let Some(old) = s.sessions.get_mut(&prev_session()) {
+                old.view = view_signal.read().clone();
+            }
+        }
+        // Load the new session's saved view.
+        let new_view = {
+            let s = state.borrow();
+            s.sessions.get(&active_session)
+                .map(|ss| ss.view.clone())
+                .unwrap_or_default()
+        };
+        view_signal.set(new_view);
+        prev_session.set(active_session);
+    } else {
+        // Same session — sync view state back on each render.
+        let mut s = state.borrow_mut();
+        if let Some(active) = s.sessions.get_mut(&active_session) {
+            active.view = view_signal.read().clone();
+        }
+    }
 
     rsx! {
         div { class: "flex-1 flex flex-col overflow-hidden",
-            {tab_elements}
-
             // Canvas toolbar
             CanvasToolbar {
-                device_id: device_id.clone(),
+                session_id: active_session,
                 view: view_signal,
                 cursor_sample_pos,
                 data_version,
             }
 
-            // Canvas area: Signal List | Canvas
+            // Three-panel area: Signal List | Canvas | Decoder Config
             div { class: "flex-1 flex overflow-hidden",
                 SignalList {
-                    device_id: device_id.clone(),
+                    session_id: active_session,
                     view: view_signal,
                     data_version,
                 }
                 div { class: "flex-1 overflow-hidden",
                     WaveformCanvas {
-                        device_id: device_id.clone(),
+                        session_id: active_session,
                         data_version,
                         view: view_signal,
                         cursor_sample_pos,
                     }
                 }
-            }
-
-            // Control cards for non-timeline capabilities
-            ControlCards {
-                device_id: device_id.clone(),
-                data_version,
+                div { class: "w-48 flex-shrink-0 border-l border-zinc-800 bg-zinc-900/50 overflow-y-auto p-2",
+                    DecoderConfig { view: view_signal }
+                }
             }
         }
     }

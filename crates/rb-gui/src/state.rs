@@ -24,6 +24,12 @@ use {futures::executor::LocalPool, futures::executor::LocalSpawner, futures::tas
 #[cfg(feature = "native")]
 use tokio::task::LocalSet;
 
+// ── Session identifier ────────────────────────────────────────────────────────
+
+/// Opaque identifier for a GUI session (one tab = one session = one device).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SessionId(pub(crate) u64);
+
 // ── Acquisition configuration ─────────────────────────────────────────────────
 
 /// User-facing configuration for the next acquisition run.
@@ -124,17 +130,110 @@ impl DeviceAcquisition {
     }
 }
 
+// ── Per-session state ─────────────────────────────────────────────────────────
+
+/// All state owned by one GUI session (one tab).
+///
+/// Each session is tied to at most one device. The device is assigned via the
+/// device dropdown but **not connected** until the user presses Play.
+pub struct SessionState {
+    pub id: SessionId,
+    /// Display name shown in the tab (device label or "Untitled").
+    pub label: String,
+    /// The device candidate assigned to this session (via dropdown).
+    /// `None` until the user picks a device. Connection happens on Play.
+    pub assigned_device: Option<ScanResult>,
+    /// Holds the connected device handle (if connected).
+    pub session: Session,
+    /// Active acquisition, if running or stopped.
+    pub acquisition: Option<DeviceAcquisition>,
+    /// Per-session waveform pan/zoom/marker state.
+    pub view: WaveformView,
+    /// The id of the connected device, persisted even when the handle is
+    /// temporarily moved into the acquisition future.
+    connected_id: Option<DeviceId>,
+}
+
+impl SessionState {
+    pub fn new(id: SessionId, label: impl Into<String>) -> Self {
+        Self {
+            id,
+            label: label.into(),
+            assigned_device: None,
+            session: Session::new(),
+            acquisition: None,
+            view: WaveformView::default(),
+            connected_id: None,
+        }
+    }
+
+    /// Returns the connected device id, if any.
+    /// Checks `connected_id` first (persisted across handle moves),
+    /// then falls back to the session's device list.
+    pub fn connected_device_id(&self) -> Option<DeviceId> {
+        if let Some(ref id) = self.connected_id {
+            Some(id.clone())
+        } else {
+            self.session.device_ids().into_iter().next()
+        }
+    }
+
+    /// Returns the device label (vendor/model) for display.
+    pub fn device_label(&self) -> Option<String> {
+        self.connected_device_id()
+            .and_then(|id| self.session.device(&id))
+            .map(|h| {
+                let info = h.device().info();
+                format!("{}/{}", info.vendor, info.model)
+            })
+    }
+
+    /// Returns the current acquisition state.
+    pub fn acquisition_state(&self) -> AcquisitionState {
+        if let Some(acq) = &self.acquisition {
+            acq.state().clone()
+        } else {
+            self.session
+                .device_ids()
+                .first()
+                .and_then(|id| self.session.device(id))
+                .map(|h| h.state().clone())
+                .unwrap_or(AcquisitionState::Idle)
+        }
+    }
+
+    /// Returns the sample count from the acquisition or device handle.
+    pub fn sample_count(&self) -> usize {
+        if let Some(acq) = &self.acquisition {
+            acq.sample_count()
+        } else {
+            self.connected_device_id()
+                .and_then(|id| self.session.device(&id))
+                .map(|h| h.sample_count())
+                .unwrap_or(0)
+        }
+    }
+
+    /// Returns true if this session is currently acquiring.
+    pub fn is_running(&self) -> bool {
+        matches!(self.acquisition_state(), AcquisitionState::Running)
+    }
+}
+
 // ── App state ─────────────────────────────────────────────────────────────────
 
 pub struct AppState {
-    pub session: Session,
     pub registry: DriverRegistry,
     pub scan_results: Vec<ScanResult>,
     pub scan_error: Option<String>,
     pub connect_error: Option<String>,
-    pub selected_device: Option<DeviceId>,
-    pub views: HashMap<DeviceId, WaveformView>,
-    pub acquisitions: HashMap<DeviceId, DeviceAcquisition>,
+
+    /// All open sessions, keyed by id.
+    pub sessions: HashMap<SessionId, SessionState>,
+    /// The currently active (visible) session tab.
+    pub active_session: SessionId,
+    next_session_id: u64,
+
     /// Executor for background acquisition futures (non-WASM, non-native tests).
     #[cfg(not(any(feature = "native", target_arch = "wasm32")))]
     #[allow(dead_code)]
@@ -143,14 +242,14 @@ pub struct AppState {
     #[allow(dead_code)]
     pub spawner: LocalSpawner,
     /// Tokio LocalSet for native builds (proper I/O integration).
-    /// Uses the existing Dioxus tokio runtime; no nested Runtime created.
     #[cfg(feature = "native")]
     pub local_set: LocalSet,
+
     // Deferred actions.
     pub pending_connect: Option<ScanResult>,
-    pub pending_disconnect: Option<DeviceId>,
-    pub pending_start: Option<DeviceId>,
-    pub pending_stop: Option<DeviceId>,
+    pub pending_disconnect: Option<SessionId>,
+    pub pending_start: Option<SessionId>,
+    pub pending_stop: Option<SessionId>,
     /// Receiver for a pending WASM scan (spawned via `spawn_local`).
     #[cfg(target_arch = "wasm32")]
     pub pending_wasm_scan: Option<futures::channel::oneshot::Receiver<Result<Vec<ScanResult>, String>>>,
@@ -176,17 +275,28 @@ impl AppState {
         };
         #[cfg(feature = "native")]
         let local_set = LocalSet::new();
-        let ids: Vec<DeviceId> = session.device_ids();
-        let selected_device = ids.into_iter().next();
+
+        let first_id = SessionId(1);
+        let mut state = SessionState::new(first_id, "Session 1");
+        state.session = session;
+        state.connected_id = state.session.device_ids().into_iter().next();
+
+        // Update label from device if one is present.
+        if let Some(label) = state.device_label() {
+            state.label = label;
+        }
+
+        let mut sessions = HashMap::new();
+        sessions.insert(first_id, state);
+
         Self {
-            session,
             registry: DriverRegistry::with_default_factories(),
             scan_results: Vec::new(),
             scan_error: None,
             connect_error: None,
-            selected_device,
-            views: HashMap::new(),
-            acquisitions: HashMap::new(),
+            sessions,
+            active_session: first_id,
+            next_session_id: 2,
             #[cfg(not(any(feature = "native", target_arch = "wasm32")))]
             pool,
             #[cfg(not(any(feature = "native", target_arch = "wasm32")))]
@@ -208,7 +318,72 @@ impl AppState {
         Self::from_session(Session::new())
     }
 
-    /// Connect to a device candidate (blocking, for use in event handlers).
+    // ── Session management ────────────────────────────────────────────────────
+
+    /// Creates a new empty session and makes it the active tab.
+    pub fn create_session(&mut self, label: impl Into<String>) -> SessionId {
+        let id = SessionId(self.next_session_id);
+        self.next_session_id += 1;
+        let state = SessionState::new(id, label);
+        self.sessions.insert(id, state);
+        self.active_session = id;
+        id
+    }
+
+    /// Closes a session, stopping any running acquisition and disconnecting
+    /// the device. If closing the active session, activates the nearest
+    /// remaining session or creates a fresh one.
+    pub fn close_session(&mut self, id: SessionId) {
+        // Stop and disconnect first.
+        if let Some(session_state) = self.sessions.get_mut(&id) {
+            // Stop acquisition if running.
+            if let Some(acq) = session_state.acquisition.as_mut() {
+                acq.send_command(AcquisitionCommand::Stop);
+                acq.state = AcquisitionState::Stopped;
+            }
+            // Disconnect: replace session with empty one (drops all handles).
+            session_state.session = Session::new();
+            session_state.acquisition = None;
+            session_state.assigned_device = None;
+            session_state.connected_id = None;
+        }
+
+        self.sessions.remove(&id);
+
+        // If we closed the active session, pick a new one or create a fresh session.
+        if self.active_session == id {
+            if let Some(&next_id) = self.sessions.keys().next() {
+                self.active_session = next_id;
+            } else {
+                // No sessions left — create a fresh empty one.
+                self.create_session("Untitled");
+            }
+        }
+    }
+
+    /// Assigns a device candidate to a session. Does NOT connect — connection
+    /// happens on Play.
+    pub fn assign_device_to_session(&mut self, session_id: SessionId, result: ScanResult) {
+        if let Some(state) = self.sessions.get_mut(&session_id) {
+            state.assigned_device = Some(result.clone());
+            // Update the tab label to the driver name.
+            state.label = result.driver.clone();
+        }
+    }
+
+    /// Returns a reference to the active session.
+    pub fn active_session_state(&self) -> Option<&SessionState> {
+        self.sessions.get(&self.active_session)
+    }
+
+    /// Returns a mutable reference to the active session.
+    pub fn active_session_state_mut(&mut self) -> Option<&mut SessionState> {
+        self.sessions.get_mut(&self.active_session)
+    }
+
+    // ── Device connection (legacy, used during Play flow) ──────────────────────
+
+    /// Connect to a device candidate for the active session (blocking).
     /// On native, wraps in block_in_place to work within Dioxus's tokio context.
     pub fn connect_blocking(&mut self, result: &ScanResult) {
         #[cfg(not(target_arch = "wasm32"))]
@@ -225,9 +400,15 @@ impl AppState {
             );
             match connect_result {
                 Ok(device) => {
-                    let id = self.session.add_device(device);
-                    self.selected_device = Some(id);
-                    self.connect_error = None;
+                    if let Some(state) = self.active_session_state_mut() {
+                        let id = state.session.add_device(device);
+                        state.connected_id = Some(id);
+                        // Update label from device info.
+                        if let Some(label) = state.device_label() {
+                            state.label = label;
+                        }
+                        self.connect_error = None;
+                    }
                 }
                 Err(e) => self.connect_error = Some(e.to_string()),
             }
@@ -238,61 +419,119 @@ impl AppState {
         }
     }
 
-    /// Disconnect a device (synchronous, no I/O needed).
-    pub fn disconnect_blocking(&mut self, id: &DeviceId) {
-        self.acquisitions.remove(id);
-        let _ = self.session.remove(id);
-        self.views.remove(id);
-        if self.selected_device.as_ref() == Some(id) {
-            self.selected_device = self.connected_device_ids().into_iter().next();
+    /// Disconnect the device from the given session (synchronous).
+    pub fn disconnect_blocking(&mut self, session_id: SessionId) {
+        if let Some(state) = self.sessions.get_mut(&session_id) {
+            state.acquisition = None;
+            state.session = Session::new();
+            state.connected_id = None;
         }
     }
 
-    /// Start acquisition for a device (blocking, for use in event handlers).
-    pub fn start_blocking(&mut self, id: &DeviceId) {
-        if let Some(acq) = self.acquisitions.get_mut(id) {
-            // Re-run: apply config sample rate, clear old data, then send Start.
-            let rate = acq.config.sample_rate_hz;
-            acq.send_command(AcquisitionCommand::SetSampleRate(rate));
-            acq.reset_traces();
-            acq.send_command(AcquisitionCommand::Start);
-            acq.state = AcquisitionState::Running;
-        } else if let Some(handle) = self.session.remove(id) {
+    // ── Acquisition control ───────────────────────────────────────────────────
+
+    // ── Acquisition control ───────────────────────────────────────────────────
+
+    /// Start acquisition for the given session.
+    /// If the device is not yet connected, connects first, then starts.
+    pub fn start_blocking(&mut self, session_id: SessionId) {
+        // Check if we need to connect first.
+        let need_connect = self
+            .sessions
+            .get(&session_id)
+            .is_some_and(|s| s.connected_device_id().is_none() && s.assigned_device.is_some());
+
+        if need_connect {
+            let assigned = self.sessions.get(&session_id).and_then(|s| s.assigned_device.clone());
+            if let Some(result) = assigned {
+                self.connect_blocking_with_session(session_id, &result);
+            }
+        }
+
+        // Now start acquisition. Extract the handle first to avoid double borrow.
+        let handle = self.sessions.get_mut(&session_id).and_then(|state| {
+            if state.acquisition.is_some() {
+                // Re-run: apply config.
+                let rate = state.acquisition.as_ref().unwrap().config.sample_rate_hz;
+                state.acquisition.as_mut().unwrap().send_command(AcquisitionCommand::SetSampleRate(rate));
+                state.acquisition.as_mut().unwrap().reset_traces();
+                state.acquisition.as_mut().unwrap().send_command(AcquisitionCommand::Start);
+                state.acquisition.as_mut().unwrap().state = AcquisitionState::Running;
+                None
+            } else {
+                state.connected_device_id().and_then(|did| state.session.remove(&did))
+            }
+        });
+
+        if let Some(handle) = handle {
             let acq = self.spawn_acquisition(handle);
-            self.acquisitions.insert(id.clone(), acq);
+            if let Some(state) = self.sessions.get_mut(&session_id) {
+                state.acquisition = Some(acq);
+            }
         }
     }
 
-    /// Stop acquisition for a device (blocking, for use in event handlers).
-    pub fn stop_blocking(&mut self, id: &DeviceId) {
-        if let Some(acq) = self.acquisitions.get_mut(id) {
+    /// Stop acquisition for the given session.
+    pub fn stop_blocking(&mut self, session_id: SessionId) {
+        let state = match self.sessions.get_mut(&session_id) {
+            Some(s) => s,
+            None => return,
+        };
+        if let Some(acq) = state.acquisition.as_mut() {
             acq.send_command(AcquisitionCommand::Stop);
             acq.state = AcquisitionState::Stopped;
-        } else if let Some(handle) = self.session.device_mut(id) {
+        } else if let Some(handle) = state.session.device_ids().first().and_then(|id| state.session.device_mut(id)) {
             #[cfg(not(target_arch = "wasm32"))]
             let _ = futures::executor::block_on(handle.apply(AcquisitionCommand::Stop));
         }
     }
 
+    /// Connect a device to a specific session (internal helper for start flow).
+    pub(crate) fn connect_blocking_with_session(&mut self, session_id: SessionId, result: &ScanResult) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            #[cfg(feature = "native")]
+            let connect_result = tokio::task::block_in_place(|| {
+                futures::executor::block_on(
+                    self.registry.connect(&result.driver, &result.candidate),
+                )
+            });
+            #[cfg(not(feature = "native"))]
+            let connect_result = futures::executor::block_on(
+                self.registry.connect(&result.driver, &result.candidate),
+            );
+            match connect_result {
+                Ok(device) => {
+                    if let Some(state) = self.sessions.get_mut(&session_id) {
+                        let id = state.session.add_device(device);
+                        state.connected_id = Some(id);
+                        if let Some(label) = state.device_label() {
+                            state.label = label;
+                        }
+                        self.connect_error = None;
+                    }
+                }
+                Err(e) => self.connect_error = Some(e.to_string()),
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            // On WASM, queue the connect via pending_connect.
+            // The session id won't be needed since WASM uses the active session.
+            self.pending_connect = Some(result.clone());
+        }
+    }
+
     pub fn apply_pending_actions(&mut self) {
+        // Handle pending connect (used by WASM path and legacy callers).
         if let Some(result) = self.pending_connect.take() {
-            log::debug!("apply_pending_actions: connecting to {}", result.candidate.address);
+            let session_id = self.active_session;
             #[cfg(not(target_arch = "wasm32"))]
             {
-                let connect_result = futures::executor::block_on(
-                    self.registry.connect(&result.driver, &result.candidate),
-                );
-                log::debug!("apply_pending_actions: connect result={:?}", connect_result.as_ref().map(|_| "Ok").map_err(|e| e.to_string()));
-                Self::apply_connect_result(
-                    connect_result,
-                    &mut self.session,
-                    &mut self.selected_device,
-                    &mut self.connect_error,
-                );
+                self.connect_blocking_with_session(session_id, &result);
             }
             #[cfg(target_arch = "wasm32")]
             {
-                // Spawn async connect via wasm-bindgen-futures.
                 let registry = self.registry.clone();
                 let driver = result.driver.clone();
                 let candidate = result.candidate.clone();
@@ -309,39 +548,19 @@ impl AppState {
             }
         }
 
-        if let Some(id) = self.pending_disconnect.take() {
-            self.acquisitions.remove(&id);
-            let _ = self.session.remove(&id);
-            self.views.remove(&id);
-            if self.selected_device.as_ref() == Some(&id) {
-                self.selected_device = self.connected_device_ids().into_iter().next();
-            }
+        // Handle pending disconnect (session close).
+        if let Some(session_id) = self.pending_disconnect.take() {
+            self.close_session(session_id);
         }
 
-        if let Some(id) = self.pending_start.take() {
-            if let Some(acq) = self.acquisitions.get_mut(&id) {
-                // Re-run: apply config sample rate, clear old data, then send Start.
-                let rate = acq.config.sample_rate_hz;
-                acq.send_command(AcquisitionCommand::SetSampleRate(rate));
-                acq.reset_traces();
-                acq.send_command(AcquisitionCommand::Start);
-                acq.state = AcquisitionState::Running;
-            } else if let Some(handle) = self.session.remove(&id) {
-                // First start: spawn_acquisition arms and starts streaming
-                // immediately — no separate Start command needed.
-                let acq = self.spawn_acquisition(handle);
-                self.acquisitions.insert(id, acq);
-            }
+        // Handle pending start.
+        if let Some(session_id) = self.pending_start.take() {
+            self.apply_start(session_id);
         }
 
-        if let Some(id) = self.pending_stop.take() {
-            if let Some(acq) = self.acquisitions.get_mut(&id) {
-                acq.send_command(AcquisitionCommand::Stop);
-                acq.state = AcquisitionState::Stopped;
-            } else if let Some(handle) = self.session.device_mut(&id) {
-                #[cfg(not(target_arch = "wasm32"))]
-                let _ = futures::executor::block_on(handle.apply(AcquisitionCommand::Stop));
-            }
+        // Handle pending stop.
+        if let Some(session_id) = self.pending_stop.take() {
+            self.apply_stop(session_id);
         }
 
         // Check for completed WASM scan.
@@ -359,7 +578,6 @@ impl AppState {
                     }
                 }
             } else {
-                // Not yet ready; put it back for the next frame.
                 self.pending_wasm_scan = Some(rx);
             }
         }
@@ -369,8 +587,8 @@ impl AppState {
             if let Ok(Some(result)) = rx.try_recv() {
                 Self::apply_connect_result(
                     result,
-                    &mut self.session,
-                    &mut self.selected_device,
+                    &mut self.sessions,
+                    self.active_session,
                     &mut self.connect_error,
                 );
             } else {
@@ -379,29 +597,87 @@ impl AppState {
         }
     }
 
+    /// Check if connect is needed (device assigned but not connected), connect,
+    /// then start acquisition. Used by pending_start.
+    fn apply_start(&mut self, session_id: SessionId) {
+        let need_connect = self
+            .sessions
+            .get(&session_id)
+            .is_some_and(|s| s.connected_device_id().is_none() && s.assigned_device.is_some());
+
+        if need_connect {
+            let assigned = self.sessions.get(&session_id).and_then(|s| s.assigned_device.clone());
+            if let Some(result) = assigned {
+                #[cfg(not(target_arch = "wasm32"))]
+                self.connect_blocking_with_session(session_id, &result);
+                #[cfg(target_arch = "wasm32")]
+                {
+                    self.pending_connect = Some(result);
+                    self.pending_start = Some(session_id);
+                    return;
+                }
+            }
+        }
+
+        // Extract handle first to avoid double borrow.
+        let handle = self.sessions.get_mut(&session_id).and_then(|state| {
+            if state.acquisition.is_some() {
+                let rate = state.acquisition.as_ref().unwrap().config.sample_rate_hz;
+                state.acquisition.as_mut().unwrap().send_command(AcquisitionCommand::SetSampleRate(rate));
+                state.acquisition.as_mut().unwrap().reset_traces();
+                state.acquisition.as_mut().unwrap().send_command(AcquisitionCommand::Start);
+                state.acquisition.as_mut().unwrap().state = AcquisitionState::Running;
+                None
+            } else {
+                state.connected_device_id().and_then(|did| state.session.remove(&did))
+            }
+        });
+
+        if let Some(handle) = handle {
+            let acq = self.spawn_acquisition(handle);
+            if let Some(state) = self.sessions.get_mut(&session_id) {
+                state.acquisition = Some(acq);
+            }
+        }
+    }
+
+    fn apply_stop(&mut self, session_id: SessionId) {
+        let state = match self.sessions.get_mut(&session_id) {
+            Some(s) => s,
+            None => return,
+        };
+        if let Some(acq) = state.acquisition.as_mut() {
+            acq.send_command(AcquisitionCommand::Stop);
+            acq.state = AcquisitionState::Stopped;
+        } else if let Some(handle) = state.session.device_ids().first().and_then(|id| state.session.device_mut(id)) {
+            #[cfg(not(target_arch = "wasm32"))]
+            let _ = futures::executor::block_on(handle.apply(AcquisitionCommand::Stop));
+        }
+    }
+
     /// Apply a connect result (shared by sync and async paths).
     fn apply_connect_result(
         result: Result<Box<dyn rb_device::Device>, impl ToString>,
-        session: &mut Session,
-        selected_device: &mut Option<DeviceId>,
+        sessions: &mut HashMap<SessionId, SessionState>,
+        active_session: SessionId,
         connect_error: &mut Option<String>,
     ) {
         match result {
             Ok(device) => {
-                let id = session.add_device(device);
-                *selected_device = Some(id);
-                *connect_error = None;
+                if let Some(state) = sessions.get_mut(&active_session) {
+                    let id = state.session.add_device(device);
+                    state.connected_id = Some(id);
+                    if let Some(label) = state.device_label() {
+                        state.label = label;
+                    }
+                    *connect_error = None;
+                }
             }
             Err(e) => *connect_error = Some(e.to_string()),
         }
     }
 
     /// Spawns an acquisition future and returns the [`DeviceAcquisition`] handle.
-    ///
-    /// All paths now use [`run_acquisition`] so that Stop → Start re-arm is
-    /// handled correctly (re-calls `start_streaming()`).
-    /// The old native custom-spawn path that bypassed `run_acquisition` could
-    /// not recover from a `Stop` because the data-pipe task exited permanently.
     #[allow(unused_mut)]
     pub fn spawn_acquisition(&mut self, mut handle: DeviceHandle) -> DeviceAcquisition {
         let analog = handle.analog_traces().to_vec();
@@ -426,9 +702,6 @@ impl AppState {
         #[cfg(target_arch = "wasm32")]
         {
             let web_handle = rb_core::runtime::web::spawn_local(handle);
-            // The spawned run_acquisition future waits for a Start command
-            // before arming the device — send it now so streaming begins.
-            // Apply sample rate, then start streaming.
             let _ = web_handle
                 .commands
                 .unbounded_send(AcquisitionCommand::SetSampleRate(config.sample_rate_hz));
@@ -449,9 +722,6 @@ impl AppState {
             let (cmd_tx, cmd_rx) = mpsc::unbounded::<AcquisitionCommand>();
             let (data_tx, data_rx) = mpsc::unbounded();
 
-            // Spawn run_acquisition — it handles Start/Stop/restart
-            // internally via select!, correctly calling start_streaming()
-            // on each re-arm.
             let fut = run_acquisition(handle, cmd_rx, Some(data_tx));
             #[cfg(feature = "native")]
             {
@@ -468,7 +738,6 @@ impl AppState {
                     .expect("spawn");
             }
 
-            // Apply sample rate, then start streaming.
             let _ = cmd_tx.unbounded_send(AcquisitionCommand::SetSampleRate(config.sample_rate_hz));
             let _ = cmd_tx.unbounded_send(AcquisitionCommand::Start);
 
@@ -484,36 +753,127 @@ impl AppState {
         }
     }
 
-    pub fn connected_device_ids(&self) -> Vec<DeviceId> {
-        let mut ids: Vec<DeviceId> = self.session.device_ids();
-        ids.extend(self.acquisitions.keys().cloned());
-        ids
-    }
+    // ── Queries ───────────────────────────────────────────────────────────────
 
+    /// Returns the device label (vendor/model) for a connected device.
     pub fn device_label(&self, id: &DeviceId) -> String {
-        if let Some(handle) = self.session.device(id) {
-            let info = handle.device().info();
-            return format!("{}/{}", info.vendor, info.model);
+        for state in self.sessions.values() {
+            if let Some(handle) = state.session.device(id) {
+                let info = handle.device().info();
+                return format!("{}/{}", info.vendor, info.model);
+            }
         }
         id.to_string()
     }
 
+    /// Returns the acquisition state for a device, searching across all sessions.
     pub fn device_state(&self, id: &DeviceId) -> Option<AcquisitionState> {
-        if let Some(acq) = self.acquisitions.get(id) {
-            Some(acq.state().clone())
-        } else {
-            self.session.device(id).map(|handle| handle.state().clone())
+        for state in self.sessions.values() {
+            if state.connected_device_id().as_ref() == Some(id) {
+                if let Some(acq) = &state.acquisition {
+                    return Some(acq.state().clone());
+                }
+            }
+            if let Some(handle) = state.session.device(id) {
+                return Some(handle.state().clone());
+            }
         }
+        None
     }
 
-    pub fn device_sample_count(&self, id: &DeviceId) -> usize {
-        if let Some(acq) = self.acquisitions.get(id) {
-            acq.sample_count()
-        } else if let Some(handle) = self.session.device(id) {
-            handle.sample_count()
-        } else {
-            0
+    /// Returns a reference to the device handle for a device, searching across all sessions.
+    pub fn device_handle(&self, id: &DeviceId) -> Option<&DeviceHandle> {
+        for state in self.sessions.values() {
+            if let Some(handle) = state.session.device(id) {
+                return Some(handle);
+            }
         }
+        None
+    }
+
+    /// Returns a reference to the acquisition for a session.
+    pub fn acq_for_session(&self, session_id: SessionId) -> Option<&DeviceAcquisition> {
+        self.sessions.get(&session_id).and_then(|s| s.acquisition.as_ref())
+    }
+
+    /// Returns a mutable reference to the acquisition for a session.
+    pub fn acq_for_session_mut(&mut self, session_id: SessionId) -> Option<&mut DeviceAcquisition> {
+        self.sessions.get_mut(&session_id).and_then(|s| s.acquisition.as_mut())
+    }
+
+    /// Returns a reference to the device handle for a session.
+    pub fn handle_for_session(&self, session_id: SessionId) -> Option<&DeviceHandle> {
+        let state = self.sessions.get(&session_id)?;
+        state.connected_device_id().and_then(|id| state.session.device(&id))
+    }
+
+    /// Returns the connected device id for a session.
+    pub fn device_id_for_session(&self, session_id: SessionId) -> Option<DeviceId> {
+        self.sessions.get(&session_id).and_then(|s| s.connected_device_id())
+    }
+
+    /// Returns a mutable reference to the acquisition for a device.
+    pub fn acquisition_for_device_mut(&mut self, device_id: &DeviceId) -> Option<&mut DeviceAcquisition> {
+        for state in self.sessions.values_mut() {
+            if state.connected_device_id().as_ref() == Some(device_id) {
+                return state.acquisition.as_mut();
+            }
+        }
+        None
+    }
+
+    /// Returns a reference to the session state that owns the given device.
+    pub fn session_for_device(&self, device_id: &DeviceId) -> Option<&SessionState> {
+        self.sessions.values().find(|s| s.connected_device_id().as_ref() == Some(device_id))
+    }
+
+    /// Returns a mutable reference to the session state that owns the given device.
+    pub fn session_for_device_mut(&mut self, device_id: &DeviceId) -> Option<&mut SessionState> {
+        self.sessions.values_mut().find(|s| s.connected_device_id().as_ref() == Some(device_id))
+    }
+
+    /// Returns the sample count for a device, searching across all sessions.
+    pub fn device_sample_count(&self, id: &DeviceId) -> usize {
+        for state in self.sessions.values() {
+            if let Some(acq) = &state.acquisition {
+                if state.connected_device_id().as_ref() == Some(id) {
+                    return acq.sample_count();
+                }
+            }
+            if let Some(handle) = state.session.device(id) {
+                return handle.sample_count();
+            }
+        }
+        0
+    }
+
+    /// Returns the acquisition state of the active session.
+    pub fn active_session_acquisition_state(&self) -> AcquisitionState {
+        self.active_session_state()
+            .map(|s| s.acquisition_state())
+            .unwrap_or(AcquisitionState::Idle)
+    }
+
+    /// Returns all connected device ids from all sessions.
+    pub fn connected_device_ids(&self) -> Vec<DeviceId> {
+        let mut ids = Vec::new();
+        for state in self.sessions.values() {
+            ids.extend(state.session.device_ids());
+            if state.acquisition.is_some() {
+                // Include device ids from acquisitions.
+                if let Some(id) = state.connected_device_id() {
+                    if !ids.contains(&id) {
+                        ids.push(id);
+                    }
+                }
+            }
+        }
+        ids
+    }
+
+    /// Returns the number of active sessions.
+    pub fn session_count(&self) -> usize {
+        self.sessions.len()
     }
 
     /// Triggers a scan (native: block_on; web: spawn_local + oneshot).
@@ -537,8 +897,6 @@ impl AppState {
             let registry = self.registry.clone();
             let (tx, rx) = futures::channel::oneshot::channel();
             wasm_bindgen_futures::spawn_local(async move {
-                // Request any known USB device so it appears in
-                // subsequent getDevices() calls.
                 let _ = request_supported_usb_devices().await;
                 let result = registry.scan_all().await.map_err(|e| e.to_string());
                 let _ = tx.send(result);
@@ -547,20 +905,13 @@ impl AppState {
         }
     }
 
-    /// Run the executor for one tick. Abstracts over native (tokio
-    /// `LocalSet` with timeout), web (no-op — `wasm-bindgen-futures` drives
-    /// acquisition tasks), and non-native (`LocalPool`).
+    /// Run the executor for one tick.
     pub fn pump_once(&mut self) {
-        // On WASM, acquisition futures run on `wasm-bindgen-futures`, not the
-        // `LocalPool`. The browser's microtask queue drives them; we only need
-        // to drain data here.
         #[cfg(target_arch = "wasm32")]
         return;
 
         #[cfg(feature = "native")]
         {
-            // Drive tokio's LocalSet for a short window using block_in_place
-            // to safely block within Dioxus's async context.
             let handle = tokio::runtime::Handle::current();
             tokio::task::block_in_place(|| {
                 handle.block_on(async {
@@ -577,25 +928,25 @@ impl AppState {
         self.pool.run_until_stalled();
     }
 
-    /// Drains all acquisition data into local stores. Returns true if any
-    /// new data arrived.
+    /// Drains acquisition data for the **active session only** into local
+    /// stores. Returns true if any new data arrived.
+    /// Inactive sessions are left untouched — their data stays in the mpsc
+    /// channel until the user switches to their tab.
     pub fn drain_all(&mut self) -> bool {
-        let mut had_data = false;
-        for acq in self.acquisitions.values_mut() {
-            let before = acq.sample_count();
-            acq.drain();
-            if acq.sample_count() > before {
-                had_data = true;
-            }
-        }
-        had_data
+        let Some(state) = self.sessions.get_mut(&self.active_session) else {
+            return false;
+        };
+        let Some(acq) = state.acquisition.as_mut() else {
+            return false;
+        };
+        let before = acq.sample_count();
+        acq.drain();
+        acq.sample_count() > before
     }
 
     /// Returns true if any acquisition is currently running.
     pub fn any_running(&self) -> bool {
-        self.acquisitions
-            .values()
-            .any(|a| a.state() == &AcquisitionState::Running)
+        self.sessions.values().any(|s| s.is_running())
     }
 
     /// Returns true if any WASM async operation is pending.
@@ -671,12 +1022,13 @@ mod tests {
     }
 
     #[test]
-    fn app_initializes_empty() {
+    fn app_initializes_with_one_empty_session() {
         let app = AppState::default();
-        assert!(app.session.is_empty());
-        assert!(app.acquisitions.is_empty());
+        assert_eq!(app.sessions.len(), 1);
+        let active = app.active_session_state().unwrap();
+        assert!(active.session.is_empty());
+        assert!(active.acquisition.is_none());
         assert!(app.scan_results.is_empty());
-        assert!(app.selected_device.is_none());
     }
 
     #[test]
@@ -690,58 +1042,83 @@ mod tests {
     }
 
     #[test]
-    fn connect_adds_device_to_session() {
+    fn connect_adds_device_to_active_session() {
         let mut app = AppState::default();
         let demo = scan_for_demo(&app);
         app.pending_connect = Some(demo);
         app.apply_pending_actions();
-        assert_eq!(app.session.len(), 1);
-        assert!(app.selected_device.is_some());
+        let active = app.active_session_state().unwrap();
+        assert_eq!(active.session.len(), 1);
     }
 
     #[test]
-    fn disconnect_removes_device() {
+    fn disconnect_removes_device_from_session() {
         let mut app = AppState::default();
         let demo = scan_for_demo(&app);
         app.pending_connect = Some(demo);
         app.apply_pending_actions();
-        let id = app.selected_device.clone().unwrap();
-        app.pending_disconnect = Some(id);
+
+        let session_id = app.active_session;
+        app.pending_disconnect = Some(session_id);
         app.apply_pending_actions();
-        assert!(app.session.is_empty());
-        assert!(app.acquisitions.is_empty());
-        assert!(app.selected_device.is_none());
+
+        // The session should still exist (close creates a fresh one if last)
+        assert_eq!(app.sessions.len(), 1);
+        let active = app.active_session_state().unwrap();
+        assert!(active.session.is_empty());
+        assert!(active.acquisition.is_none());
     }
 
     #[test]
     fn start_spawns_and_pumps_samples() {
         let mut app = AppState::default();
         let demo = scan_for_demo(&app);
+        let session_id = app.active_session;
+
+        // Assign and connect the device.
+        app.assign_device_to_session(session_id, demo.clone());
         app.pending_connect = Some(demo);
         app.apply_pending_actions();
-        let id = app.selected_device.clone().unwrap();
 
         // Start acquisition.
-        app.pending_start = Some(id.clone());
+        app.pending_start = Some(session_id);
         app.apply_pending_actions();
-        assert!(app.acquisitions.contains_key(&id));
 
-        // Drive the pool repeatedly, waiting between calls for
-        // futures_timer delays to fire. The first iteration processes
-        // Start and sleeps 50 ms (idle back-off); subsequent iterations
-        // pump data every ~1 ms.
+        let active = app.active_session_state().unwrap();
+        assert!(active.acquisition.is_some());
+
+        // Drive the pool repeatedly.
         for _ in 0..10 {
             app.pump_once();
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
 
         // Drain data.
-        if let Some(acq) = app.acquisitions.get_mut(&id) {
-            acq.drain();
+        if let Some(active) = app.sessions.get_mut(&session_id) {
+            if let Some(acq) = active.acquisition.as_mut() {
+                acq.drain();
+            }
         }
 
-        let count = app.device_sample_count(&id);
-        assert!(count > 0, "expected samples after pump, got {count}");
+        let active = app.active_session_state().unwrap();
+        assert!(active.sample_count() > 0, "expected samples after pump, got {}", active.sample_count());
+    }
+
+    #[test]
+    fn create_and_close_sessions() {
+        let mut app = AppState::default();
+        let initial = app.active_session;
+        assert_eq!(app.sessions.len(), 1);
+
+        // Create a second session.
+        let id2 = app.create_session("Test 2");
+        assert_eq!(app.active_session, id2);
+        assert_eq!(app.sessions.len(), 2);
+
+        // Close the active session (Test 2), should fall back to initial.
+        app.close_session(id2);
+        assert_eq!(app.sessions.len(), 1);
+        assert_eq!(app.active_session, initial);
     }
 
     fn scan_for_demo(app: &AppState) -> ScanResult {

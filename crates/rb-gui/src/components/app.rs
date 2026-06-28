@@ -1,6 +1,6 @@
 //! Root Dioxus component for the RustyBench GUI.
 //!
-//! Layout: SessionSidebar (left, collapsible) | DeviceView (center) | StatusBar (bottom).
+//! Layout: TopBar | SessionView (center) | StatusBar (bottom).
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -10,8 +10,8 @@ use dioxus::prelude::*;
 
 use crate::state::AppState;
 
-use super::session_sidebar::SessionSidebar;
 use super::device_view::DeviceView;
+use super::top_bar::TopBar;
 
 static TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 pub type AppStateRef = Rc<RefCell<AppState>>;
@@ -40,64 +40,20 @@ pub fn App() -> Element {
         }
     });
 
-    // Auto-select first connected device.
-    {
-        let s = state.borrow();
-        let ids = s.connected_device_ids();
-        if !ids.is_empty() && s.selected_device.is_none() {
-            drop(s);
-            state.borrow_mut().selected_device = ids.first().cloned();
-        }
-    }
-
     let _version = data_version();
 
     rsx! {
         document::Stylesheet { href: TAILWIND_CSS }
 
         div { class: "flex flex-col h-screen bg-zinc-950 text-zinc-300 text-sm",
-            // Title bar
-            TitleBar { data_version }
+            // Top bar: device dropdown + tab bar + settings
+            TopBar { data_version }
 
-            // Main area: sidebar + device view
-            div { class: "flex-1 flex overflow-hidden",
-                SessionSidebar { data_version }
-                DeviceView { data_version }
-            }
+            // Main area: session content (full width)
+            DeviceView { data_version }
 
             // Status bar
             StatusBar { data_version }
-        }
-    }
-}
-
-/// Window title bar with app name and device info.
-#[component]
-fn TitleBar(data_version: Signal<u64>) -> Element {
-    let _version = data_version();
-    let state: AppStateRef = use_context();
-
-    let label = state
-        .borrow()
-        .selected_device
-        .as_ref()
-        .and_then(|id| {
-            let s = state.borrow();
-            let lbl = s.device_label(id);
-            if lbl.is_empty() { None } else { Some(lbl) }
-        });
-
-    rsx! {
-        div { class: "h-8 bg-zinc-900 border-b border-zinc-800 flex items-center px-4 flex-shrink-0",
-            span { class: "text-xs font-bold text-zinc-300 select-none",
-                "RustyBench"
-            }
-            if let Some(ref device_label) = label {
-                span { class: "text-xs text-zinc-600 mx-2", "\u{203A}" }
-                span { class: "text-xs text-zinc-400", "{device_label}" }
-            }
-            div { class: "flex-1" }
-            span { class: "text-zinc-700 text-xs select-none", "\u{2014}  \u{25A2}  \u{2715}" }
         }
     }
 }
@@ -108,16 +64,23 @@ fn StatusBar(data_version: Signal<u64>) -> Element {
     let _version = data_version();
     let state: AppStateRef = use_context();
     let s = state.borrow();
-    let device_count = s.connected_device_ids().len();
+    let session_count = s.sessions.len();
     let any_running = s.any_running();
+    let active_label = s
+        .active_session_state()
+        .map(|ss| ss.label.clone())
+        .filter(|l| l != "Untitled")
+        .unwrap_or_default();
     drop(s);
 
     let status_text = if any_running {
-        format!("\u{25CF} {device_count} device(s)  |  Acquiring")
-    } else if device_count > 0 {
-        format!("\u{25CF} {device_count} device(s)  |  Idle")
+        format!("\u{25CF} {session_count} session(s)  |  Acquiring")
+    } else if session_count > 0 && !active_label.is_empty() {
+        format!("\u{25CF} {session_count} session(s)  |  {active_label}  |  Idle")
+    } else if session_count > 0 {
+        format!("\u{25CF} {session_count} session(s)  |  Idle")
     } else {
-        "\u{25CB} No devices  |  Ready".to_string()
+        "\u{25CB} No sessions  |  Ready".to_string()
     };
 
     rsx! {
