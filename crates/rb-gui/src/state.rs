@@ -9,10 +9,11 @@ use std::collections::HashMap;
 
 use futures::channel::mpsc;
 use rb_core::{
-    AcquisitionCommand, AcquisitionState, DeviceHandle, DriverRegistry, ScanResult, Session,
+    run_acquisition, AcquisitionCommand, AcquisitionState, DeviceHandle, DriverRegistry, ScanResult,
+    Session,
 };
 use rb_device::DeviceId;
-use rb_model::{AnalogTrace, DigitalTrace, SampleChunk};
+use rb_model::{AnalogChannel, AnalogTrace, DigitalChannel, DigitalTrace, SampleChunk, Timebase};
 
 use crate::waveform_state::WaveformView;
 
@@ -22,6 +23,26 @@ use crate::waveform_state::WaveformView;
 use {futures::executor::LocalPool, futures::executor::LocalSpawner, futures::task::LocalSpawnExt};
 #[cfg(feature = "native")]
 use tokio::task::LocalSet;
+
+// ── Acquisition configuration ─────────────────────────────────────────────────
+
+/// User-facing configuration for the next acquisition run.
+///
+/// Persists across Stop → Start cycles so that channel selection and sample
+/// rate survive a re-run.  Built once at [`spawn_acquisition`] time from the
+/// device's channel list (all channels enabled, device's native sample rate).
+#[derive(Clone, Debug)]
+pub struct AcquisitionConfig {
+    /// Desired sample rate in Hz.  Sent via [`SetSampleRate`](AcquisitionCommand::SetSampleRate)
+    /// before every [`Start`](AcquisitionCommand::Start).
+    pub sample_rate_hz: f64,
+    /// Per-channel enable flags, in device channel order.  A disabled channel
+    /// is still present in [`DeviceAcquisition::analog`] (so labels render) but
+    /// [`drain`](DeviceAcquisition::drain) skips pushing samples into it.
+    pub analog_enabled: Vec<bool>,
+    /// Per-digital-channel enable flags, in device channel order.
+    pub digital_enabled: Vec<bool>,
+}
 
 // ── Per-device acquisition state ──────────────────────────────────────────────
 
@@ -39,6 +60,8 @@ pub struct DeviceAcquisition {
     pub cmd_tx: mpsc::UnboundedSender<AcquisitionCommand>,
     /// Receives [`SampleChunk`]s from the spawned future.
     pub data_rx: mpsc::UnboundedReceiver<SampleChunk>,
+    /// User-editable acquisition configuration.
+    pub config: AcquisitionConfig,
 }
 
 impl DeviceAcquisition {
@@ -47,12 +70,15 @@ impl DeviceAcquisition {
             std::iter::from_fn(|| self.data_rx.try_recv().ok()).collect();
         for chunk in &chunks {
             for (index, trace) in self.analog.iter_mut().enumerate() {
+                if !self.config.analog_enabled.get(index).copied().unwrap_or(true) {
+                    continue;
+                }
                 if let Some(samples) = chunk.analog_channel(index) {
                     trace.push_raw(samples);
                 }
             }
             if let Some(ref mut digital) = self.digital {
-                if !chunk.logic().is_empty() {
+                if self.config.digital_enabled.iter().any(|e| *e) && !chunk.logic().is_empty() {
                     digital.push_words(chunk.logic());
                 }
             }
@@ -75,6 +101,26 @@ impl DeviceAcquisition {
 
     pub fn send_command(&self, cmd: AcquisitionCommand) {
         let _ = self.cmd_tx.unbounded_send(cmd);
+    }
+
+    /// Resets all traces to empty, preserving channel configuration.
+    /// Called on re-run so old data is discarded before a fresh acquisition.
+    pub fn reset_traces(&mut self) {
+        // Read channel metadata from current traces BEFORE replacing them.
+        let analog_channels: Vec<AnalogChannel> =
+            self.analog.iter().map(|t| t.channel().clone()).collect();
+        let digital_channels: Option<Vec<DigitalChannel>> =
+            self.digital.as_ref().map(|t| t.channels().to_vec());
+        let rate = self.config.sample_rate_hz;
+        let timebase = Timebase::new(rate, 0.0);
+        self.analog = analog_channels
+            .iter()
+            .map(|ch| AnalogTrace::new(ch.clone(), timebase))
+            .collect();
+        self.digital = digital_channels
+            .as_ref()
+            .map(|chs| DigitalTrace::new(chs.clone(), timebase));
+        self.sample_count = 0;
     }
 }
 
@@ -205,6 +251,10 @@ impl AppState {
     /// Start acquisition for a device (blocking, for use in event handlers).
     pub fn start_blocking(&mut self, id: &DeviceId) {
         if let Some(acq) = self.acquisitions.get_mut(id) {
+            // Re-run: apply config sample rate, clear old data, then send Start.
+            let rate = acq.config.sample_rate_hz;
+            acq.send_command(AcquisitionCommand::SetSampleRate(rate));
+            acq.reset_traces();
             acq.send_command(AcquisitionCommand::Start);
             acq.state = AcquisitionState::Running;
         } else if let Some(handle) = self.session.remove(id) {
@@ -270,8 +320,10 @@ impl AppState {
 
         if let Some(id) = self.pending_start.take() {
             if let Some(acq) = self.acquisitions.get_mut(&id) {
-                // Re-arm after stop: just set state (the command handler
-                // will re-arm via send_command if needed).
+                // Re-run: apply config sample rate, clear old data, then send Start.
+                let rate = acq.config.sample_rate_hz;
+                acq.send_command(AcquisitionCommand::SetSampleRate(rate));
+                acq.reset_traces();
                 acq.send_command(AcquisitionCommand::Start);
                 acq.state = AcquisitionState::Running;
             } else if let Some(handle) = self.session.remove(&id) {
@@ -346,19 +398,40 @@ impl AppState {
 
     /// Spawns an acquisition future and returns the [`DeviceAcquisition`] handle.
     ///
-    /// On native: spawns the raw read-loop directly (matching the CLI's proven
-    /// pattern), avoiding the `select!` wrapper in `run_acquisition`.
-    /// On web: spawns via `wasm-bindgen-futures::spawn_local`.
+    /// All paths now use [`run_acquisition`] so that Stop → Start re-arm is
+    /// handled correctly (re-calls `start_streaming()`).
+    /// The old native custom-spawn path that bypassed `run_acquisition` could
+    /// not recover from a `Stop` because the data-pipe task exited permanently.
     #[allow(unused_mut)]
     pub fn spawn_acquisition(&mut self, mut handle: DeviceHandle) -> DeviceAcquisition {
         let analog = handle.analog_traces().to_vec();
         let digital = handle.digital_trace().cloned();
+
+        // Build initial config from device capabilities — all channels enabled.
+        let analog_enabled = vec![true; analog.len()];
+        let digital_enabled = digital
+            .as_ref()
+            .map(|dt| vec![true; dt.channels().len()])
+            .unwrap_or_default();
+        let sample_rate_hz = analog
+            .first()
+            .map(|t| t.timebase().sample_rate_hz())
+            .unwrap_or(1.0);
+        let config = AcquisitionConfig {
+            sample_rate_hz,
+            analog_enabled,
+            digital_enabled,
+        };
 
         #[cfg(target_arch = "wasm32")]
         {
             let web_handle = rb_core::runtime::web::spawn_local(handle);
             // The spawned run_acquisition future waits for a Start command
             // before arming the device — send it now so streaming begins.
+            // Apply sample rate, then start streaming.
+            let _ = web_handle
+                .commands
+                .unbounded_send(AcquisitionCommand::SetSampleRate(config.sample_rate_hz));
             let _ = web_handle.commands.unbounded_send(AcquisitionCommand::Start);
             return DeviceAcquisition {
                 analog,
@@ -367,6 +440,7 @@ impl AppState {
                 sample_count: 0,
                 cmd_tx: web_handle.commands,
                 data_rx: web_handle.data,
+                config,
             };
         }
 
@@ -375,81 +449,28 @@ impl AppState {
             let (cmd_tx, cmd_rx) = mpsc::unbounded::<AcquisitionCommand>();
             let (data_tx, data_rx) = mpsc::unbounded();
 
-            let start_result =
-                futures::executor::block_on(async { handle.start_streaming().await });
-            let (read_loop, internal_rx) = match start_result {
-                Ok((rl, rx)) => (rl, rx),
-                Err(e) => {
-                    return DeviceAcquisition {
-                        analog,
-                        digital,
-                        state: AcquisitionState::Error(e.to_string()),
-                        sample_count: 0,
-                        cmd_tx,
-                        data_rx,
-                    };
-                }
-            };
-
-            let handle = std::rc::Rc::new(std::cell::RefCell::new(handle));
-
-            // Spawn on tokio LocalSet (native) or LocalPool (fallback/tests).
+            // Spawn run_acquisition — it handles Start/Stop/restart
+            // internally via select!, correctly calling start_streaming()
+            // on each re-arm.
+            let fut = run_acquisition(handle, cmd_rx, Some(data_tx));
             #[cfg(feature = "native")]
             {
-                self.local_set.spawn_local(read_loop);
-                let h = handle.clone();
                 self.local_set.spawn_local(async move {
-                    use futures::StreamExt;
-                    let mut rx = internal_rx;
-                    while let Some(chunk) = rx.next().await {
-                        h.borrow_mut().ingest_chunk(&chunk);
-                        if data_tx.unbounded_send(chunk).is_err() {
-                            break;
-                        }
-                    }
+                    let _handle = fut.await;
                 });
-                let h = handle.clone();
-                self.local_set.spawn_local(
-                    #[allow(clippy::await_holding_refcell_ref)]
-                    async move {
-                        use futures::StreamExt;
-                        let mut rx = cmd_rx;
-                        while let Some(cmd) = rx.next().await {
-                            let _ = h.borrow_mut().apply(cmd).await;
-                        }
-                    },
-                );
             }
             #[cfg(not(feature = "native"))]
             {
-                self.spawner.spawn_local(read_loop).expect("spawn");
-                let h = handle.clone();
                 self.spawner
                     .spawn_local(async move {
-                        use futures::StreamExt;
-                        let mut rx = internal_rx;
-                        while let Some(chunk) = rx.next().await {
-                            h.borrow_mut().ingest_chunk(&chunk);
-                            if data_tx.unbounded_send(chunk).is_err() {
-                                break;
-                            }
-                        }
+                        let _handle = fut.await;
                     })
                     .expect("spawn");
-                let h = handle.clone();
-                self.spawner
-                    .spawn_local(
-                        #[allow(clippy::await_holding_refcell_ref)]
-                        async move {
-                            use futures::StreamExt;
-                            let mut rx = cmd_rx;
-                            while let Some(cmd) = rx.next().await {
-                                let _ = h.borrow_mut().apply(cmd).await;
-                            }
-                        },
-                    )
-                    .expect("spawn");
             }
+
+            // Apply sample rate, then start streaming.
+            let _ = cmd_tx.unbounded_send(AcquisitionCommand::SetSampleRate(config.sample_rate_hz));
+            let _ = cmd_tx.unbounded_send(AcquisitionCommand::Start);
 
             DeviceAcquisition {
                 analog,
@@ -458,6 +479,7 @@ impl AppState {
                 sample_count: 0,
                 cmd_tx,
                 data_rx,
+                config,
             }
         }
     }

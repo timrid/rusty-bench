@@ -107,7 +107,7 @@ pub fn WaveformCanvas(
     // ── Update view ───────────────────────────────────────────────────────
     {
         let mut v = view.write();
-        if sample_count > 0 { v.clamp_view(sample_count, is_running); }
+        v.clamp_view(sample_count, is_running);
         let dcc = digital.as_ref().map(|dt| dt.channels().len()).unwrap_or(0);
         v.rebuild_rows(analog.len(), dcc);
         if let Some(ref dt) = digital { v.feed_decoder(dt); }
