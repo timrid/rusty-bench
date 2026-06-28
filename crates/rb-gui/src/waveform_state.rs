@@ -567,7 +567,7 @@ impl WaveformView {
         self.view_start = center
             .saturating_sub(new_samples / 2)
             .min(sample_count.saturating_sub(new_samples));
-        self.auto_scroll = false;
+        // Zoom does NOT disable auto-scroll — only manual pan/drag does.
     }
 
     /// Update decoder config based on handle's digital trace.

@@ -399,6 +399,35 @@ pub fn WaveformCanvas(
                         }
                     }
                 }
+
+                // ── Live toggle ───────────────────────────────────────
+                div {
+                    class: "absolute bottom-2 right-2 z-30 select-none",
+                    onmousedown: move |evt| {
+                        evt.stop_propagation();
+                        evt.prevent_default();
+                        let mut v = view.write();
+                        v.auto_scroll = !v.auto_scroll;
+                        data_version += 1;
+                    },
+                    {
+                        let live = view.read().auto_scroll;
+                        let btn_class = if live {
+                            "px-3 py-1 rounded text-[11px] font-medium \
+                             bg-lime-500/20 text-lime-400 border border-lime-500/50 \
+                             cursor-pointer hover:bg-lime-500/30 transition-colors"
+                        } else {
+                            "px-3 py-1 rounded text-[11px] font-medium \
+                             bg-zinc-700/30 text-zinc-400 border border-zinc-600/50 \
+                             cursor-pointer hover:bg-zinc-600/30 transition-colors"
+                        };
+                        rsx! {
+                            div { class: "{btn_class}",
+                                if live { "\u{25CF} Live" } else { "\u{25CB} Live" }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
