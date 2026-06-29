@@ -1,46 +1,45 @@
-//! Signal list panel: channel names, colors, visibility toggles (right-click),
-//! and sample rate input. Lives left of the waveform canvas.
+//! Channel-config panel: shows device channels with enable toggles and
+//! sample-rate input. Lives left of the waveform canvas.
+//!
+//! Reads from [`SessionState::acquisition_config`], which is built from
+//! device capabilities on connect.  User edits (toggle, rate) modify the
+//! config in place; traces are rebuilt from the config on acquisition start.
 
 use dioxus::prelude::*;
-use crate::waveform_state::{RowKind, WaveformView};
 
 use super::app::AppStateRef;
 
-/// Left panel showing channel labels and sample rate configuration.
+/// Left panel showing channel labels, enable toggles, and sample rate.
 #[component]
-pub fn SignalList(
+pub fn ChannelConfig(
     session_id: crate::session_state::SessionId,
-    mut view: Signal<WaveformView>,
+    mut view: Signal<crate::waveform_state::WaveformView>,
     data_version: Signal<u64>,
 ) -> Element {
     let state: AppStateRef = use_context();
     let _version = data_version();
 
-    let (analog_names, digital_names, sample_count, analog_enabled, digital_enabled, sample_rate_hz) = {
+    // Read config and sample count from the session.
+    let (analog_channels, digital_channels, analog_enabled, digital_enabled, sample_rate_hz, sample_count) = {
         let s = state.borrow();
-        if let Some(acq) = s.acq_for_session(session_id) {
-            let anames: Vec<String> = acq.analog_traces().iter().map(|t| t.channel().name.clone()).collect();
-            let dnames: Vec<String> = acq.digital_trace()
-                .map(|dt| dt.channels().iter().map(|ch| ch.name.clone()).collect())
-                .unwrap_or_default();
-            let aen: Vec<bool> = acq.config.analog_enabled.clone();
-            let den: Vec<bool> = acq.config.digital_enabled.clone();
-            (anames, dnames, acq.sample_count(), aen, den, acq.config.sample_rate_hz)
-        } else if let Some(handle) = s.handle_for_session(session_id) {
-            let anames: Vec<String> = handle.analog_traces().iter().map(|t| t.channel().name.clone()).collect();
-            let dnames: Vec<String> = handle.digital_trace()
-                .map(|dt| dt.channels().iter().map(|ch| ch.name.clone()).collect())
-                .unwrap_or_default();
-            let aen = vec![true; anames.len()];
-            let den = vec![true; dnames.len()];
-            (anames, dnames, handle.sample_count(), aen, den, 1_000_000.0)
+        if let Some(session) = s.sessions.get(&session_id) {
+            let cfg = &session.acquisition_config;
+            let sc = session.acquisition.as_ref().map(|a| a.sample_count()).unwrap_or(0);
+            (
+                cfg.analog_channels.clone(),
+                cfg.digital_channels.clone(),
+                cfg.analog_enabled.clone(),
+                cfg.digital_enabled.clone(),
+                cfg.sample_rate_hz,
+                sc,
+            )
         } else {
-            (Vec::new(), Vec::new(), 0, Vec::new(), Vec::new(), 1_000_000.0)
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), crate::device_acquisition::DEFAULT_SAMPLE_RATE_HZ, 0)
         }
     };
 
-    let has_analog = !analog_names.is_empty();
-    let has_digital = !digital_names.is_empty();
+    let has_analog = !analog_channels.is_empty();
+    let has_digital = !digital_channels.is_empty();
 
     rsx! {
         div { class: "w-36 flex-shrink-0 border-r border-zinc-800 bg-zinc-900/50 flex flex-col h-full overflow-y-auto select-none",
@@ -60,8 +59,12 @@ pub fn SignalList(
                         move |evt| {
                             if let Some(hz) = parse_rate(&evt.value()) {
                                 let mut s = state.borrow_mut();
-                                if let Some(acq) = s.acq_for_session_mut(sid) {
-                                    acq.config.sample_rate_hz = hz;
+                                if let Some(session) = s.sessions.get_mut(&sid) {
+                                    session.acquisition_config.sample_rate_hz = hz;
+                                    // Also update running acquisition config.
+                                    if let Some(ref acq) = session.acquisition {
+                                        acq.send_command(rb_core::AcquisitionCommand::SetSampleRate(hz));
+                                    }
                                 }
                             }
                         }
@@ -76,7 +79,7 @@ pub fn SignalList(
                 div { class: "px-2 pt-2 pb-0.5",
                     span { class: "text-[9px] font-bold text-zinc-500 uppercase tracking-wider", "Analog" }
                 }
-                for (i, name) in analog_names.iter().enumerate() {
+                for (i, name) in analog_channels.iter().map(|ch| &ch.name).enumerate() {
                     {
                         let is_enabled = analog_enabled.get(i).copied().unwrap_or(true);
                         let mut view = view;
@@ -96,21 +99,21 @@ pub fn SignalList(
                                     // Toggle display visibility.
                                     let mut v = view.write();
                                     if let Some(row) = v.rows.iter_mut()
-                                        .find(|r| matches!(r.kind, RowKind::Analog) && r.channel_index == i)
+                                        .find(|r| matches!(r.kind, crate::waveform_state::RowKind::Analog) && r.channel_index == i)
                                     {
                                         row.visible = !row.visible;
                                     }
                                     // Toggle acquisition config.
                                     let mut s = state.borrow_mut();
-                                    if let Some(acq) = s.acq_for_session_mut(sid) {
-                                        if let Some(en) = acq.config.analog_enabled.get_mut(i) {
+                                    if let Some(session) = s.sessions.get_mut(&sid) {
+                                        if let Some(en) = session.acquisition_config.analog_enabled.get_mut(i) {
                                             *en = !*en;
                                         }
                                     }
                                 },
                                 span {
                                     class: "w-2.5 h-2.5 rounded-full flex-shrink-0",
-                                    style: "background-color: {channel_color(i, true)}"
+                                    style: "background-color: {channel_color(i)}"
                                 }
                                 span { class: "truncate flex-1", "{name}" }
                             }
@@ -127,7 +130,7 @@ pub fn SignalList(
                 div { class: "px-2 pt-1 pb-0.5",
                     span { class: "text-[9px] font-bold text-zinc-500 uppercase tracking-wider", "Digital" }
                 }
-                for (i, name) in digital_names.iter().enumerate() {
+                for (i, name) in digital_channels.iter().map(|ch| &ch.name).enumerate() {
                     {
                         let is_enabled = digital_enabled.get(i).copied().unwrap_or(true);
                         let mut view = view;
@@ -144,17 +147,15 @@ pub fn SignalList(
                                 oncontextmenu: move |evt| {
                                     evt.prevent_default();
                                     evt.stop_propagation();
-                                    // Toggle display visibility.
                                     let mut v = view.write();
                                     if let Some(row) = v.rows.iter_mut()
-                                        .find(|r| matches!(r.kind, RowKind::Digital) && r.channel_index == i)
+                                        .find(|r| matches!(r.kind, crate::waveform_state::RowKind::Digital) && r.channel_index == i)
                                     {
                                         row.visible = !row.visible;
                                     }
-                                    // Toggle acquisition config.
                                     let mut s = state.borrow_mut();
-                                    if let Some(acq) = s.acq_for_session_mut(sid) {
-                                        if let Some(en) = acq.config.digital_enabled.get_mut(i) {
+                                    if let Some(session) = s.sessions.get_mut(&sid) {
+                                        if let Some(en) = session.acquisition_config.digital_enabled.get_mut(i) {
                                             *en = !*en;
                                         }
                                     }
@@ -182,7 +183,7 @@ pub fn SignalList(
     }
 }
 
-fn channel_color(index: usize, _analog: bool) -> &'static str {
+fn channel_color(index: usize) -> &'static str {
     const COLORS: &[&str] = &[
         "#facc15", "#60a5fa", "#f87171", "#34d399",
         "#c084fc", "#fb923c", "#2dd4bf", "#f472b6",
@@ -224,5 +225,5 @@ fn parse_rate(input: &str) -> Option<f64> {
     } else {
         (&s[..], 1.0)
     };
-    num.parse::<f64>().ok().map(|v| v * mul).filter(|&v| v > 0.0)
+    num.parse::<f64>().ok().map(|n| n * mul)
 }

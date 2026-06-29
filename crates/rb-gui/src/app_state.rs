@@ -142,9 +142,15 @@ impl AppState {
     }
 
     /// Assigns a device (by [`DeviceId`]) to a session and updates the tab label.
+    /// Also builds the initial [`AcquisitionConfig`] from the device's capabilities.
     pub fn assign_device_to_session(&mut self, session_id: SessionId, device_id: DeviceId) {
         if let Some(state) = self.sessions.get_mut(&session_id) {
             state.assigned_device_id = Some(device_id.clone());
+            // Build config from device capabilities.
+            if let Some(handle) = self.device_manager.device_handle(&device_id) {
+                state.acquisition_config =
+                    AcquisitionConfig::from_device(handle.device());
+            }
             // Update label from device info.
             if let Some(label) = self.device_manager.device_label(&device_id) {
                 state.label = label.to_string();
@@ -354,30 +360,26 @@ impl AppState {
 
     /// Spawns an acquisition future and returns the [`DeviceAcquisition`] handle.
     /// The device handle is returned to [`DeviceManager`] when the future completes.
+    /// Traces are built from the active session's [`AcquisitionConfig`].
     #[allow(unused_mut)]
     pub fn spawn_acquisition(
         &mut self,
         mut handle: DeviceHandle,
         device_id: DeviceId,
     ) -> DeviceAcquisition {
-        let analog = handle.analog_traces().to_vec();
-        let digital = handle.digital_trace().cloned();
-
-        // Build initial config from device capabilities — all channels enabled.
-        let analog_enabled = vec![true; analog.len()];
-        let digital_enabled = digital
-            .as_ref()
-            .map(|dt| vec![true; dt.channels().len()])
+        // Read config from the session that owns this device.
+        let config = self
+            .sessions
+            .values()
+            .find(|s| s.assigned_device_id.as_ref() == Some(&device_id))
+            .map(|s| s.acquisition_config.clone())
             .unwrap_or_default();
-        let sample_rate_hz = analog
-            .first()
-            .map(|t| t.timebase().sample_rate_hz())
-            .unwrap_or(1.0);
-        let config = AcquisitionConfig {
-            sample_rate_hz,
-            analog_enabled,
-            digital_enabled,
-        };
+
+        // Rebuild handle traces to match config (sample rate, channel layout).
+        config.apply_to_handle(&mut handle);
+
+        // Build traces for the GUI display.
+        let (analog, digital) = config.build_traces();
 
         #[cfg(target_arch = "wasm32")]
         {

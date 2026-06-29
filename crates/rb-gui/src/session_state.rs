@@ -7,7 +7,7 @@
 use rb_core::AcquisitionState;
 use rb_device::DeviceId;
 
-use crate::device_acquisition::DeviceAcquisition;
+use crate::device_acquisition::{AcquisitionConfig, DeviceAcquisition};
 use crate::waveform_state::WaveformView;
 
 // ── Session identifier ────────────────────────────────────────────────────────
@@ -26,6 +26,9 @@ pub struct SessionState {
     /// The [`DeviceId`] of the device assigned to this session.
     /// `None` until the user picks a device from the dropdown.
     pub assigned_device_id: Option<DeviceId>,
+    /// Acquisition configuration built from device capabilities on connect.
+    /// Drives channel selection, sample rate, and trace creation.
+    pub acquisition_config: AcquisitionConfig,
     /// Active acquisition, if running or stopped.
     pub acquisition: Option<DeviceAcquisition>,
     /// Per-session waveform pan/zoom/marker state.
@@ -38,6 +41,7 @@ impl SessionState {
             id,
             label: label.into(),
             assigned_device_id: None,
+            acquisition_config: AcquisitionConfig::default(),
             acquisition: None,
             view: WaveformView::default(),
         }

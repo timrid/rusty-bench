@@ -98,6 +98,12 @@ impl DeviceHandle {
         self.digital = digital;
     }
 
+    /// Replaces the internal traces (for matching an [`AcquisitionConfig`]).
+    pub fn set_traces(&mut self, analog: Vec<AnalogTrace>, digital: Option<DigitalTrace>) {
+        self.analog = analog;
+        self.digital = digital;
+    }
+
     /// This device's stable identifier.
     #[must_use]
     pub fn id(&self) -> &DeviceId {

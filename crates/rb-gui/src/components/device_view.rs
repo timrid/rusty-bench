@@ -14,7 +14,7 @@ use dioxus::prelude::*;
 use super::app::AppStateRef;
 use super::canvas_toolbar::CanvasToolbar;
 use super::decoder_config::DecoderConfig;
-use super::signal_list::SignalList;
+use super::channel_config::ChannelConfig;
 use super::waveform_canvas::WaveformCanvas;
 
 /// The main content view for the active session.
@@ -109,7 +109,7 @@ pub fn DeviceView(data_version: Signal<u64>) -> Element {
 
             // Three-panel area: Signal List | Canvas | Decoder Config
             div { class: "flex-1 flex overflow-hidden",
-                SignalList {
+                ChannelConfig {
                     session_id: active_session,
                     view: view_signal,
                     data_version,
