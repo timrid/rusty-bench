@@ -73,7 +73,7 @@ fn fmt_time_ns(ns: f64) -> String {
 
 #[component]
 pub fn WaveformCanvas(
-    session_id: crate::state::SessionId,
+    session_id: crate::session_state::SessionId,
     data_version: Signal<u64>,
     mut view: Signal<WaveformView>,
     mut cursor_sample_pos: Signal<Option<u64>>,

@@ -13,8 +13,13 @@
 #![forbid(unsafe_code)]
 
 pub mod components;
-pub mod state;
+pub mod device_acquisition;
+pub mod device_manager;
+pub mod session_state;
+pub(crate) mod app_state;
 pub mod waveform_state;
 
-pub use state::AppState;
+pub use app_state::AppState;
+pub use device_acquisition::{AcquisitionConfig, DeviceAcquisition};
+pub use session_state::{SessionId, SessionState};
 pub use waveform_state::WaveformView;

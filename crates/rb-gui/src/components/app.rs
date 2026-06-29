@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use dioxus::prelude::*;
 
-use crate::state::AppState;
+use crate::app_state::AppState;
 
 use super::device_view::DeviceView;
 use super::top_bar::TopBar;

@@ -25,10 +25,8 @@ pub fn DeviceView(data_version: Signal<u64>) -> Element {
 
     let s = state.borrow();
     let active_session = s.active_session;
-    let device_id = s
-        .active_session_state()
-        .and_then(|ss| ss.connected_device_id());
-    let connect_error = s.connect_error.clone();
+    let device_id = s.device_id_for_session(active_session);
+    let connect_error = s.device_manager.connect_error.clone();
     drop(s);
 
     // No device connected — show placeholder.

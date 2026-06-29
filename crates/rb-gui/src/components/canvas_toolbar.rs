@@ -10,7 +10,7 @@ use super::app::AppStateRef;
 /// Toolbar above the canvas with acquisition controls and marker buttons.
 #[component]
 pub fn CanvasToolbar(
-    session_id: crate::state::SessionId,
+    session_id: crate::session_state::SessionId,
     view: Signal<WaveformView>,
     cursor_sample_pos: Signal<Option<u64>>,
     data_version: Signal<u64>,

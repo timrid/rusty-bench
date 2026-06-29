@@ -9,7 +9,7 @@ use super::app::AppStateRef;
 /// Left panel showing channel labels and sample rate configuration.
 #[component]
 pub fn SignalList(
-    session_id: crate::state::SessionId,
+    session_id: crate::session_state::SessionId,
     mut view: Signal<WaveformView>,
     data_version: Signal<u64>,
 ) -> Element {
