@@ -4,6 +4,8 @@
 //! and encapsulate all Logic-Analyzer-specific acquisition lifecycle:
 //! start, stop, drain, spawn, and query.
 
+use std::cell::RefCell;
+
 use futures::channel::mpsc;
 use rb_core::{
     run_acquisition, AcquisitionCommand, AcquisitionState, DeviceHandle,
@@ -14,9 +16,20 @@ use crate::app_state::AppState;
 use crate::tab_state::TabId;
 
 #[cfg(not(any(feature = "native", target_arch = "wasm32")))]
-use futures::task::LocalSpawnExt;
+use {futures::executor::LocalPool, futures::task::LocalSpawnExt};
 
 use super::acquisition::{AcquisitionConfig, DeviceAcquisition};
+
+// ── Test executor ────────────────────────────────────────────────────────────
+
+#[cfg(not(any(feature = "native", target_arch = "wasm32")))]
+thread_local! {
+    static TEST_POOL: RefCell<(LocalPool, futures::executor::LocalSpawner)> = RefCell::new({
+        let pool = LocalPool::new();
+        let spawner = pool.spawner();
+        (pool, spawner)
+    });
+}
 
 // ── Acquisition control ──────────────────────────────────────────────────────
 
@@ -207,19 +220,19 @@ pub fn spawn(
         let fut = run_acquisition(handle, cmd_rx, Some(data_tx));
         #[cfg(feature = "native")]
         {
-            app.local_set.spawn_local(async move {
+            tokio::spawn(async move {
                 let handle = fut.await;
                 let _ = return_tx.send((device_id, handle));
             });
         }
         #[cfg(not(feature = "native"))]
         {
-            app.spawner
-                .spawn_local(async move {
+            TEST_POOL.with(|pool| {
+                pool.borrow().1.spawn_local(async move {
                     let handle = fut.await;
                     let _ = return_tx.send((device_id, handle));
-                })
-                .expect("spawn");
+                }).expect("spawn");
+            });
         }
 
         let _ = cmd_tx.unbounded_send(AcquisitionCommand::SetSampleRate(config.sample_rate_hz));
@@ -284,4 +297,10 @@ pub fn drain_all(app: &mut AppState) -> bool {
     let before = acq.sample_count();
     acq.drain();
     acq.sample_count() > before
+}
+
+/// Drives the test executor (no-op on desktop and WASM).
+pub fn pump_executor() {
+    #[cfg(not(any(feature = "native", target_arch = "wasm32")))]
+    TEST_POOL.with(|pool| pool.borrow_mut().0.run_until_stalled());
 }

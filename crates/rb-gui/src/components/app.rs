@@ -31,7 +31,7 @@ pub fn App() -> Element {
             loop {
                 futures_timer::Delay::new(Duration::from_millis(16)).await;
                 let had_data = control::drain_all(&mut *state.borrow_mut());
-                state.borrow_mut().pump_once();
+                control::pump_executor();
                 let was_pending = state.borrow().wasm_pending();
                 state.borrow_mut().apply_pending_actions();
                 if had_data || state.borrow().any_running() || was_pending {

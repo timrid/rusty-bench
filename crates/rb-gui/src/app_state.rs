@@ -13,13 +13,6 @@ use crate::logic_analyzer::control;
 use crate::device_manager::DeviceManager;
 use crate::tab_state::{TabId, TabSource, TabState};
 
-// Executors: tokio LocalSet when native feature is enabled (non-wasm),
-// LocalPool otherwise (non-wasm tests only; WASM uses wasm-bindgen-futures).
-#[cfg(not(any(feature = "native", target_arch = "wasm32")))]
-use {futures::executor::LocalPool, futures::executor::LocalSpawner};
-#[cfg(feature = "native")]
-use tokio::task::LocalSet;
-
 // ── App state ─────────────────────────────────────────────────────────────────
 
 pub struct AppState {
@@ -32,17 +25,6 @@ pub struct AppState {
     pub active_tab: TabId,
     next_tab_id: u64,
 
-    /// Executor for background acquisition futures (non-WASM, non-native tests).
-    #[cfg(not(any(feature = "native", target_arch = "wasm32")))]
-    #[allow(dead_code)]
-    pub pool: LocalPool,
-    #[cfg(not(any(feature = "native", target_arch = "wasm32")))]
-    #[allow(dead_code)]
-    pub spawner: LocalSpawner,
-    /// Tokio LocalSet for native builds (proper I/O integration).
-    #[cfg(feature = "native")]
-    pub local_set: LocalSet,
-
     // Deferred actions.
     pub pending_disconnect: Option<TabId>,
     pub pending_start: Option<TabId>,
@@ -54,15 +36,6 @@ impl AppState {
     /// device (for integration tests that inject a mock device).
     #[must_use]
     pub fn from_device_manager(device_manager: DeviceManager) -> Self {
-        #[cfg(not(any(feature = "native", target_arch = "wasm32")))]
-        let (pool, spawner) = {
-            let p = LocalPool::new();
-            let s = p.spawner();
-            (p, s)
-        };
-        #[cfg(feature = "native")]
-        let local_set = LocalSet::new();
-
         let first_id = TabId(1);
         let mut tab = TabState::new(first_id, "Session 1");
 
@@ -84,12 +57,6 @@ impl AppState {
             tabs,
             active_tab: first_id,
             next_tab_id: 2,
-            #[cfg(not(any(feature = "native", target_arch = "wasm32")))]
-            pool,
-            #[cfg(not(any(feature = "native", target_arch = "wasm32")))]
-            spawner,
-            #[cfg(feature = "native")]
-            local_set,
             pending_disconnect: None,
             pending_start: None,
             pending_stop: None,
@@ -220,30 +187,6 @@ impl AppState {
 
     pub fn tab_count(&self) -> usize {
         self.tabs.len()
-    }
-
-    // ── Executor ──────────────────────────────────────────────────────────────
-
-    pub fn pump_once(&mut self) {
-        #[cfg(target_arch = "wasm32")]
-        return;
-
-        #[cfg(feature = "native")]
-        {
-            let handle = tokio::runtime::Handle::current();
-            tokio::task::block_in_place(|| {
-                handle.block_on(async {
-                    let _ = tokio::time::timeout(
-                        std::time::Duration::from_micros(500),
-                        self.local_set
-                            .run_until(futures::future::pending::<()>()),
-                    )
-                    .await;
-                });
-            });
-        }
-        #[cfg(not(any(feature = "native", target_arch = "wasm32")))]
-        self.pool.run_until_stalled();
     }
 
     pub fn any_running(&self) -> bool {
@@ -383,7 +326,7 @@ mod tests {
 
         // Drive the pool repeatedly.
         for _ in 0..10 {
-            app.pump_once();
+            control::pump_executor();
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
 
