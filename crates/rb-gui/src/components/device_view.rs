@@ -58,41 +58,64 @@ pub fn DeviceView(data_version: Signal<u64>) -> Element {
 
     // Device connected — show full view.
     // Per-tab view state from the active tab.
-    let view = {
+    let (view, config) = {
         let s = state.borrow();
-        s.active_tab_state()
-            .map(|t| t.view().clone())
-            .unwrap_or_default()
+        let tab = s.active_tab_state();
+        let view = tab
+            .map(|t| t.logic_analyzer().view.clone())
+            .unwrap_or_default();
+        let config = tab
+            .map(|t| t.logic_analyzer().acquisition_config.clone())
+            .unwrap_or_default();
+        (view, config)
     };
     let mut view_signal = use_signal(move || view);
+    let mut config_signal = use_signal(move || config);
+    let mut sample_count_signal = use_signal(|| 0u64);
     let cursor_sample_pos = use_signal(|| None::<u64>);
 
-    // Persist view state across tab switches.
-    // When the active tab changes: save the current view to the
-    // previous tab and load the new tab's saved view.
+    // Persist view and config state across tab switches.
     let mut prev_tab = use_signal(|| active_tab);
     if prev_tab() != active_tab {
-        // Save current view to the old tab.
+        // Save current view and config to the old tab.
         {
             let mut s = state.borrow_mut();
             if let Some(old) = s.tabs.get_mut(&prev_tab()) {
-                *old.view_mut() = view_signal.read().clone();
+                old.logic_analyzer_mut().view = view_signal.read().clone();
+                old.logic_analyzer_mut().acquisition_config = config_signal.read().clone();
             }
         }
-        // Load the new tab's saved view.
-        let new_view = {
+        // Load the new tab's saved view and config.
+        let (new_view, new_config) = {
             let s = state.borrow();
-            s.tabs.get(&active_tab)
-                .map(|t| t.view().clone())
-                .unwrap_or_default()
+            let v = s.tabs.get(&active_tab)
+                .map(|t| t.logic_analyzer().view.clone())
+                .unwrap_or_default();
+            let c = s.tabs.get(&active_tab)
+                .map(|t| t.logic_analyzer().acquisition_config.clone())
+                .unwrap_or_default();
+            (v, c)
         };
         view_signal.set(new_view);
+        config_signal.set(new_config);
         prev_tab.set(active_tab);
     } else {
-        // Same tab — sync view state back on each render.
+        // Same tab — sync view and config state back on each render.
         let mut s = state.borrow_mut();
         if let Some(active) = s.tabs.get_mut(&active_tab) {
-            *active.view_mut() = view_signal.read().clone();
+            active.logic_analyzer_mut().view = view_signal.read().clone();
+            active.logic_analyzer_mut().acquisition_config = config_signal.read().clone();
+        }
+    }
+
+    // Update sample_count from the active tab's acquisition.
+    {
+        let s = state.borrow();
+        if let Some(tab) = s.active_tab_state() {
+            let sc = tab.logic_analyzer().acquisition.as_ref()
+                .map(|a| a.sample_count() as u64)
+                .unwrap_or(0);
+            sample_count_signal.set(sc);
         }
     }
 
@@ -109,9 +132,17 @@ pub fn DeviceView(data_version: Signal<u64>) -> Element {
             // Three-panel area: Signal List | Canvas | Decoder Config
             div { class: "flex-1 flex overflow-hidden",
                 ChannelConfig {
-                    tab_id: active_tab,
+                    config: config_signal,
                     view: view_signal,
-                    data_version,
+                    sample_count: sample_count_signal,
+                    on_sample_rate_change: Callback::new(move |hz| {
+                        let mut s = state.borrow_mut();
+                        if let Some(tab) = s.tabs.get_mut(&active_tab) {
+                            if let Some(acq) = tab.logic_analyzer_mut().acquisition.as_mut() {
+                                acq.send_command(rb_core::AcquisitionCommand::SetSampleRate(hz));
+                            }
+                        }
+                    }),
                 }
                 div { class: "flex-1 overflow-hidden",
                     WaveformCanvas {

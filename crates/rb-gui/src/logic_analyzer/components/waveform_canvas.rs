@@ -112,7 +112,7 @@ pub fn WaveformCanvas(
         v.rebuild_rows(analog.len(), dcc);
         if let Some(ref dt) = digital { v.feed_decoder(dt); }
     }
-    { let mut s = state.borrow_mut(); if let Some(tab) = s.tabs.get_mut(&tab_id) { *tab.view_mut() = view.read().clone(); } }
+    { let mut s = state.borrow_mut(); if let Some(tab) = s.tabs.get_mut(&tab_id) { tab.logic_analyzer_mut().view = view.read().clone(); } }
 
     // ── Derived ───────────────────────────────────────────────────────────
     let rows = view.read().rows.clone();

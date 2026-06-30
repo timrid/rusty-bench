@@ -1,42 +1,29 @@
 //! Channel-config panel: shows device channels with enable toggles and
 //! sample-rate input. Lives left of the waveform canvas.
 //!
-//! Reads from [`TabState::acquisition_config`], which is built from
-//! device capabilities on connect.  User edits (toggle, rate) modify the
-//! config in place; traces are rebuilt from the config on acquisition start.
+//! Receives its data as props (Signals) — no global state lookup.
 
 use dioxus::prelude::*;
 
-use crate::components::app::AppStateRef;
+use crate::logic_analyzer::acquisition::AcquisitionConfig;
+use crate::logic_analyzer::view::{RowKind, WaveformView};
 
 /// Left panel showing channel labels, enable toggles, and sample rate.
 #[component]
 pub fn ChannelConfig(
-    tab_id: crate::tab_state::TabId,
-    mut view: Signal<crate::logic_analyzer::view::WaveformView>,
-    data_version: Signal<u64>,
+    mut config: Signal<AcquisitionConfig>,
+    mut view: Signal<WaveformView>,
+    sample_count: Signal<u64>,
+    on_sample_rate_change: Callback<f64>,
 ) -> Element {
-    let state: AppStateRef = use_context();
-    let _version = data_version();
-
-    // Read config and sample count from the tab.
-    let (analog_channels, digital_channels, analog_enabled, digital_enabled, sample_rate_hz, sample_count) = {
-        let s = state.borrow();
-        if let Some(tab) = s.tabs.get(&tab_id) {
-            let cfg = tab.acquisition_config();
-            let sc = tab.acquisition().map(|a| a.sample_count()).unwrap_or(0);
-            (
-                cfg.analog_channels.clone(),
-                cfg.digital_channels.clone(),
-                cfg.analog_enabled.clone(),
-                cfg.digital_enabled.clone(),
-                cfg.sample_rate_hz,
-                sc,
-            )
-        } else {
-            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), crate::logic_analyzer::acquisition::DEFAULT_SAMPLE_RATE_HZ, 0)
-        }
-    };
+    let cfg = config.read();
+    let analog_channels = cfg.analog_channels.clone();
+    let digital_channels = cfg.digital_channels.clone();
+    let analog_enabled = cfg.analog_enabled.clone();
+    let digital_enabled = cfg.digital_enabled.clone();
+    let sample_rate_hz = cfg.sample_rate_hz;
+    let sc = sample_count();
+    drop(cfg);
 
     let has_analog = !analog_channels.is_empty();
     let has_digital = !digital_channels.is_empty();
@@ -54,18 +41,12 @@ pub fn ChannelConfig(
                     class: "w-full px-1.5 py-0.5 bg-zinc-800 border border-zinc-700 rounded text-xs text-zinc-300 font-mono",
                     value: "{fmt_rate(sample_rate_hz)}",
                     oninput: {
-                        let state = state.clone();
-                        let tid = tab_id;
+                        let mut config = config;
+                        let on_sample_rate_change = on_sample_rate_change;
                         move |evt| {
                             if let Some(hz) = parse_rate(&evt.value()) {
-                                let mut s = state.borrow_mut();
-                                if let Some(tab) = s.tabs.get_mut(&tid) {
-                                    tab.acquisition_config_mut().sample_rate_hz = hz;
-                                    // Also update running acquisition config.
-                                    if let Some(acq) = tab.acquisition_mut() {
-                                        acq.send_command(rb_core::AcquisitionCommand::SetSampleRate(hz));
-                                    }
-                                }
+                                config.write().sample_rate_hz = hz;
+                                on_sample_rate_change.call(hz);
                             }
                         }
                     },
@@ -83,8 +64,7 @@ pub fn ChannelConfig(
                     {
                         let is_enabled = analog_enabled.get(i).copied().unwrap_or(true);
                         let mut view = view;
-                        let state = state.clone();
-                        let tid = tab_id;
+                        let mut config = config;
                         let i = i;
                         rsx! {
                             div {
@@ -99,16 +79,13 @@ pub fn ChannelConfig(
                                     // Toggle display visibility.
                                     let mut v = view.write();
                                     if let Some(row) = v.rows.iter_mut()
-                                        .find(|r| matches!(r.kind, crate::logic_analyzer::view::RowKind::Analog) && r.channel_index == i)
+                                        .find(|r| matches!(r.kind, RowKind::Analog) && r.channel_index == i)
                                     {
                                         row.visible = !row.visible;
                                     }
                                     // Toggle acquisition config.
-                                    let mut s = state.borrow_mut();
-                                    if let Some(tab) = s.tabs.get_mut(&tid) {
-                                        if let Some(en) = tab.acquisition_config_mut().analog_enabled.get_mut(i) {
-                                            *en = !*en;
-                                        }
+                                    if let Some(en) = config.write().analog_enabled.get_mut(i) {
+                                        *en = !*en;
                                     }
                                 },
                                 span {
@@ -134,8 +111,7 @@ pub fn ChannelConfig(
                     {
                         let is_enabled = digital_enabled.get(i).copied().unwrap_or(true);
                         let mut view = view;
-                        let state = state.clone();
-                        let tid = tab_id;
+                        let mut config = config;
                         let i = i;
                         rsx! {
                             div {
@@ -149,15 +125,12 @@ pub fn ChannelConfig(
                                     evt.stop_propagation();
                                     let mut v = view.write();
                                     if let Some(row) = v.rows.iter_mut()
-                                        .find(|r| matches!(r.kind, crate::logic_analyzer::view::RowKind::Digital) && r.channel_index == i)
+                                        .find(|r| matches!(r.kind, RowKind::Digital) && r.channel_index == i)
                                     {
                                         row.visible = !row.visible;
                                     }
-                                    let mut s = state.borrow_mut();
-                                    if let Some(tab) = s.tabs.get_mut(&tid) {
-                                        if let Some(en) = tab.acquisition_config_mut().digital_enabled.get_mut(i) {
-                                            *en = !*en;
-                                        }
+                                    if let Some(en) = config.write().digital_enabled.get_mut(i) {
+                                        *en = !*en;
                                     }
                                 },
                                 span {
@@ -174,9 +147,9 @@ pub fn ChannelConfig(
             // Bottom spacer
             div { class: "flex-1" }
 
-            if sample_count > 0 {
+            if sc > 0 {
                 div { class: "border-t border-zinc-800 px-2 py-1.5",
-                    p { class: "text-[10px] text-zinc-600", "{sample_count} samples" }
+                    p { class: "text-[10px] text-zinc-600", "{sc} samples" }
                 }
             }
         }

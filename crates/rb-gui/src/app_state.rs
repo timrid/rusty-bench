@@ -123,11 +123,11 @@ impl AppState {
     pub fn close_tab(&mut self, id: TabId) {
         // Stop acquisition if running.
         if let Some(tab) = self.tabs.get_mut(&id) {
-            if let Some(acq) = tab.acquisition_mut() {
+            if let Some(acq) = tab.logic_analyzer_mut().acquisition.as_mut() {
                 acq.send_command(AcquisitionCommand::Stop);
                 acq.state = AcquisitionState::Stopped;
             }
-            tab.set_acquisition(None);
+            tab.logic_analyzer_mut().acquisition = None;
             tab.set_assigned_device_id(None);
         }
 
@@ -198,7 +198,7 @@ impl AppState {
     /// Disconnect the device from the given tab and the program.
     pub fn disconnect_blocking(&mut self, tab_id: TabId) {
         if let Some(tab) = self.tabs.get_mut(&tab_id) {
-            tab.set_acquisition(None);
+            tab.logic_analyzer_mut().acquisition = None;
             if let Some(did) = tab.assigned_device_id().cloned() {
                 self.device_manager.disconnect(&did);
             }
@@ -231,11 +231,11 @@ impl AppState {
         let already_acquiring = self
             .tabs
             .get(&tab_id)
-            .is_some_and(|t| t.acquisition().is_some());
+            .is_some_and(|t| t.logic_analyzer().acquisition.as_ref().is_some());
 
         if already_acquiring {
             if let Some(tab) = self.tabs.get_mut(&tab_id) {
-                if let Some(acq) = tab.acquisition_mut() {
+                if let Some(acq) = tab.logic_analyzer_mut().acquisition.as_mut() {
                     let rate = acq.config.sample_rate_hz;
                     acq.send_command(AcquisitionCommand::SetSampleRate(rate));
                     acq.reset_traces();
@@ -260,7 +260,7 @@ impl AppState {
             let device_id = device_id.unwrap();
             let acq = self.spawn_acquisition(handle, device_id);
             if let Some(tab) = self.tabs.get_mut(&tab_id) {
-                tab.set_acquisition(Some(acq));
+                tab.logic_analyzer_mut().acquisition = Some(acq);
             }
         }
     }
@@ -271,7 +271,7 @@ impl AppState {
             Some(t) => t,
             None => return,
         };
-        if let Some(acq) = tab.acquisition_mut() {
+        if let Some(acq) = tab.logic_analyzer_mut().acquisition.as_mut() {
             acq.send_command(AcquisitionCommand::Stop);
             acq.state = AcquisitionState::Stopped;
         }
@@ -320,11 +320,11 @@ impl AppState {
         let already_acquiring = self
             .tabs
             .get(&tab_id)
-            .is_some_and(|t| t.acquisition().is_some());
+            .is_some_and(|t| t.logic_analyzer().acquisition.as_ref().is_some());
 
         if already_acquiring {
             if let Some(tab) = self.tabs.get_mut(&tab_id) {
-                if let Some(acq) = tab.acquisition_mut() {
+                if let Some(acq) = tab.logic_analyzer_mut().acquisition.as_mut() {
                     let rate = acq.config.sample_rate_hz;
                     acq.send_command(AcquisitionCommand::SetSampleRate(rate));
                     acq.reset_traces();
@@ -348,7 +348,7 @@ impl AppState {
             let device_id = device_id.unwrap();
             let acq = self.spawn_acquisition(handle, device_id);
             if let Some(tab) = self.tabs.get_mut(&tab_id) {
-                tab.set_acquisition(Some(acq));
+                tab.logic_analyzer_mut().acquisition = Some(acq);
             }
         }
     }
@@ -358,7 +358,7 @@ impl AppState {
             Some(t) => t,
             None => return,
         };
-        if let Some(acq) = tab.acquisition_mut() {
+        if let Some(acq) = tab.logic_analyzer_mut().acquisition.as_mut() {
             acq.send_command(AcquisitionCommand::Stop);
             acq.state = AcquisitionState::Stopped;
         }
@@ -378,7 +378,7 @@ impl AppState {
             .tabs
             .values()
             .find(|t| t.assigned_device_id() == Some(&device_id))
-            .map(|t| t.acquisition_config().clone())
+            .map(|t| t.logic_analyzer().acquisition_config.clone())
             .unwrap_or_default();
 
         // Rebuild handle traces to match config (sample rate, channel layout).
@@ -461,7 +461,7 @@ impl AppState {
     pub fn device_state(&self, id: &DeviceId) -> Option<AcquisitionState> {
         for tab in self.tabs.values() {
             if tab.assigned_device_id() == Some(id) {
-                if let Some(acq) = tab.acquisition() {
+                if let Some(acq) = tab.logic_analyzer().acquisition.as_ref() {
                     return Some(acq.state().clone());
                 }
             }
@@ -479,12 +479,12 @@ impl AppState {
 
     /// Returns a reference to the acquisition for a tab.
     pub fn acq_for_tab(&self, tab_id: TabId) -> Option<&DeviceAcquisition> {
-        self.tabs.get(&tab_id).and_then(|t| t.acquisition())
+        self.tabs.get(&tab_id).and_then(|t| t.logic_analyzer().acquisition.as_ref())
     }
 
     /// Returns a mutable reference to the acquisition for a tab.
     pub fn acq_for_tab_mut(&mut self, tab_id: TabId) -> Option<&mut DeviceAcquisition> {
-        self.tabs.get_mut(&tab_id).and_then(|t| t.acquisition_mut())
+        self.tabs.get_mut(&tab_id).and_then(|t| t.logic_analyzer_mut().acquisition.as_mut())
     }
 
     /// Returns a reference to the device handle for a tab.
@@ -508,7 +508,7 @@ impl AppState {
             Some(t) => t,
             None => return AcquisitionState::Idle,
         };
-        if let Some(acq) = tab.acquisition() {
+        if let Some(acq) = tab.logic_analyzer().acquisition.as_ref() {
             acq.state().clone()
         } else {
             tab.assigned_device_id()
@@ -559,7 +559,7 @@ impl AppState {
         let Some(tab) = self.tabs.get_mut(&self.active_tab) else {
             return false;
         };
-        let Some(acq) = tab.acquisition_mut() else {
+        let Some(acq) = tab.logic_analyzer_mut().acquisition.as_mut() else {
             return false;
         };
         let before = acq.sample_count();
@@ -651,7 +651,7 @@ mod tests {
         assert_eq!(app.tabs.len(), 1);
         let active = app.active_tab_state().unwrap();
         assert!(active.assigned_device_id().is_none());
-        assert!(active.acquisition().is_none());
+        assert!(active.logic_analyzer().acquisition.as_ref().is_none());
         assert!(app.device_manager.scan_results.is_empty());
     }
 
@@ -685,7 +685,7 @@ mod tests {
         app.disconnect_blocking(tab_id);
         let active = app.active_tab_state().unwrap();
         assert!(active.assigned_device_id().is_none());
-        assert!(active.acquisition().is_none());
+        assert!(active.logic_analyzer().acquisition.as_ref().is_none());
         assert!(!app.device_manager.is_connected(&did));
     }
 
@@ -702,7 +702,7 @@ mod tests {
         app.start_blocking(tab_id);
 
         let active = app.active_tab_state().unwrap();
-        assert!(active.acquisition().is_some());
+        assert!(active.logic_analyzer().acquisition.as_ref().is_some());
 
         // Drive the pool repeatedly.
         for _ in 0..10 {
@@ -712,13 +712,13 @@ mod tests {
 
         // Drain data.
         if let Some(active) = app.tabs.get_mut(&tab_id) {
-            if let Some(acq) = active.acquisition_mut() {
+            if let Some(acq) = active.logic_analyzer_mut().acquisition.as_mut() {
                 acq.drain();
             }
         }
 
         let active = app.active_tab_state().unwrap();
-        if let Some(acq) = active.acquisition() {
+        if let Some(acq) = active.logic_analyzer().acquisition.as_ref() {
             assert!(acq.sample_count() > 0, "expected samples after pump, got {}", acq.sample_count());
         }
     }

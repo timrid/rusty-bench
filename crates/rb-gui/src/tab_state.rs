@@ -9,8 +9,6 @@ use std::path::PathBuf;
 
 use rb_device::DeviceId;
 
-use crate::logic_analyzer::acquisition::{AcquisitionConfig, DeviceAcquisition};
-use crate::logic_analyzer::view::WaveformView;
 use crate::tab_content::{LogicAnalyzerContent, TabContent};
 
 // ── Tab identifier ────────────────────────────────────────────────────────────
@@ -78,14 +76,14 @@ impl TabState {
         self.content.as_ref().is_some_and(|c| c.is_running())
     }
 
-    // ── Logic Analyzer convenience accessors ──────────────────────────────
-    //
-    // These expect the tab content to be `LogicAnalyzer` (the default).
-    // They exist to minimise churn while only one content variant exists.
-    // Once more variants are added, callers should match on `self.content`.
+    // ── Content access ───────────────────────────────────────────────────
 
     /// Borrows the [`LogicAnalyzerContent`] immutably.
-    fn logic_analyzer(&self) -> &LogicAnalyzerContent {
+    ///
+    /// # Panics
+    /// Panics if this tab's content is not [`TabContent::LogicAnalyzer`].
+    /// Only call when the tab is known to be a Logic Analyzer tab.
+    pub fn logic_analyzer(&self) -> &LogicAnalyzerContent {
         match &self.content {
             Some(TabContent::LogicAnalyzer(la)) => la,
             _ => panic!("expected LogicAnalyzer content in tab {}", self.id.0),
@@ -93,40 +91,14 @@ impl TabState {
     }
 
     /// Borrows the [`LogicAnalyzerContent`] mutably.
-    fn logic_analyzer_mut(&mut self) -> &mut LogicAnalyzerContent {
+    ///
+    /// # Panics
+    /// Panics if this tab's content is not [`TabContent::LogicAnalyzer`].
+    /// Only call when the tab is known to be a Logic Analyzer tab.
+    pub fn logic_analyzer_mut(&mut self) -> &mut LogicAnalyzerContent {
         match &mut self.content {
             Some(TabContent::LogicAnalyzer(la)) => la,
             _ => panic!("expected LogicAnalyzer content in tab {}", self.id.0),
         }
-    }
-
-    // Convenience delegates — these avoid `.logic_analyzer().field` noise.
-
-    pub fn acquisition_config(&self) -> &AcquisitionConfig {
-        &self.logic_analyzer().acquisition_config
-    }
-
-    pub fn acquisition_config_mut(&mut self) -> &mut AcquisitionConfig {
-        &mut self.logic_analyzer_mut().acquisition_config
-    }
-
-    pub fn acquisition(&self) -> Option<&DeviceAcquisition> {
-        self.logic_analyzer().acquisition.as_ref()
-    }
-
-    pub fn acquisition_mut(&mut self) -> Option<&mut DeviceAcquisition> {
-        self.logic_analyzer_mut().acquisition.as_mut()
-    }
-
-    pub fn set_acquisition(&mut self, acq: Option<DeviceAcquisition>) {
-        self.logic_analyzer_mut().acquisition = acq;
-    }
-
-    pub fn view(&self) -> &WaveformView {
-        &self.logic_analyzer().view
-    }
-
-    pub fn view_mut(&mut self) -> &mut WaveformView {
-        &mut self.logic_analyzer_mut().view
     }
 }
