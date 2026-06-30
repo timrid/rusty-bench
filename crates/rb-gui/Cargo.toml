@@ -63,6 +63,7 @@ desktop = [
     "dep:dioxus-desktop",
     "dioxus/desktop",
 ]
+native = []
 web = [
     "rb-core/web",
     "dep:wasm-bindgen-futures",

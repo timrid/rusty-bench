@@ -9,6 +9,7 @@ use std::time::Duration;
 use dioxus::prelude::*;
 
 use crate::app_state::AppState;
+use crate::logic_analyzer::control;
 
 use super::device_view::DeviceView;
 use super::top_bar::TopBar;
@@ -29,7 +30,7 @@ pub fn App() -> Element {
         async move {
             loop {
                 futures_timer::Delay::new(Duration::from_millis(16)).await;
-                let had_data = state.borrow_mut().drain_all();
+                let had_data = control::drain_all(&mut *state.borrow_mut());
                 state.borrow_mut().pump_once();
                 let was_pending = state.borrow().wasm_pending();
                 state.borrow_mut().apply_pending_actions();

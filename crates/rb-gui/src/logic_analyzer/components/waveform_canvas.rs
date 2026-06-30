@@ -10,6 +10,7 @@ use rb_core::AcquisitionState;
 use rb_decode::AnnotationKind;
 use rb_model::AnalogTrace;
 
+use crate::logic_analyzer::control;
 use crate::logic_analyzer::view::{
     RowKind, TimeMarker, WaveformView, DIVIDER_H, LABEL_W,
     MARKER_BAR_H, MEASUREMENT_ZONE_H, TIME_RULER_H,
@@ -84,7 +85,7 @@ pub fn WaveformCanvas(
     // ── Gather data ───────────────────────────────────────────────────────
     let (acq_state, analog, digital, sample_count) = {
         let s = state.borrow();
-        if let Some(acq) = s.acq_for_tab(tab_id) {
+        if let Some(acq) = control::acq_for_tab(&s, tab_id) {
             (acq.state().clone(), acq.analog_traces().to_vec(),
              acq.digital_trace().cloned(), acq.sample_count())
         } else if let Some(h) = s.handle_for_tab(tab_id) {
@@ -138,7 +139,7 @@ pub fn WaveformCanvas(
             let sc = sample_count_sig();
             let (analog, digital) = {
                 let s = state.borrow();
-                if let Some(acq) = s.acq_for_tab(tid) {
+                if let Some(acq) = control::acq_for_tab(&s, tid) {
                     (acq.analog_traces().to_vec(), acq.digital_trace().cloned())
                 } else if let Some(h) = s.handle_for_tab(tid) {
                     (h.analog_traces().to_vec(), h.digital_trace().cloned())

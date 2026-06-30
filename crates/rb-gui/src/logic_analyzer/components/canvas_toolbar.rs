@@ -3,6 +3,7 @@
 
 use dioxus::prelude::*;
 use rb_core::AcquisitionState;
+use crate::logic_analyzer::control;
 use crate::logic_analyzer::view::WaveformView;
 
 use crate::components::app::AppStateRef;
@@ -20,7 +21,7 @@ pub fn CanvasToolbar(
 
     let (acq_state, sample_count) = {
         let s = state.borrow();
-        if let Some(acq) = s.acq_for_tab(tab_id) {
+        if let Some(acq) = control::acq_for_tab(&s, tab_id) {
             (acq.state().clone(), acq.sample_count())
         } else if let Some(handle) = s.handle_for_tab(tab_id) {
             (handle.state().clone(), handle.sample_count())
@@ -42,7 +43,7 @@ pub fn CanvasToolbar(
                         let state = state.clone();
                         let tid = tab_id;
                         move |_| {
-                            state.borrow_mut().stop_blocking(tid);
+                            control::stop(&mut *state.borrow_mut(), tid);
                             data_version += 1;
                         }
                     },
@@ -57,7 +58,7 @@ pub fn CanvasToolbar(
                         let state = state.clone();
                         let tid = tab_id;
                         move |_| {
-                            state.borrow_mut().start_blocking(tid);
+                            control::start(&mut *state.borrow_mut(), tid);
                             data_version.set(data_version() + 1);
                         }
                     },

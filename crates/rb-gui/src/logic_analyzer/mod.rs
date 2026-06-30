@@ -1,8 +1,9 @@
 //! Logic Analyzer tab content: data types, acquisition, waveform view,
-//! and UI components.
+//! UI components, and acquisition orchestration.
 
 pub mod acquisition;
 pub mod components;
+pub mod control;
 pub mod view;
 
 use rb_core::AcquisitionState;

@@ -6,13 +6,13 @@
 
 use std::collections::HashMap;
 
-use futures::channel::mpsc;
 use rb_core::{
-    run_acquisition, AcquisitionCommand, AcquisitionState, DeviceHandle,
+    AcquisitionCommand, AcquisitionState, DeviceHandle,
 };
 use rb_device::DeviceId;
 
 use crate::logic_analyzer::acquisition::{AcquisitionConfig, DeviceAcquisition};
+use crate::logic_analyzer::control;
 use crate::tab_content::{LogicAnalyzerContent, TabContent};
 use crate::device_manager::DeviceManager;
 use crate::tab_state::{TabId, TabSource, TabState};
@@ -51,6 +51,9 @@ pub struct AppState {
     pub pending_disconnect: Option<TabId>,
     pub pending_start: Option<TabId>,
     pub pending_stop: Option<TabId>,
+    /// Tab that initiated a WASM async connect (assign device on completion).
+    #[cfg(target_arch = "wasm32")]
+    pub pending_wasm_assign: Option<TabId>,
 }
 
 impl AppState {
@@ -97,6 +100,8 @@ impl AppState {
             pending_disconnect: None,
             pending_start: None,
             pending_stop: None,
+            #[cfg(target_arch = "wasm32")]
+            pending_wasm_assign: None,
         }
     }
 
@@ -121,19 +126,12 @@ impl AppState {
     /// or creates a fresh one. Does NOT disconnect the device — the device
     /// connection is program-level and may be used by other tabs.
     pub fn close_tab(&mut self, id: TabId) {
-        // Stop acquisition if running.
+        // Stop acquisition if running (delegates to LA control).
+        control::clear_acquisition(self, id);
         if let Some(tab) = self.tabs.get_mut(&id) {
-            if let Some(acq) = tab.logic_analyzer_mut().acquisition.as_mut() {
-                acq.send_command(AcquisitionCommand::Stop);
-                acq.state = AcquisitionState::Stopped;
-            }
-            tab.logic_analyzer_mut().acquisition = None;
             tab.set_assigned_device_id(None);
         }
-
         self.tabs.remove(&id);
-
-        // If we closed the active tab, pick a new one or create a fresh tab.
         if self.active_tab == id {
             if let Some(&next_id) = self.tabs.keys().next() {
                 self.active_tab = next_id;
@@ -173,9 +171,20 @@ impl AppState {
         tab_id: TabId,
         scan_result: &rb_core::ScanResult,
     ) -> Result<DeviceId, rb_core::SessionError> {
-        let device_id = self.device_manager.connect_blocking(scan_result)?;
-        self.assign_device_to_tab(tab_id, device_id.clone());
-        Ok(device_id)
+        match self.device_manager.connect_blocking(scan_result) {
+            Ok(device_id) => {
+                self.assign_device_to_tab(tab_id, device_id.clone());
+                Ok(device_id)
+            }
+            Err(e) => {
+                // On WASM, connect is async — remember the tab for later assignment.
+                #[cfg(target_arch = "wasm32")]
+                {
+                    self.pending_wasm_assign = Some(tab_id);
+                }
+                Err(e)
+            }
+        }
     }
 
     /// Returns a reference to the active tab.
@@ -197,8 +206,8 @@ impl AppState {
 
     /// Disconnect the device from the given tab and the program.
     pub fn disconnect_blocking(&mut self, tab_id: TabId) {
+        control::clear_acquisition(self, tab_id);
         if let Some(tab) = self.tabs.get_mut(&tab_id) {
-            tab.logic_analyzer_mut().acquisition = None;
             if let Some(did) = tab.assigned_device_id().cloned() {
                 self.device_manager.disconnect(&did);
             }
@@ -206,250 +215,38 @@ impl AppState {
         }
     }
 
-    // ── Acquisition control ───────────────────────────────────────────────────
-
-    /// Start acquisition for the given tab.
-    /// Takes the device handle from [`DeviceManager`] and spawns the
-    /// acquisition future. The handle is returned when acquisition stops.
-    pub fn start_blocking(&mut self, tab_id: TabId) {
-        // Check if we need to connect first (device assigned but not connected).
-        let need_connect = {
-            let tab = self.tabs.get(&tab_id);
-            tab.is_some_and(|t| {
-                t.assigned_device_id()
-                    .is_some_and(|did| !self.device_manager.is_connected(did))
-            })
-        };
-
-        if need_connect {
-            // Can't auto-connect here without a ScanResult.
-            // The UI should have connected via the dropdown first.
-            return;
-        }
-
-        // Check if already acquiring — re-run.
-        let already_acquiring = self
-            .tabs
-            .get(&tab_id)
-            .is_some_and(|t| t.logic_analyzer().acquisition.as_ref().is_some());
-
-        if already_acquiring {
-            if let Some(tab) = self.tabs.get_mut(&tab_id) {
-                if let Some(acq) = tab.logic_analyzer_mut().acquisition.as_mut() {
-                    let rate = acq.config.sample_rate_hz;
-                    acq.send_command(AcquisitionCommand::SetSampleRate(rate));
-                    acq.reset_traces();
-                    acq.send_command(AcquisitionCommand::Start);
-                    acq.state = AcquisitionState::Running;
-                }
-            }
-            return;
-        }
-
-        // Take the handle from DeviceManager.
-        let device_id = self
-            .tabs
-            .get(&tab_id)
-            .and_then(|t| t.assigned_device_id().cloned());
-
-        let handle = device_id
-            .as_ref()
-            .and_then(|did| self.device_manager.take_handle(did));
-
-        if let Some(handle) = handle {
-            let device_id = device_id.unwrap();
-            let acq = self.spawn_acquisition(handle, device_id);
-            if let Some(tab) = self.tabs.get_mut(&tab_id) {
-                tab.logic_analyzer_mut().acquisition = Some(acq);
-            }
-        }
-    }
-
-    /// Stop acquisition for the given tab.
-    pub fn stop_blocking(&mut self, tab_id: TabId) {
-        let tab = match self.tabs.get_mut(&tab_id) {
-            Some(t) => t,
-            None => return,
-        };
-        if let Some(acq) = tab.logic_analyzer_mut().acquisition.as_mut() {
-            acq.send_command(AcquisitionCommand::Stop);
-            acq.state = AcquisitionState::Stopped;
-        }
-        // If the device handle is in DeviceManager (not borrowed), it's already idle.
-    }
-
     // ── Pending actions ───────────────────────────────────────────────────────
 
     pub fn apply_pending_actions(&mut self) {
-        // Let DeviceManager process its own pending actions (WASM scan/connect).
         self.device_manager.apply_pending_actions();
-        // Collect handles returned from completed acquisitions.
         self.device_manager.collect_returns();
 
-        // Handle pending disconnect (tab close).
+        // On WASM: if an async connect just completed, assign the device to the tab.
+        #[cfg(target_arch = "wasm32")]
+        if let Some(tab_id) = self.pending_wasm_assign {
+            for did in self.device_manager.connected_device_ids() {
+                let already_assigned = self.tabs.values().any(|t| t.assigned_device_id() == Some(&did));
+                if !already_assigned {
+                    self.assign_device_to_tab(tab_id, did);
+                    self.pending_wasm_assign = None;
+                    break;
+                }
+            }
+        }
+
         if let Some(tab_id) = self.pending_disconnect.take() {
             self.close_tab(tab_id);
         }
-
-        // Handle pending start.
         if let Some(tab_id) = self.pending_start.take() {
-            self.apply_start(tab_id);
+            control::apply_start(self, tab_id);
         }
-
-        // Handle pending stop.
         if let Some(tab_id) = self.pending_stop.take() {
-            self.apply_stop(tab_id);
-        }
-    }
-
-    /// Check if connect is needed, connect, then start acquisition.
-    fn apply_start(&mut self, tab_id: TabId) {
-        let need_connect = self
-            .tabs
-            .get(&tab_id)
-            .is_some_and(|t| {
-                t.assigned_device_id()
-                    .is_some_and(|did| !self.device_manager.is_connected(did))
-            });
-
-        if need_connect {
-            // Without a ScanResult we can't auto-connect.
-            return;
-        }
-
-        let already_acquiring = self
-            .tabs
-            .get(&tab_id)
-            .is_some_and(|t| t.logic_analyzer().acquisition.as_ref().is_some());
-
-        if already_acquiring {
-            if let Some(tab) = self.tabs.get_mut(&tab_id) {
-                if let Some(acq) = tab.logic_analyzer_mut().acquisition.as_mut() {
-                    let rate = acq.config.sample_rate_hz;
-                    acq.send_command(AcquisitionCommand::SetSampleRate(rate));
-                    acq.reset_traces();
-                    acq.send_command(AcquisitionCommand::Start);
-                    acq.state = AcquisitionState::Running;
-                }
-            }
-            return;
-        }
-
-        let device_id = self
-            .tabs
-            .get(&tab_id)
-            .and_then(|t| t.assigned_device_id().cloned());
-
-        let handle = device_id
-            .as_ref()
-            .and_then(|did| self.device_manager.take_handle(did));
-
-        if let Some(handle) = handle {
-            let device_id = device_id.unwrap();
-            let acq = self.spawn_acquisition(handle, device_id);
-            if let Some(tab) = self.tabs.get_mut(&tab_id) {
-                tab.logic_analyzer_mut().acquisition = Some(acq);
-            }
-        }
-    }
-
-    fn apply_stop(&mut self, tab_id: TabId) {
-        let tab = match self.tabs.get_mut(&tab_id) {
-            Some(t) => t,
-            None => return,
-        };
-        if let Some(acq) = tab.logic_analyzer_mut().acquisition.as_mut() {
-            acq.send_command(AcquisitionCommand::Stop);
-            acq.state = AcquisitionState::Stopped;
-        }
-    }
-
-    /// Spawns an acquisition future and returns the [`DeviceAcquisition`] handle.
-    /// The device handle is returned to [`DeviceManager`] when the future completes.
-    /// Traces are built from the active tab's [`AcquisitionConfig`].
-    #[allow(unused_mut)]
-    pub fn spawn_acquisition(
-        &mut self,
-        mut handle: DeviceHandle,
-        device_id: DeviceId,
-    ) -> DeviceAcquisition {
-        // Read config from the tab that owns this device.
-        let config = self
-            .tabs
-            .values()
-            .find(|t| t.assigned_device_id() == Some(&device_id))
-            .map(|t| t.logic_analyzer().acquisition_config.clone())
-            .unwrap_or_default();
-
-        // Rebuild handle traces to match config (sample rate, channel layout).
-        config.apply_to_handle(&mut handle);
-
-        // Build traces for the GUI display.
-        let (analog, digital) = config.build_traces();
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            let web_handle = rb_core::runtime::web::spawn_local(handle);
-            let _ = web_handle
-                .commands
-                .unbounded_send(AcquisitionCommand::SetSampleRate(config.sample_rate_hz));
-            let _ = web_handle.commands.unbounded_send(AcquisitionCommand::Start);
-            return DeviceAcquisition {
-                analog,
-                digital,
-                state: AcquisitionState::Running,
-                sample_count: 0,
-                cmd_tx: web_handle.commands,
-                data_rx: web_handle.data,
-                config,
-            };
-        }
-
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let (cmd_tx, cmd_rx) = mpsc::unbounded::<AcquisitionCommand>();
-            let (data_tx, data_rx) = mpsc::unbounded();
-
-            // When the acquisition future completes, return the handle to DeviceManager.
-            let (return_tx, return_rx) = futures::channel::oneshot::channel();
-            self.device_manager.register_pending_return(return_rx);
-
-            let fut = run_acquisition(handle, cmd_rx, Some(data_tx));
-            #[cfg(feature = "native")]
-            {
-                self.local_set.spawn_local(async move {
-                    let handle = fut.await;
-                    let _ = return_tx.send((device_id, handle));
-                });
-            }
-            #[cfg(not(feature = "native"))]
-            {
-                self.spawner
-                    .spawn_local(async move {
-                        let handle = fut.await;
-                        let _ = return_tx.send((device_id, handle));
-                    })
-                    .expect("spawn");
-            }
-
-            let _ = cmd_tx.unbounded_send(AcquisitionCommand::SetSampleRate(config.sample_rate_hz));
-            let _ = cmd_tx.unbounded_send(AcquisitionCommand::Start);
-
-            DeviceAcquisition {
-                analog,
-                digital,
-                state: AcquisitionState::Running,
-                sample_count: 0,
-                cmd_tx,
-                data_rx,
-                config,
-            }
+            control::apply_stop(self, tab_id);
         }
     }
 
     // ── Queries ───────────────────────────────────────────────────────────────
 
-    /// Returns the device label (vendor/model) for a connected device.
     pub fn device_label(&self, id: &DeviceId) -> String {
         self.device_manager
             .device_label(id)
@@ -457,44 +254,16 @@ impl AppState {
             .unwrap_or_else(|| id.to_string())
     }
 
-    /// Returns the acquisition state for a device, searching across all tabs.
-    pub fn device_state(&self, id: &DeviceId) -> Option<AcquisitionState> {
-        for tab in self.tabs.values() {
-            if tab.assigned_device_id() == Some(id) {
-                if let Some(acq) = tab.logic_analyzer().acquisition.as_ref() {
-                    return Some(acq.state().clone());
-                }
-            }
-        }
-        // Fall back to DeviceManager's handle state.
-        self.device_manager
-            .device_handle(id)
-            .map(|h| h.state().clone())
-    }
-
-    /// Returns a reference to the device handle for a device.
     pub fn device_handle(&self, id: &DeviceId) -> Option<&DeviceHandle> {
         self.device_manager.device_handle(id)
     }
 
-    /// Returns a reference to the acquisition for a tab.
-    pub fn acq_for_tab(&self, tab_id: TabId) -> Option<&DeviceAcquisition> {
-        self.tabs.get(&tab_id).and_then(|t| t.logic_analyzer().acquisition.as_ref())
-    }
-
-    /// Returns a mutable reference to the acquisition for a tab.
-    pub fn acq_for_tab_mut(&mut self, tab_id: TabId) -> Option<&mut DeviceAcquisition> {
-        self.tabs.get_mut(&tab_id).and_then(|t| t.logic_analyzer_mut().acquisition.as_mut())
-    }
-
-    /// Returns a reference to the device handle for a tab.
     pub fn handle_for_tab(&self, tab_id: TabId) -> Option<&DeviceHandle> {
         let tab = self.tabs.get(&tab_id)?;
         tab.assigned_device_id()
             .and_then(|did| self.device_manager.device_handle(did))
     }
 
-    /// Returns the connected device id for a tab.
     pub fn device_id_for_tab(&self, tab_id: TabId) -> Option<DeviceId> {
         self.tabs
             .get(&tab_id)
@@ -502,35 +271,16 @@ impl AppState {
             .filter(|did| self.device_manager.is_connected(did))
     }
 
-    /// Returns the acquisition state of the active tab.
-    pub fn active_tab_acquisition_state(&self) -> AcquisitionState {
-        let tab = match self.active_tab_state() {
-            Some(t) => t,
-            None => return AcquisitionState::Idle,
-        };
-        if let Some(acq) = tab.logic_analyzer().acquisition.as_ref() {
-            acq.state().clone()
-        } else {
-            tab.assigned_device_id()
-                .and_then(|did| self.device_manager.device_handle(did))
-                .map(|h| h.state().clone())
-                .unwrap_or(AcquisitionState::Idle)
-        }
-    }
-
-    /// Returns all connected device ids from DeviceManager.
     pub fn connected_device_ids(&self) -> Vec<DeviceId> {
         self.device_manager.connected_device_ids()
     }
 
-    /// Returns the number of open tabs.
     pub fn tab_count(&self) -> usize {
         self.tabs.len()
     }
 
     // ── Executor ──────────────────────────────────────────────────────────────
 
-    /// Run the executor for one tick.
     pub fn pump_once(&mut self) {
         #[cfg(target_arch = "wasm32")]
         return;
@@ -553,21 +303,6 @@ impl AppState {
         self.pool.run_until_stalled();
     }
 
-    /// Drains acquisition data for the **active tab only** into local
-    /// stores. Returns true if any new data arrived.
-    pub fn drain_all(&mut self) -> bool {
-        let Some(tab) = self.tabs.get_mut(&self.active_tab) else {
-            return false;
-        };
-        let Some(acq) = tab.logic_analyzer_mut().acquisition.as_mut() else {
-            return false;
-        };
-        let before = acq.sample_count();
-        acq.drain();
-        acq.sample_count() > before
-    }
-
-    /// Returns true if any acquisition is currently running.
     pub fn any_running(&self) -> bool {
         self.tabs.values().any(|t| t.is_running())
     }
@@ -699,7 +434,7 @@ mod tests {
         let _did = app.connect_and_assign(tab_id, &demo).unwrap();
 
         // Start acquisition.
-        app.start_blocking(tab_id);
+        control::start(&mut app, tab_id);
 
         let active = app.active_tab_state().unwrap();
         assert!(active.logic_analyzer().acquisition.as_ref().is_some());
