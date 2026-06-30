@@ -64,23 +64,23 @@ fn StatusBar(data_version: Signal<u64>) -> Element {
     let _version = data_version();
     let state: AppStateRef = use_context();
     let s = state.borrow();
-    let session_count = s.sessions.len();
+    let tab_count = s.tabs.len();
     let any_running = s.any_running();
     let active_label = s
-        .active_session_state()
-        .map(|ss| ss.label.clone())
+        .active_tab_state()
+        .map(|t| t.label.clone())
         .filter(|l| l != "Untitled")
         .unwrap_or_default();
     drop(s);
 
     let status_text = if any_running {
-        format!("\u{25CF} {session_count} session(s)  |  Acquiring")
-    } else if session_count > 0 && !active_label.is_empty() {
-        format!("\u{25CF} {session_count} session(s)  |  {active_label}  |  Idle")
-    } else if session_count > 0 {
-        format!("\u{25CF} {session_count} session(s)  |  Idle")
+        format!("\u{25CF} {tab_count} tab(s)  |  Acquiring")
+    } else if tab_count > 0 && !active_label.is_empty() {
+        format!("\u{25CF} {tab_count} tab(s)  |  {active_label}  |  Idle")
+    } else if tab_count > 0 {
+        format!("\u{25CF} {tab_count} tab(s)  |  Idle")
     } else {
-        "\u{25CB} No sessions  |  Ready".to_string()
+        "\u{25CB} No tabs  |  Ready".to_string()
     };
 
     rsx! {

@@ -1,4 +1,4 @@
-//! Session view: the main content area for the active session.
+//! Tab view: the main content area for the active tab.
 //!
 //! Layout:
 //! ┌──────────────────────────────────────┐
@@ -12,10 +12,9 @@
 use dioxus::prelude::*;
 
 use super::app::AppStateRef;
-use super::canvas_toolbar::CanvasToolbar;
-use super::decoder_config::DecoderConfig;
-use super::channel_config::ChannelConfig;
-use super::waveform_canvas::WaveformCanvas;
+use crate::logic_analyzer::components::{
+    CanvasToolbar, ChannelConfig, DecoderConfig, WaveformCanvas,
+};
 
 /// The main content view for the active session.
 #[component]
@@ -24,8 +23,8 @@ pub fn DeviceView(data_version: Signal<u64>) -> Element {
     let _version = data_version();
 
     let s = state.borrow();
-    let active_session = s.active_session;
-    let device_id = s.device_id_for_session(active_session);
+    let active_tab = s.active_tab;
+    let device_id = s.device_id_for_tab(active_tab);
     let connect_error = s.device_manager.connect_error.clone();
     drop(s);
 
@@ -58,42 +57,42 @@ pub fn DeviceView(data_version: Signal<u64>) -> Element {
     };
 
     // Device connected — show full view.
-    // Per-session view state from the active session.
+    // Per-tab view state from the active tab.
     let view = {
         let s = state.borrow();
-        s.active_session_state()
-            .map(|ss| ss.view.clone())
+        s.active_tab_state()
+            .map(|t| t.view().clone())
             .unwrap_or_default()
     };
     let mut view_signal = use_signal(move || view);
     let cursor_sample_pos = use_signal(|| None::<u64>);
 
     // Persist view state across tab switches.
-    // When the active session changes: save the current view to the
-    // previous session and load the new session's saved view.
-    let mut prev_session = use_signal(|| active_session);
-    if prev_session() != active_session {
-        // Save current view to the old session.
+    // When the active tab changes: save the current view to the
+    // previous tab and load the new tab's saved view.
+    let mut prev_tab = use_signal(|| active_tab);
+    if prev_tab() != active_tab {
+        // Save current view to the old tab.
         {
             let mut s = state.borrow_mut();
-            if let Some(old) = s.sessions.get_mut(&prev_session()) {
-                old.view = view_signal.read().clone();
+            if let Some(old) = s.tabs.get_mut(&prev_tab()) {
+                *old.view_mut() = view_signal.read().clone();
             }
         }
-        // Load the new session's saved view.
+        // Load the new tab's saved view.
         let new_view = {
             let s = state.borrow();
-            s.sessions.get(&active_session)
-                .map(|ss| ss.view.clone())
+            s.tabs.get(&active_tab)
+                .map(|t| t.view().clone())
                 .unwrap_or_default()
         };
         view_signal.set(new_view);
-        prev_session.set(active_session);
+        prev_tab.set(active_tab);
     } else {
-        // Same session — sync view state back on each render.
+        // Same tab — sync view state back on each render.
         let mut s = state.borrow_mut();
-        if let Some(active) = s.sessions.get_mut(&active_session) {
-            active.view = view_signal.read().clone();
+        if let Some(active) = s.tabs.get_mut(&active_tab) {
+            *active.view_mut() = view_signal.read().clone();
         }
     }
 
@@ -101,7 +100,7 @@ pub fn DeviceView(data_version: Signal<u64>) -> Element {
         div { class: "flex-1 flex flex-col overflow-hidden",
             // Canvas toolbar
             CanvasToolbar {
-                session_id: active_session,
+                tab_id: active_tab,
                 view: view_signal,
                 cursor_sample_pos,
                 data_version,
@@ -110,13 +109,13 @@ pub fn DeviceView(data_version: Signal<u64>) -> Element {
             // Three-panel area: Signal List | Canvas | Decoder Config
             div { class: "flex-1 flex overflow-hidden",
                 ChannelConfig {
-                    session_id: active_session,
+                    tab_id: active_tab,
                     view: view_signal,
                     data_version,
                 }
                 div { class: "flex-1 overflow-hidden",
                     WaveformCanvas {
-                        session_id: active_session,
+                        tab_id: active_tab,
                         data_version,
                         view: view_signal,
                         cursor_sample_pos,

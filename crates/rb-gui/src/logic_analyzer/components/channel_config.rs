@@ -1,30 +1,30 @@
 //! Channel-config panel: shows device channels with enable toggles and
 //! sample-rate input. Lives left of the waveform canvas.
 //!
-//! Reads from [`SessionState::acquisition_config`], which is built from
+//! Reads from [`TabState::acquisition_config`], which is built from
 //! device capabilities on connect.  User edits (toggle, rate) modify the
 //! config in place; traces are rebuilt from the config on acquisition start.
 
 use dioxus::prelude::*;
 
-use super::app::AppStateRef;
+use crate::components::app::AppStateRef;
 
 /// Left panel showing channel labels, enable toggles, and sample rate.
 #[component]
 pub fn ChannelConfig(
-    session_id: crate::session_state::SessionId,
-    mut view: Signal<crate::waveform_state::WaveformView>,
+    tab_id: crate::tab_state::TabId,
+    mut view: Signal<crate::logic_analyzer::view::WaveformView>,
     data_version: Signal<u64>,
 ) -> Element {
     let state: AppStateRef = use_context();
     let _version = data_version();
 
-    // Read config and sample count from the session.
+    // Read config and sample count from the tab.
     let (analog_channels, digital_channels, analog_enabled, digital_enabled, sample_rate_hz, sample_count) = {
         let s = state.borrow();
-        if let Some(session) = s.sessions.get(&session_id) {
-            let cfg = &session.acquisition_config;
-            let sc = session.acquisition.as_ref().map(|a| a.sample_count()).unwrap_or(0);
+        if let Some(tab) = s.tabs.get(&tab_id) {
+            let cfg = tab.acquisition_config();
+            let sc = tab.acquisition().map(|a| a.sample_count()).unwrap_or(0);
             (
                 cfg.analog_channels.clone(),
                 cfg.digital_channels.clone(),
@@ -34,7 +34,7 @@ pub fn ChannelConfig(
                 sc,
             )
         } else {
-            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), crate::device_acquisition::DEFAULT_SAMPLE_RATE_HZ, 0)
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), crate::logic_analyzer::acquisition::DEFAULT_SAMPLE_RATE_HZ, 0)
         }
     };
 
@@ -55,14 +55,14 @@ pub fn ChannelConfig(
                     value: "{fmt_rate(sample_rate_hz)}",
                     oninput: {
                         let state = state.clone();
-                        let sid = session_id;
+                        let tid = tab_id;
                         move |evt| {
                             if let Some(hz) = parse_rate(&evt.value()) {
                                 let mut s = state.borrow_mut();
-                                if let Some(session) = s.sessions.get_mut(&sid) {
-                                    session.acquisition_config.sample_rate_hz = hz;
+                                if let Some(tab) = s.tabs.get_mut(&tid) {
+                                    tab.acquisition_config_mut().sample_rate_hz = hz;
                                     // Also update running acquisition config.
-                                    if let Some(ref acq) = session.acquisition {
+                                    if let Some(acq) = tab.acquisition_mut() {
                                         acq.send_command(rb_core::AcquisitionCommand::SetSampleRate(hz));
                                     }
                                 }
@@ -84,7 +84,7 @@ pub fn ChannelConfig(
                         let is_enabled = analog_enabled.get(i).copied().unwrap_or(true);
                         let mut view = view;
                         let state = state.clone();
-                        let sid = session_id;
+                        let tid = tab_id;
                         let i = i;
                         rsx! {
                             div {
@@ -99,14 +99,14 @@ pub fn ChannelConfig(
                                     // Toggle display visibility.
                                     let mut v = view.write();
                                     if let Some(row) = v.rows.iter_mut()
-                                        .find(|r| matches!(r.kind, crate::waveform_state::RowKind::Analog) && r.channel_index == i)
+                                        .find(|r| matches!(r.kind, crate::logic_analyzer::view::RowKind::Analog) && r.channel_index == i)
                                     {
                                         row.visible = !row.visible;
                                     }
                                     // Toggle acquisition config.
                                     let mut s = state.borrow_mut();
-                                    if let Some(session) = s.sessions.get_mut(&sid) {
-                                        if let Some(en) = session.acquisition_config.analog_enabled.get_mut(i) {
+                                    if let Some(tab) = s.tabs.get_mut(&tid) {
+                                        if let Some(en) = tab.acquisition_config_mut().analog_enabled.get_mut(i) {
                                             *en = !*en;
                                         }
                                     }
@@ -135,7 +135,7 @@ pub fn ChannelConfig(
                         let is_enabled = digital_enabled.get(i).copied().unwrap_or(true);
                         let mut view = view;
                         let state = state.clone();
-                        let sid = session_id;
+                        let tid = tab_id;
                         let i = i;
                         rsx! {
                             div {
@@ -149,13 +149,13 @@ pub fn ChannelConfig(
                                     evt.stop_propagation();
                                     let mut v = view.write();
                                     if let Some(row) = v.rows.iter_mut()
-                                        .find(|r| matches!(r.kind, crate::waveform_state::RowKind::Digital) && r.channel_index == i)
+                                        .find(|r| matches!(r.kind, crate::logic_analyzer::view::RowKind::Digital) && r.channel_index == i)
                                     {
                                         row.visible = !row.visible;
                                     }
                                     let mut s = state.borrow_mut();
-                                    if let Some(session) = s.sessions.get_mut(&sid) {
-                                        if let Some(en) = session.acquisition_config.digital_enabled.get_mut(i) {
+                                    if let Some(tab) = s.tabs.get_mut(&tid) {
+                                        if let Some(en) = tab.acquisition_config_mut().digital_enabled.get_mut(i) {
                                             *en = !*en;
                                         }
                                     }

@@ -1,6 +1,6 @@
 //! Application state: the top-level orchestrator.
 //!
-//! [`AppState`] owns the [`DeviceManager`], all [`SessionState`]s, and the
+//! [`AppState`] owns the [`DeviceManager`], all [`TabState`]s, and the
 //! executor for background acquisition futures. It is framework-agnostic and
 //! testable without a display.
 
@@ -12,9 +12,10 @@ use rb_core::{
 };
 use rb_device::DeviceId;
 
-use crate::device_acquisition::{AcquisitionConfig, DeviceAcquisition};
+use crate::logic_analyzer::acquisition::{AcquisitionConfig, DeviceAcquisition};
+use crate::tab_content::{LogicAnalyzerContent, TabContent};
 use crate::device_manager::DeviceManager;
-use crate::session_state::{SessionId, SessionState};
+use crate::tab_state::{TabId, TabSource, TabState};
 
 // Executors: tokio LocalSet when native feature is enabled (non-wasm),
 // LocalPool otherwise (non-wasm tests only; WASM uses wasm-bindgen-futures).
@@ -29,11 +30,11 @@ pub struct AppState {
     /// Program-level device manager (scan, connect, handle pool).
     pub device_manager: DeviceManager,
 
-    /// All open sessions, keyed by id.
-    pub sessions: HashMap<SessionId, SessionState>,
-    /// The currently active (visible) session tab.
-    pub active_session: SessionId,
-    next_session_id: u64,
+    /// All open tabs, keyed by id.
+    pub tabs: HashMap<TabId, TabState>,
+    /// The currently active (visible) tab.
+    pub active_tab: TabId,
+    next_tab_id: u64,
 
     /// Executor for background acquisition futures (non-WASM, non-native tests).
     #[cfg(not(any(feature = "native", target_arch = "wasm32")))]
@@ -47,9 +48,9 @@ pub struct AppState {
     pub local_set: LocalSet,
 
     // Deferred actions.
-    pub pending_disconnect: Option<SessionId>,
-    pub pending_start: Option<SessionId>,
-    pub pending_stop: Option<SessionId>,
+    pub pending_disconnect: Option<TabId>,
+    pub pending_start: Option<TabId>,
+    pub pending_stop: Option<TabId>,
 }
 
 impl AppState {
@@ -66,26 +67,27 @@ impl AppState {
         #[cfg(feature = "native")]
         let local_set = LocalSet::new();
 
-        let first_id = SessionId(1);
-        let mut state = SessionState::new(first_id, "Session 1");
+        let first_id = TabId(1);
+        let mut tab = TabState::new(first_id, "Session 1");
 
-        // If a device is already connected, assign it to the first session.
+        // If a device is already connected, assign it to the first tab.
         let device_ids = device_manager.connected_device_ids();
         if let Some(did) = device_ids.into_iter().next() {
-            state.assigned_device_id = Some(did.clone());
+            tab.source = TabSource::Device(did.clone());
+            tab.content = Some(TabContent::LogicAnalyzer(LogicAnalyzerContent::default()));
             if let Some(label) = device_manager.device_label(&did) {
-                state.label = label.to_string();
+                tab.label = label.to_string();
             }
         }
 
-        let mut sessions = HashMap::new();
-        sessions.insert(first_id, state);
+        let mut tabs = HashMap::new();
+        tabs.insert(first_id, tab);
 
         Self {
             device_manager,
-            sessions,
-            active_session: first_id,
-            next_session_id: 2,
+            tabs,
+            active_tab: first_id,
+            next_tab_id: 2,
             #[cfg(not(any(feature = "native", target_arch = "wasm32")))]
             pool,
             #[cfg(not(any(feature = "native", target_arch = "wasm32")))]
@@ -102,82 +104,88 @@ impl AppState {
         Self::from_device_manager(DeviceManager::new())
     }
 
-    // ── Session management ────────────────────────────────────────────────────
+    // ── Tab management ────────────────────────────────────────────────────────
 
-    /// Creates a new empty session and makes it the active tab.
-    pub fn create_session(&mut self, label: impl Into<String>) -> SessionId {
-        let id = SessionId(self.next_session_id);
-        self.next_session_id += 1;
-        let state = SessionState::new(id, label);
-        self.sessions.insert(id, state);
-        self.active_session = id;
+    /// Creates a new empty tab and makes it the active tab.
+    pub fn create_tab(&mut self, label: impl Into<String>) -> TabId {
+        let id = TabId(self.next_tab_id);
+        self.next_tab_id += 1;
+        let tab = TabState::new(id, label);
+        self.tabs.insert(id, tab);
+        self.active_tab = id;
         id
     }
 
-    /// Closes a session, stopping any running acquisition.
-    /// If closing the active session, activates the nearest remaining session
+    /// Closes a tab, stopping any running acquisition.
+    /// If closing the active tab, activates the nearest remaining tab
     /// or creates a fresh one. Does NOT disconnect the device — the device
-    /// connection is program-level and may be used by other sessions.
-    pub fn close_session(&mut self, id: SessionId) {
+    /// connection is program-level and may be used by other tabs.
+    pub fn close_tab(&mut self, id: TabId) {
         // Stop acquisition if running.
-        if let Some(session_state) = self.sessions.get_mut(&id) {
-            if let Some(acq) = session_state.acquisition.as_mut() {
+        if let Some(tab) = self.tabs.get_mut(&id) {
+            if let Some(acq) = tab.acquisition_mut() {
                 acq.send_command(AcquisitionCommand::Stop);
                 acq.state = AcquisitionState::Stopped;
             }
-            session_state.acquisition = None;
-            session_state.assigned_device_id = None;
+            tab.set_acquisition(None);
+            tab.set_assigned_device_id(None);
         }
 
-        self.sessions.remove(&id);
+        self.tabs.remove(&id);
 
-        // If we closed the active session, pick a new one or create a fresh session.
-        if self.active_session == id {
-            if let Some(&next_id) = self.sessions.keys().next() {
-                self.active_session = next_id;
+        // If we closed the active tab, pick a new one or create a fresh tab.
+        if self.active_tab == id {
+            if let Some(&next_id) = self.tabs.keys().next() {
+                self.active_tab = next_id;
             } else {
-                self.create_session("Untitled");
+                self.create_tab("Untitled");
             }
         }
     }
 
-    /// Assigns a device (by [`DeviceId`]) to a session and updates the tab label.
-    /// Also builds the initial [`AcquisitionConfig`] from the device's capabilities.
-    pub fn assign_device_to_session(&mut self, session_id: SessionId, device_id: DeviceId) {
-        if let Some(state) = self.sessions.get_mut(&session_id) {
-            state.assigned_device_id = Some(device_id.clone());
+    /// Assigns a device (by [`DeviceId`]) to a tab and updates the tab label.
+    /// Also builds the initial [`AcquisitionConfig`] from the device's capabilities
+    /// and sets the [`TabContent`] to [`TabContent::LogicAnalyzer`].
+    pub fn assign_device_to_tab(&mut self, tab_id: TabId, device_id: DeviceId) {
+        if let Some(tab) = self.tabs.get_mut(&tab_id) {
+            tab.source = TabSource::Device(device_id.clone());
             // Build config from device capabilities.
             if let Some(handle) = self.device_manager.device_handle(&device_id) {
-                state.acquisition_config =
-                    AcquisitionConfig::from_device(handle.device());
+                let config = AcquisitionConfig::from_device(handle.device());
+                tab.content = Some(TabContent::LogicAnalyzer(LogicAnalyzerContent {
+                    acquisition_config: config,
+                    ..LogicAnalyzerContent::default()
+                }));
+            } else {
+                tab.content = Some(TabContent::default());
             }
             // Update label from device info.
             if let Some(label) = self.device_manager.device_label(&device_id) {
-                state.label = label.to_string();
+                tab.label = label.to_string();
             }
         }
     }
 
-    /// Connects to a device candidate and assigns it to the given session.
+    /// Connects to a device candidate and assigns it to the given tab.
     /// Returns the [`DeviceId`] on success.
     pub fn connect_and_assign(
         &mut self,
-        session_id: SessionId,
+        tab_id: TabId,
         scan_result: &rb_core::ScanResult,
     ) -> Result<DeviceId, rb_core::SessionError> {
         let device_id = self.device_manager.connect_blocking(scan_result)?;
-        self.assign_device_to_session(session_id, device_id.clone());
+        self.assign_device_to_tab(tab_id, device_id.clone());
         Ok(device_id)
     }
 
-    /// Returns a reference to the active session.
-    pub fn active_session_state(&self) -> Option<&SessionState> {
-        self.sessions.get(&self.active_session)
+    /// Returns a reference to the active tab.
+    pub fn active_tab_state(&self) -> Option<&TabState> {
+        self.tabs.get(&self.active_tab)
     }
 
-    /// Returns a mutable reference to the active session.
-    pub fn active_session_state_mut(&mut self) -> Option<&mut SessionState> {
-        self.sessions.get_mut(&self.active_session)
+    /// Returns a mutable reference to the active tab.
+    pub fn active_tab_state_mut(&mut self) -> Option<&mut TabState> {
+        self.tabs.get_mut(&self.active_tab)
     }
 
     // ── Device connection (delegates to DeviceManager) ────────────────────────
@@ -187,29 +195,28 @@ impl AppState {
         self.device_manager.trigger_scan();
     }
 
-    /// Disconnect the device from the given session and the program.
-    pub fn disconnect_blocking(&mut self, session_id: SessionId) {
-        if let Some(state) = self.sessions.get_mut(&session_id) {
-            state.acquisition = None;
-            if let Some(ref did) = state.assigned_device_id.clone() {
-                self.device_manager.disconnect(did);
+    /// Disconnect the device from the given tab and the program.
+    pub fn disconnect_blocking(&mut self, tab_id: TabId) {
+        if let Some(tab) = self.tabs.get_mut(&tab_id) {
+            tab.set_acquisition(None);
+            if let Some(did) = tab.assigned_device_id().cloned() {
+                self.device_manager.disconnect(&did);
             }
-            state.assigned_device_id = None;
+            tab.set_assigned_device_id(None);
         }
     }
 
     // ── Acquisition control ───────────────────────────────────────────────────
 
-    /// Start acquisition for the given session.
+    /// Start acquisition for the given tab.
     /// Takes the device handle from [`DeviceManager`] and spawns the
     /// acquisition future. The handle is returned when acquisition stops.
-    pub fn start_blocking(&mut self, session_id: SessionId) {
+    pub fn start_blocking(&mut self, tab_id: TabId) {
         // Check if we need to connect first (device assigned but not connected).
         let need_connect = {
-            let session = self.sessions.get(&session_id);
-            session.is_some_and(|s| {
-                s.assigned_device_id
-                    .as_ref()
+            let tab = self.tabs.get(&tab_id);
+            tab.is_some_and(|t| {
+                t.assigned_device_id()
                     .is_some_and(|did| !self.device_manager.is_connected(did))
             })
         };
@@ -222,13 +229,13 @@ impl AppState {
 
         // Check if already acquiring — re-run.
         let already_acquiring = self
-            .sessions
-            .get(&session_id)
-            .is_some_and(|s| s.acquisition.is_some());
+            .tabs
+            .get(&tab_id)
+            .is_some_and(|t| t.acquisition().is_some());
 
         if already_acquiring {
-            if let Some(state) = self.sessions.get_mut(&session_id) {
-                if let Some(acq) = state.acquisition.as_mut() {
+            if let Some(tab) = self.tabs.get_mut(&tab_id) {
+                if let Some(acq) = tab.acquisition_mut() {
                     let rate = acq.config.sample_rate_hz;
                     acq.send_command(AcquisitionCommand::SetSampleRate(rate));
                     acq.reset_traces();
@@ -241,9 +248,9 @@ impl AppState {
 
         // Take the handle from DeviceManager.
         let device_id = self
-            .sessions
-            .get(&session_id)
-            .and_then(|s| s.assigned_device_id.clone());
+            .tabs
+            .get(&tab_id)
+            .and_then(|t| t.assigned_device_id().cloned());
 
         let handle = device_id
             .as_ref()
@@ -252,19 +259,19 @@ impl AppState {
         if let Some(handle) = handle {
             let device_id = device_id.unwrap();
             let acq = self.spawn_acquisition(handle, device_id);
-            if let Some(state) = self.sessions.get_mut(&session_id) {
-                state.acquisition = Some(acq);
+            if let Some(tab) = self.tabs.get_mut(&tab_id) {
+                tab.set_acquisition(Some(acq));
             }
         }
     }
 
-    /// Stop acquisition for the given session.
-    pub fn stop_blocking(&mut self, session_id: SessionId) {
-        let state = match self.sessions.get_mut(&session_id) {
-            Some(s) => s,
+    /// Stop acquisition for the given tab.
+    pub fn stop_blocking(&mut self, tab_id: TabId) {
+        let tab = match self.tabs.get_mut(&tab_id) {
+            Some(t) => t,
             None => return,
         };
-        if let Some(acq) = state.acquisition.as_mut() {
+        if let Some(acq) = tab.acquisition_mut() {
             acq.send_command(AcquisitionCommand::Stop);
             acq.state = AcquisitionState::Stopped;
         }
@@ -279,30 +286,29 @@ impl AppState {
         // Collect handles returned from completed acquisitions.
         self.device_manager.collect_returns();
 
-        // Handle pending disconnect (session close).
-        if let Some(session_id) = self.pending_disconnect.take() {
-            self.close_session(session_id);
+        // Handle pending disconnect (tab close).
+        if let Some(tab_id) = self.pending_disconnect.take() {
+            self.close_tab(tab_id);
         }
 
         // Handle pending start.
-        if let Some(session_id) = self.pending_start.take() {
-            self.apply_start(session_id);
+        if let Some(tab_id) = self.pending_start.take() {
+            self.apply_start(tab_id);
         }
 
         // Handle pending stop.
-        if let Some(session_id) = self.pending_stop.take() {
-            self.apply_stop(session_id);
+        if let Some(tab_id) = self.pending_stop.take() {
+            self.apply_stop(tab_id);
         }
     }
 
     /// Check if connect is needed, connect, then start acquisition.
-    fn apply_start(&mut self, session_id: SessionId) {
+    fn apply_start(&mut self, tab_id: TabId) {
         let need_connect = self
-            .sessions
-            .get(&session_id)
-            .is_some_and(|s| {
-                s.assigned_device_id
-                    .as_ref()
+            .tabs
+            .get(&tab_id)
+            .is_some_and(|t| {
+                t.assigned_device_id()
                     .is_some_and(|did| !self.device_manager.is_connected(did))
             });
 
@@ -312,13 +318,13 @@ impl AppState {
         }
 
         let already_acquiring = self
-            .sessions
-            .get(&session_id)
-            .is_some_and(|s| s.acquisition.is_some());
+            .tabs
+            .get(&tab_id)
+            .is_some_and(|t| t.acquisition().is_some());
 
         if already_acquiring {
-            if let Some(state) = self.sessions.get_mut(&session_id) {
-                if let Some(acq) = state.acquisition.as_mut() {
+            if let Some(tab) = self.tabs.get_mut(&tab_id) {
+                if let Some(acq) = tab.acquisition_mut() {
                     let rate = acq.config.sample_rate_hz;
                     acq.send_command(AcquisitionCommand::SetSampleRate(rate));
                     acq.reset_traces();
@@ -330,9 +336,9 @@ impl AppState {
         }
 
         let device_id = self
-            .sessions
-            .get(&session_id)
-            .and_then(|s| s.assigned_device_id.clone());
+            .tabs
+            .get(&tab_id)
+            .and_then(|t| t.assigned_device_id().cloned());
 
         let handle = device_id
             .as_ref()
@@ -341,18 +347,18 @@ impl AppState {
         if let Some(handle) = handle {
             let device_id = device_id.unwrap();
             let acq = self.spawn_acquisition(handle, device_id);
-            if let Some(state) = self.sessions.get_mut(&session_id) {
-                state.acquisition = Some(acq);
+            if let Some(tab) = self.tabs.get_mut(&tab_id) {
+                tab.set_acquisition(Some(acq));
             }
         }
     }
 
-    fn apply_stop(&mut self, session_id: SessionId) {
-        let state = match self.sessions.get_mut(&session_id) {
-            Some(s) => s,
+    fn apply_stop(&mut self, tab_id: TabId) {
+        let tab = match self.tabs.get_mut(&tab_id) {
+            Some(t) => t,
             None => return,
         };
-        if let Some(acq) = state.acquisition.as_mut() {
+        if let Some(acq) = tab.acquisition_mut() {
             acq.send_command(AcquisitionCommand::Stop);
             acq.state = AcquisitionState::Stopped;
         }
@@ -360,19 +366,19 @@ impl AppState {
 
     /// Spawns an acquisition future and returns the [`DeviceAcquisition`] handle.
     /// The device handle is returned to [`DeviceManager`] when the future completes.
-    /// Traces are built from the active session's [`AcquisitionConfig`].
+    /// Traces are built from the active tab's [`AcquisitionConfig`].
     #[allow(unused_mut)]
     pub fn spawn_acquisition(
         &mut self,
         mut handle: DeviceHandle,
         device_id: DeviceId,
     ) -> DeviceAcquisition {
-        // Read config from the session that owns this device.
+        // Read config from the tab that owns this device.
         let config = self
-            .sessions
+            .tabs
             .values()
-            .find(|s| s.assigned_device_id.as_ref() == Some(&device_id))
-            .map(|s| s.acquisition_config.clone())
+            .find(|t| t.assigned_device_id() == Some(&device_id))
+            .map(|t| t.acquisition_config().clone())
             .unwrap_or_default();
 
         // Rebuild handle traces to match config (sample rate, channel layout).
@@ -451,11 +457,11 @@ impl AppState {
             .unwrap_or_else(|| id.to_string())
     }
 
-    /// Returns the acquisition state for a device, searching across all sessions.
+    /// Returns the acquisition state for a device, searching across all tabs.
     pub fn device_state(&self, id: &DeviceId) -> Option<AcquisitionState> {
-        for state in self.sessions.values() {
-            if state.assigned_device_id.as_ref() == Some(id) {
-                if let Some(acq) = &state.acquisition {
+        for tab in self.tabs.values() {
+            if tab.assigned_device_id() == Some(id) {
+                if let Some(acq) = tab.acquisition() {
                     return Some(acq.state().clone());
                 }
             }
@@ -471,45 +477,41 @@ impl AppState {
         self.device_manager.device_handle(id)
     }
 
-    /// Returns a reference to the acquisition for a session.
-    pub fn acq_for_session(&self, session_id: SessionId) -> Option<&DeviceAcquisition> {
-        self.sessions.get(&session_id).and_then(|s| s.acquisition.as_ref())
+    /// Returns a reference to the acquisition for a tab.
+    pub fn acq_for_tab(&self, tab_id: TabId) -> Option<&DeviceAcquisition> {
+        self.tabs.get(&tab_id).and_then(|t| t.acquisition())
     }
 
-    /// Returns a mutable reference to the acquisition for a session.
-    pub fn acq_for_session_mut(&mut self, session_id: SessionId) -> Option<&mut DeviceAcquisition> {
-        self.sessions.get_mut(&session_id).and_then(|s| s.acquisition.as_mut())
+    /// Returns a mutable reference to the acquisition for a tab.
+    pub fn acq_for_tab_mut(&mut self, tab_id: TabId) -> Option<&mut DeviceAcquisition> {
+        self.tabs.get_mut(&tab_id).and_then(|t| t.acquisition_mut())
     }
 
-    /// Returns a reference to the device handle for a session.
-    pub fn handle_for_session(&self, session_id: SessionId) -> Option<&DeviceHandle> {
-        let state = self.sessions.get(&session_id)?;
-        state
-            .assigned_device_id
-            .as_ref()
+    /// Returns a reference to the device handle for a tab.
+    pub fn handle_for_tab(&self, tab_id: TabId) -> Option<&DeviceHandle> {
+        let tab = self.tabs.get(&tab_id)?;
+        tab.assigned_device_id()
             .and_then(|did| self.device_manager.device_handle(did))
     }
 
-    /// Returns the connected device id for a session.
-    pub fn device_id_for_session(&self, session_id: SessionId) -> Option<DeviceId> {
-        self.sessions
-            .get(&session_id)
-            .and_then(|s| s.assigned_device_id.clone())
+    /// Returns the connected device id for a tab.
+    pub fn device_id_for_tab(&self, tab_id: TabId) -> Option<DeviceId> {
+        self.tabs
+            .get(&tab_id)
+            .and_then(|t| t.assigned_device_id().cloned())
             .filter(|did| self.device_manager.is_connected(did))
     }
 
-    /// Returns the acquisition state of the active session.
-    pub fn active_session_acquisition_state(&self) -> AcquisitionState {
-        let session = match self.active_session_state() {
-            Some(s) => s,
+    /// Returns the acquisition state of the active tab.
+    pub fn active_tab_acquisition_state(&self) -> AcquisitionState {
+        let tab = match self.active_tab_state() {
+            Some(t) => t,
             None => return AcquisitionState::Idle,
         };
-        if let Some(acq) = &session.acquisition {
+        if let Some(acq) = tab.acquisition() {
             acq.state().clone()
         } else {
-            session
-                .assigned_device_id
-                .as_ref()
+            tab.assigned_device_id()
                 .and_then(|did| self.device_manager.device_handle(did))
                 .map(|h| h.state().clone())
                 .unwrap_or(AcquisitionState::Idle)
@@ -521,9 +523,9 @@ impl AppState {
         self.device_manager.connected_device_ids()
     }
 
-    /// Returns the number of active sessions.
-    pub fn session_count(&self) -> usize {
-        self.sessions.len()
+    /// Returns the number of open tabs.
+    pub fn tab_count(&self) -> usize {
+        self.tabs.len()
     }
 
     // ── Executor ──────────────────────────────────────────────────────────────
@@ -551,13 +553,13 @@ impl AppState {
         self.pool.run_until_stalled();
     }
 
-    /// Drains acquisition data for the **active session only** into local
+    /// Drains acquisition data for the **active tab only** into local
     /// stores. Returns true if any new data arrived.
     pub fn drain_all(&mut self) -> bool {
-        let Some(state) = self.sessions.get_mut(&self.active_session) else {
+        let Some(tab) = self.tabs.get_mut(&self.active_tab) else {
             return false;
         };
-        let Some(acq) = state.acquisition.as_mut() else {
+        let Some(acq) = tab.acquisition_mut() else {
             return false;
         };
         let before = acq.sample_count();
@@ -567,7 +569,7 @@ impl AppState {
 
     /// Returns true if any acquisition is currently running.
     pub fn any_running(&self) -> bool {
-        self.sessions.values().any(|s| s.is_running())
+        self.tabs.values().any(|t| t.is_running())
     }
 
     /// Returns true if any WASM async operation is pending.
@@ -644,12 +646,12 @@ mod tests {
     }
 
     #[test]
-    fn app_initializes_with_one_empty_session() {
+    fn app_initializes_with_one_empty_tab() {
         let app = AppState::default();
-        assert_eq!(app.sessions.len(), 1);
-        let active = app.active_session_state().unwrap();
-        assert!(active.assigned_device_id.is_none());
-        assert!(active.acquisition.is_none());
+        assert_eq!(app.tabs.len(), 1);
+        let active = app.active_tab_state().unwrap();
+        assert!(active.assigned_device_id().is_none());
+        assert!(active.acquisition().is_none());
         assert!(app.device_manager.scan_results.is_empty());
     }
 
@@ -663,27 +665,27 @@ mod tests {
     }
 
     #[test]
-    fn connect_adds_device_to_active_session() {
+    fn connect_adds_device_to_active_tab() {
         let mut app = AppState::default();
         let demo = scan_for_demo(&app);
-        let session_id = app.active_session;
-        let did = app.connect_and_assign(session_id, &demo).unwrap();
+        let tab_id = app.active_tab;
+        let did = app.connect_and_assign(tab_id, &demo).unwrap();
         assert!(app.device_manager.is_connected(&did));
-        let active = app.active_session_state().unwrap();
-        assert_eq!(active.assigned_device_id, Some(did));
+        let active = app.active_tab_state().unwrap();
+        assert_eq!(active.assigned_device_id().cloned(), Some(did));
     }
 
     #[test]
-    fn disconnect_removes_device_from_session() {
+    fn disconnect_removes_device_from_tab() {
         let mut app = AppState::default();
         let demo = scan_for_demo(&app);
-        let session_id = app.active_session;
-        let did = app.connect_and_assign(session_id, &demo).unwrap();
+        let tab_id = app.active_tab;
+        let did = app.connect_and_assign(tab_id, &demo).unwrap();
 
-        app.disconnect_blocking(session_id);
-        let active = app.active_session_state().unwrap();
-        assert!(active.assigned_device_id.is_none());
-        assert!(active.acquisition.is_none());
+        app.disconnect_blocking(tab_id);
+        let active = app.active_tab_state().unwrap();
+        assert!(active.assigned_device_id().is_none());
+        assert!(active.acquisition().is_none());
         assert!(!app.device_manager.is_connected(&did));
     }
 
@@ -691,16 +693,16 @@ mod tests {
     fn start_spawns_and_pumps_samples() {
         let mut app = AppState::default();
         let demo = scan_for_demo(&app);
-        let session_id = app.active_session;
+        let tab_id = app.active_tab;
 
         // Connect and assign the device.
-        let _did = app.connect_and_assign(session_id, &demo).unwrap();
+        let _did = app.connect_and_assign(tab_id, &demo).unwrap();
 
         // Start acquisition.
-        app.start_blocking(session_id);
+        app.start_blocking(tab_id);
 
-        let active = app.active_session_state().unwrap();
-        assert!(active.acquisition.is_some());
+        let active = app.active_tab_state().unwrap();
+        assert!(active.acquisition().is_some());
 
         // Drive the pool repeatedly.
         for _ in 0..10 {
@@ -709,33 +711,33 @@ mod tests {
         }
 
         // Drain data.
-        if let Some(active) = app.sessions.get_mut(&session_id) {
-            if let Some(acq) = active.acquisition.as_mut() {
+        if let Some(active) = app.tabs.get_mut(&tab_id) {
+            if let Some(acq) = active.acquisition_mut() {
                 acq.drain();
             }
         }
 
-        let active = app.active_session_state().unwrap();
-        if let Some(acq) = active.acquisition.as_ref() {
+        let active = app.active_tab_state().unwrap();
+        if let Some(acq) = active.acquisition() {
             assert!(acq.sample_count() > 0, "expected samples after pump, got {}", acq.sample_count());
         }
     }
 
     #[test]
-    fn create_and_close_sessions() {
+    fn create_and_close_tabs() {
         let mut app = AppState::default();
-        let initial = app.active_session;
-        assert_eq!(app.sessions.len(), 1);
+        let initial = app.active_tab;
+        assert_eq!(app.tabs.len(), 1);
 
-        // Create a second session.
-        let id2 = app.create_session("Test 2");
-        assert_eq!(app.active_session, id2);
-        assert_eq!(app.sessions.len(), 2);
+        // Create a second tab.
+        let id2 = app.create_tab("Test 2");
+        assert_eq!(app.active_tab, id2);
+        assert_eq!(app.tabs.len(), 2);
 
-        // Close the active session (Test 2), should fall back to initial.
-        app.close_session(id2);
-        assert_eq!(app.sessions.len(), 1);
-        assert_eq!(app.active_session, initial);
+        // Close the active tab (Test 2), should fall back to initial.
+        app.close_tab(id2);
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.active_tab, initial);
     }
 
     fn scan_for_demo(app: &AppState) -> rb_core::ScanResult {

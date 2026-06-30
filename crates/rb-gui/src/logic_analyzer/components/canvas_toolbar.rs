@@ -3,14 +3,14 @@
 
 use dioxus::prelude::*;
 use rb_core::AcquisitionState;
-use crate::waveform_state::WaveformView;
+use crate::logic_analyzer::view::WaveformView;
 
-use super::app::AppStateRef;
+use crate::components::app::AppStateRef;
 
 /// Toolbar above the canvas with acquisition controls and marker buttons.
 #[component]
 pub fn CanvasToolbar(
-    session_id: crate::session_state::SessionId,
+    tab_id: crate::tab_state::TabId,
     view: Signal<WaveformView>,
     cursor_sample_pos: Signal<Option<u64>>,
     data_version: Signal<u64>,
@@ -20,9 +20,9 @@ pub fn CanvasToolbar(
 
     let (acq_state, sample_count) = {
         let s = state.borrow();
-        if let Some(acq) = s.acq_for_session(session_id) {
+        if let Some(acq) = s.acq_for_tab(tab_id) {
             (acq.state().clone(), acq.sample_count())
-        } else if let Some(handle) = s.handle_for_session(session_id) {
+        } else if let Some(handle) = s.handle_for_tab(tab_id) {
             (handle.state().clone(), handle.sample_count())
         } else {
             (AcquisitionState::Idle, 0)
@@ -40,9 +40,9 @@ pub fn CanvasToolbar(
                     title: "Stop acquisition",
                     onclick: {
                         let state = state.clone();
-                        let sid = session_id;
+                        let tid = tab_id;
                         move |_| {
-                            state.borrow_mut().stop_blocking(sid);
+                            state.borrow_mut().stop_blocking(tid);
                             data_version += 1;
                         }
                     },
@@ -55,9 +55,9 @@ pub fn CanvasToolbar(
                     title: "Start acquisition",
                     onclick: {
                         let state = state.clone();
-                        let sid = session_id;
+                        let tid = tab_id;
                         move |_| {
-                            state.borrow_mut().start_blocking(sid);
+                            state.borrow_mut().start_blocking(tid);
                             data_version.set(data_version() + 1);
                         }
                     },

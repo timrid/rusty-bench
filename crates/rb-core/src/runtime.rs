@@ -103,29 +103,48 @@ where
                                     let _ = tx.unbounded_send(chunk);
                                 }
                             }
-                            // Wait for re-arm or channel close.
+                            // Wait for re-arm, read-loop exit, or channel close.
+                            // Must also poll read_loop so it can exit and return
+                            // its transport (needed for re-arm on drivers like fx2lafw).
                             loop {
-                                match commands.next().await {
-                                    Some(AcquisitionCommand::Start) => {
-                                        info!("re-arming device");
-                                        match handle.start_streaming().await {
-                                            Ok((rl, rx)) => {
-                                                read_loop = rl.fuse();
-                                                data_rx = rx.fuse();
-                                                break; // back to streaming select!
+                                futures::select! {
+                                    cmd = commands.next() => {
+                                        match cmd {
+                                            Some(AcquisitionCommand::Start) => {
+                                                info!("re-arming device");
+                                                match handle.start_streaming().await {
+                                                    Ok((rl, rx)) => {
+                                                        read_loop = rl.fuse();
+                                                        data_rx = rx.fuse();
+                                                        break; // back to streaming select!
+                                                    }
+                                                    Err(e) => {
+                                                        handle.mark_error(e.to_string());
+                                                        return handle;
+                                                    }
+                                                }
                                             }
-                                            Err(e) => {
-                                                handle.mark_error(e.to_string());
-                                                return handle;
+                                            Some(cmd) => {
+                                                if let Err(e) = handle.apply(cmd).await {
+                                                    handle.mark_error(e.to_string());
+                                                }
+                                            }
+                                            None => return handle,
+                                        }
+                                    }
+                                    // Drain any late-arriving data while stopped.
+                                    chunk = data_rx.next() => {
+                                        if let Some(chunk) = chunk {
+                                            handle.ingest_chunk(&chunk);
+                                            if let Some(ref tx) = gui_tx {
+                                                let _ = tx.unbounded_send(chunk);
                                             }
                                         }
                                     }
-                                    Some(cmd) => {
-                                        if let Err(e) = handle.apply(cmd).await {
-                                            handle.mark_error(e.to_string());
-                                        }
+                                    // Read loop may exit after stop; let it complete.
+                                    _ = read_loop => {
+                                        debug!("read loop exited after stop");
                                     }
-                                    None => return handle,
                                 }
                             }
                         }
@@ -154,29 +173,41 @@ where
                         let _ = tx.unbounded_send(chunk);
                     }
                 }
-                // Wait for re-arm or close.
+                // Wait for re-arm or close.  Also drain any late data.
                 loop {
-                    match commands.next().await {
-                        Some(AcquisitionCommand::Start) => {
-                            info!("re-arming after read loop exit");
-                            match handle.start_streaming().await {
-                                Ok((rl, rx)) => {
-                                    read_loop = rl.fuse();
-                                    data_rx = rx.fuse();
-                                    break; // back to streaming select!
+                    futures::select! {
+                        cmd = commands.next() => {
+                            match cmd {
+                                Some(AcquisitionCommand::Start) => {
+                                    info!("re-arming after read loop exit");
+                                    match handle.start_streaming().await {
+                                        Ok((rl, rx)) => {
+                                            read_loop = rl.fuse();
+                                            data_rx = rx.fuse();
+                                            break; // back to streaming select!
+                                        }
+                                        Err(e) => {
+                                            handle.mark_error(e.to_string());
+                                            return handle;
+                                        }
+                                    }
                                 }
-                                Err(e) => {
-                                    handle.mark_error(e.to_string());
-                                    return handle;
+                                Some(cmd) => {
+                                    if let Err(e) = handle.apply(cmd).await {
+                                        handle.mark_error(e.to_string());
+                                    }
+                                }
+                                None => return handle,
+                            }
+                        }
+                        chunk = data_rx.next() => {
+                            if let Some(chunk) = chunk {
+                                handle.ingest_chunk(&chunk);
+                                if let Some(ref tx) = gui_tx {
+                                    let _ = tx.unbounded_send(chunk);
                                 }
                             }
                         }
-                        Some(cmd) => {
-                            if let Err(e) = handle.apply(cmd).await {
-                                handle.mark_error(e.to_string());
-                            }
-                        }
-                        None => return handle,
                     }
                 }
             }

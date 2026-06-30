@@ -10,12 +10,12 @@ use rb_core::AcquisitionState;
 use rb_decode::AnnotationKind;
 use rb_model::AnalogTrace;
 
-use crate::waveform_state::{
+use crate::logic_analyzer::view::{
     RowKind, TimeMarker, WaveformView, DIVIDER_H, LABEL_W,
     MARKER_BAR_H, MEASUREMENT_ZONE_H, TIME_RULER_H,
 };
 
-use super::app::AppStateRef;
+use crate::components::app::AppStateRef;
 
 // ── Colors ───────────────────────────────────────────────────────────────────
 
@@ -73,7 +73,7 @@ fn fmt_time_ns(ns: f64) -> String {
 
 #[component]
 pub fn WaveformCanvas(
-    session_id: crate::session_state::SessionId,
+    tab_id: crate::tab_state::TabId,
     data_version: Signal<u64>,
     mut view: Signal<WaveformView>,
     mut cursor_sample_pos: Signal<Option<u64>>,
@@ -84,10 +84,10 @@ pub fn WaveformCanvas(
     // ── Gather data ───────────────────────────────────────────────────────
     let (acq_state, analog, digital, sample_count) = {
         let s = state.borrow();
-        if let Some(acq) = s.acq_for_session(session_id) {
+        if let Some(acq) = s.acq_for_tab(tab_id) {
             (acq.state().clone(), acq.analog_traces().to_vec(),
              acq.digital_trace().cloned(), acq.sample_count())
-        } else if let Some(h) = s.handle_for_session(session_id) {
+        } else if let Some(h) = s.handle_for_tab(tab_id) {
             (h.state().clone(), h.analog_traces().to_vec(),
              h.digital_trace().cloned(), h.sample_count())
         } else { (AcquisitionState::Idle, Vec::new(), None, 0) }
@@ -112,7 +112,7 @@ pub fn WaveformCanvas(
         v.rebuild_rows(analog.len(), dcc);
         if let Some(ref dt) = digital { v.feed_decoder(dt); }
     }
-    { let mut s = state.borrow_mut(); if let Some(session_state) = s.sessions.get_mut(&session_id) { session_state.view = view.read().clone(); } }
+    { let mut s = state.borrow_mut(); if let Some(tab) = s.tabs.get_mut(&tab_id) { *tab.view_mut() = view.read().clone(); } }
 
     // ── Derived ───────────────────────────────────────────────────────────
     let rows = view.read().rows.clone();
@@ -123,7 +123,7 @@ pub fn WaveformCanvas(
     let sample_rate_hz = 1_000_000.0; // TODO: real sample rate
     let tick_elements = compute_ticks(range_start, range_end, range_len, sample_rate_hz);
 
-    let short_id = format!("sess-{}", session_id.0);
+    let short_id = format!("tab-{}", tab_id.0);
 
     // ── Single drawing effect ─────────────────────────────────────────────
     {
@@ -131,16 +131,16 @@ pub fn WaveformCanvas(
         let data_version = data_version;
         let sample_count_sig = sample_count_sig;
         let state = state.clone();
-        let sid = session_id;
+        let tid = tab_id;
         let view = view;
         use_effect(move || {
             let _ver = data_version();
             let sc = sample_count_sig();
             let (analog, digital) = {
                 let s = state.borrow();
-                if let Some(acq) = s.acq_for_session(sid) {
+                if let Some(acq) = s.acq_for_tab(tid) {
                     (acq.analog_traces().to_vec(), acq.digital_trace().cloned())
-                } else if let Some(h) = s.handle_for_session(sid) {
+                } else if let Some(h) = s.handle_for_tab(tid) {
                     (h.analog_traces().to_vec(), h.digital_trace().cloned())
                 } else { (Vec::new(), None) }
             };
@@ -560,7 +560,7 @@ fn draw_all_canvases(
     short_id: &str,
     analog: &[AnalogTrace],
     digital: &Option<rb_model::DigitalTrace>,
-    rows: &[crate::waveform_state::RowDescriptor],
+    rows: &[crate::logic_analyzer::view::RowDescriptor],
     annotations: &[rb_decode::Annotation],
     range_start: usize,
     range_end: usize,
@@ -642,7 +642,7 @@ fn wrap_with_resize_observer(js: String) -> String {
 fn build_analog_signal(
     canvas: &mut dyn Canvas, trace: &AnalogTrace,
     range_start: usize, range_end: usize, range_len: f64,
-    row: &crate::waveform_state::RowDescriptor, color: &RgbaColor,
+    row: &crate::logic_analyzer::view::RowDescriptor, color: &RgbaColor,
     signal_width: f64,
 ) {
     let sig_h = row.signal_height_px;
@@ -852,7 +852,7 @@ fn build_analog_envelope(
 fn build_digital_signal(
     canvas: &mut dyn Canvas, dt: &rb_model::DigitalTrace, bit: usize,
     range_start: usize, range_end: usize, range_len: f64,
-    row: &crate::waveform_state::RowDescriptor,
+    row: &crate::logic_analyzer::view::RowDescriptor,
     signal_width: f64,
 ) {
     let sig_h = row.signal_height_px;
@@ -924,7 +924,7 @@ fn build_digital_signal(
 fn build_decoder_signal(
     canvas: &mut dyn Canvas, annotations: &[rb_decode::Annotation],
     range_start: usize, range_end: usize, range_len: f64,
-    row: &crate::waveform_state::RowDescriptor,
+    row: &crate::logic_analyzer::view::RowDescriptor,
 ) {
     let sig_h = row.signal_height_px;
     canvas.set_fill_style(&DECODER_BG_RGBA);
@@ -965,7 +965,7 @@ mod tests {
         DigitalChannel, DigitalTrace,
         ChannelId, Timebase,
     };
-    use crate::waveform_state::{RowDescriptor, RowKind};
+    use crate::logic_analyzer::view::{RowDescriptor, RowKind};
 
     // ── Helpers ──────────────────────────────────────────────────────────
 

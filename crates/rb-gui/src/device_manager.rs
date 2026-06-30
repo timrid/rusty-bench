@@ -151,6 +151,19 @@ impl DeviceManager {
         self.connected.remove(device_id);
     }
 
+    /// Returns true if a device matching this scan result is connected.
+    /// DeviceId is derived from the candidate address, so we can look it up directly.
+    pub fn is_connected_result(&self, result: &ScanResult) -> bool {
+        let did = DeviceId::new(&result.candidate.address);
+        self.connected.contains_key(&did)
+    }
+
+    /// Returns the DeviceId for a connected scan result, if any.
+    pub fn device_id_for_result(&self, result: &ScanResult) -> Option<DeviceId> {
+        let did = DeviceId::new(&result.candidate.address);
+        self.connected.get(&did).map(|_| did)
+    }
+
     /// Returns true if the device is connected (handle may be borrowed).
     pub fn is_connected(&self, device_id: &DeviceId) -> bool {
         self.connected.contains_key(device_id)

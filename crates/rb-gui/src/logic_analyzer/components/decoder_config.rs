@@ -2,7 +2,7 @@
 
 use dioxus::prelude::*;
 
-use crate::waveform_state::{DecoderKind, WaveformView};
+use crate::logic_analyzer::view::{DecoderKind, WaveformView};
 
 /// Decoder kind selector and per-decoder configuration controls.
 #[component]

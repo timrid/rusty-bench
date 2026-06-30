@@ -1,12 +1,12 @@
-//! Top bar: Device dropdown (left) | Session tab bar (center) | Settings icon (right).
+//! Top bar: Device dropdown (left) | Tab bar (center) | Settings icon (right).
 //!
 //! The device dropdown lists all scanned devices with connection status.
-//! A device is connected once at the program level and shared across sessions.
+//! A device is connected once at the program level and shared across tabs.
 
 use dioxus::prelude::*;
 use rb_device::DeviceId;
 
-use crate::session_state::SessionId;
+use crate::tab_state::TabId;
 
 use super::app::AppStateRef;
 
@@ -18,38 +18,38 @@ pub fn TopBar(data_version: Signal<u64>) -> Element {
 
     let s = state.borrow();
 
-    let session_ids: Vec<SessionId> = {
-        let mut ids: Vec<SessionId> = s.sessions.keys().copied().collect();
+    let tab_ids: Vec<TabId> = {
+        let mut ids: Vec<TabId> = s.tabs.keys().copied().collect();
         ids.sort_by_key(|id| id.0);
         ids
     };
-    let active_session = s.active_session;
+    let active_tab = s.active_tab;
 
     let scan_results = s.device_manager.scan_results.clone();
     let scan_error = s.device_manager.scan_error.clone();
     let connect_error = s.device_manager.connect_error.clone();
 
-    // Build session tab infos.
-    let tabs: Vec<_> = session_ids
+    // Build tab infos.
+    let tabs: Vec<_> = tab_ids
         .iter()
         .map(|&id| {
-            let label = s.sessions.get(&id).map(|ss| ss.label.clone()).unwrap_or_default();
-            let is_active = id == active_session;
-            let is_running = s.sessions.get(&id).is_some_and(|ss| ss.is_running());
+            let label = s.tabs.get(&id).map(|t| t.label.clone()).unwrap_or_default();
+            let is_active = id == active_tab;
+            let is_running = s.tabs.get(&id).is_some_and(|t| t.is_running());
             (id, label, is_active, is_running)
         })
         .collect();
 
-    // Current device label for the active session (shown in dropdown).
+    // Current device label for the active tab (shown in dropdown).
     let active_device_label = s
-        .active_session_state()
-        .map(|ss| ss.label.clone())
+        .active_tab_state()
+        .map(|t| t.label.clone())
         .filter(|l| l != "Untitled");
 
-    // DeviceId of the active session (for highlighting in dropdown).
+    // DeviceId of the active tab (for highlighting in dropdown).
     let active_device_id = s
-        .active_session_state()
-        .and_then(|ss| ss.assigned_device_id.clone());
+        .active_tab_state()
+        .and_then(|t| t.assigned_device_id().cloned());
 
     // Set of connected device IDs (for status icons).
     let connected_ids: Vec<DeviceId> = s.device_manager.connected_device_ids();
@@ -71,10 +71,10 @@ pub fn TopBar(data_version: Signal<u64>) -> Element {
 
             div { class: "w-px bg-zinc-800 h-full" }
 
-            // ── Session Tab Bar ──────────────────────────────────────────
-            SessionTabBar {
+            // ── Tab Bar ──────────────────────────────────────────────────
+            TabBar {
                 tabs,
-                active_session,
+                active_tab,
                 data_version,
             }
 
@@ -114,15 +114,11 @@ fn DeviceDropdown(
             let driver = sr.driver.clone();
             let address = sr.candidate.address.clone();
             let scan_result = sr.clone();
-            // Determine connection status for this candidate.
-            // We match by checking if any connected device has this driver name.
-            // (A more precise match would compare DeviceId, but ScanResult doesn't carry one.)
-            let is_connected = connected_ids.iter().any(|did| {
-                // Heuristic: device label contains the driver name
-                state.borrow().device_manager.device_label(did)
-                    .map(|l| l.to_lowercase().contains(&driver.to_lowercase()))
-                    .unwrap_or(false)
-            });
+            // Determine connection status via DeviceManager's direct mapping.
+            let is_connected = state
+                .borrow()
+                .device_manager
+                .is_connected_result(&scan_result);
             // Check if this is the device used by the active session.
             let is_active_device = active_device_id.as_ref().is_some_and(|active_did| {
                 connected_ids.contains(active_did) && is_connected
@@ -214,25 +210,14 @@ fn DeviceDropdown(
                                     key: "{driver}-{address}",
                                     class: "{row_class}",
                                     onclick: move |_| {
-                                        let session_id = state.borrow().active_session;
-                                        // Connect (if not already) and assign to session.
+                                        let tab_id = state.borrow().active_tab;
                                         if !is_connected {
-                                            let _ = state.borrow_mut().connect_and_assign(session_id, &sr);
+                                            let _ = state.borrow_mut().connect_and_assign(tab_id, &sr);
                                         } else {
-                                            // Already connected — just assign to this session.
-                                            // Find the DeviceId from connected_ids that matches.
-                                            let did = {
-                                                let s = state.borrow();
-                                                s.device_manager.connected_device_ids()
-                                                    .into_iter()
-                                                    .find(|did| {
-                                                        s.device_manager.device_label(did)
-                                                            .map(|l| l.to_lowercase().contains(&driver.to_lowercase()))
-                                                            .unwrap_or(false)
-                                                    })
-                                            };
+                                            // Already connected — assign the existing DeviceId.
+                                            let did = state.borrow().device_manager.device_id_for_result(&sr);
                                             if let Some(did) = did {
-                                                state.borrow_mut().assign_device_to_session(session_id, did);
+                                                state.borrow_mut().assign_device_to_tab(tab_id, did);
                                             }
                                         }
                                         data_version += 1;
@@ -251,12 +236,12 @@ fn DeviceDropdown(
     }
 }
 
-// ── Session Tab Bar ───────────────────────────────────────────────────────────
+// ── Tab Bar ───────────────────────────────────────────────────────────────────
 
 #[component]
-fn SessionTabBar(
-    tabs: Vec<(SessionId, String, bool, bool)>,
-    active_session: SessionId,
+fn TabBar(
+    tabs: Vec<(TabId, String, bool, bool)>,
+    active_tab: TabId,
     data_version: Signal<u64>,
 ) -> Element {
     let state: AppStateRef = use_context();
@@ -279,7 +264,7 @@ fn SessionTabBar(
                             onclick: {
                                 let state = state.clone();
                                 move |_| {
-                                    state.borrow_mut().active_session = id;
+                                    state.borrow_mut().active_tab = id;
                                     data_version += 1;
                                 }
                             },
@@ -293,12 +278,12 @@ fn SessionTabBar(
                             if !is_running {
                                 button {
                                     class: "ml-1 text-zinc-600 hover:text-red-400 rounded hover:bg-zinc-700/50 transition-colors flex-shrink-0",
-                                    title: "Close session",
+                                    title: "Close tab",
                                     onclick: {
                                         let state = state.clone();
                                         move |evt| {
                                             evt.stop_propagation();
-                                            state.borrow_mut().close_session(id);
+                                            state.borrow_mut().close_tab(id);
                                             data_version += 1;
                                         }
                                     },
@@ -313,19 +298,19 @@ fn SessionTabBar(
             // "+" New Tab button
             button {
                 class: "px-2 py-1 text-xs text-zinc-600 hover:text-zinc-300 hover:bg-zinc-800/50 rounded transition-colors flex-shrink-0",
-                title: "New session",
+                title: "New tab",
                 onclick: {
                     let state = state.clone();
                     move |_| {
-                        // Inherit the device from the currently active session.
+                        // Inherit the device from the currently active tab.
                         let assigned_device_id = state
                             .borrow()
-                            .active_session_state()
-                            .and_then(|ss| ss.assigned_device_id.clone());
+                            .active_tab_state()
+                            .and_then(|t| t.assigned_device_id().cloned());
                         let mut s = state.borrow_mut();
-                        let new_id = s.create_session("Untitled");
+                        let new_id = s.create_tab("Untitled");
                         if let Some(ref did) = assigned_device_id {
-                            s.assign_device_to_session(new_id, did.clone());
+                            s.assign_device_to_tab(new_id, did.clone());
                         }
                         data_version += 1;
                     }

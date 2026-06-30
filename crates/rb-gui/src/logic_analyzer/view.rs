@@ -3,7 +3,7 @@
 //!
 //! [`WaveformView`] holds the visible sample window (pan/zoom state) for one
 //! connected device and manages the protocol-decoder lifecycle. Drawing is
-//! handled by the canvas component in [`super::components::waveform_canvas`].
+//! handled by the canvas component in [`components::waveform_canvas`].
 //!
 //! # Pan / zoom
 //! - Scroll wheel over the panel: zoom in/out around the view centre.

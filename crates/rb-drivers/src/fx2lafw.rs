@@ -29,7 +29,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
-use futures::channel::mpsc;
+use futures::channel::{mpsc, oneshot};
 
 use rb_device::{
     AcquisitionSource, Device, DeviceClass, DeviceError, DeviceId, DeviceInfo, DeviceResult,
@@ -254,6 +254,9 @@ pub struct Fx2lafwDevice {
     arm_flags: u8,
     /// Pre-computed arm state: GPIF delay (set by `arm()`).
     arm_delay: u16,
+    /// Receiver for the transport returned by a completed read-loop.
+    /// Populated by [`start_streaming`]; awaited on re-arm.
+    pending_transport: Option<oneshot::Receiver<Box<dyn UsbTransport>>>,
 }
 
 impl Fx2lafwDevice {
@@ -292,6 +295,7 @@ impl Fx2lafwDevice {
             running: Arc::new(AtomicBool::new(false)),
             arm_flags: 0,
             arm_delay: 0,
+            pending_transport: None,
         }
     }
 
@@ -465,10 +469,14 @@ impl LogicAnalyzer for Fx2lafwDevice {
         // Reset the bulk-IN pipe before starting acquisition.  After a fresh
         // plug-in, the first WinUsb_ReadPipe after CMD_START_ACQ works, but
         // the second may hang forever.  WinUsb_ResetPipe clears this condition.
-        self.transport_mut()
-            .clear_in_halt()
-            .await
-            .map_err(|e| DeviceError::Transport(format!("clear_in_halt before arm: {e}")))?;
+        // On re-arm the transport is still in-flight via the oneshot return
+        // channel; skip the halt clear in that case.
+        if let Some(transport) = self.transport.as_mut() {
+            transport
+                .clear_in_halt()
+                .await
+                .map_err(|e| DeviceError::Transport(format!("clear_in_halt before arm: {e}")))?;
+        }
 
         // Compute delay and flags now, but defer the actual GPIF start
         // to `start_streaming()`.  This lets `start_streaming()` queue all
@@ -498,11 +506,22 @@ impl AcquisitionSource for Fx2lafwDevice {
         &mut self,
         chunk_tx: mpsc::UnboundedSender<SampleChunk>,
     ) -> DeviceResult<Pin<Box<dyn Future<Output = ()>>>> {
-        // Take ownership of transport and state for the read loop.
-        let mut transport = self
-            .transport
-            .take()
-            .ok_or_else(|| DeviceError::Protocol("acquisition already running".into()))?;
+        // Take ownership of transport for the read loop.
+        // On re-arm after stop, wait for the previous read-loop to return it.
+        let mut transport = match self.transport.take() {
+            Some(t) => t,
+            None => {
+                self.pending_transport
+                    .take()
+                    .ok_or_else(|| {
+                        DeviceError::Protocol(
+                            "transport not available (acquisition already running?)".into(),
+                        )
+                    })?
+                    .await
+                    .map_err(|_| DeviceError::Protocol("transport channel closed".into()))?
+            }
+        };
         let sample_wide = self.sample_wide;
         let running = self.running.clone();
         let arm_flags = self.arm_flags;
@@ -516,6 +535,10 @@ impl AcquisitionSource for Fx2lafwDevice {
             "fx2lafw: adaptive buffer: {} transfers × {} bytes (rate={:.0} Hz, wide={})",
             num_transfers, buffer_size, sample_rate_hz, sample_wide
         );
+
+        // Channel to return the transport when the read-loop exits (re-arm support).
+        let (return_tx, return_rx) = oneshot::channel();
+        self.pending_transport = Some(return_rx);
 
         let fut = async move {
             let mut buf = Vec::new();
@@ -597,6 +620,11 @@ impl AcquisitionSource for Fx2lafwDevice {
             }
 
             running.store(false, Ordering::SeqCst);
+            // Cancel any remaining pending bulk-IN transfers so the pipe is
+            // clean for the next acquisition (re-arm support).
+            let _ = transport.clear_in_halt().await;
+            // Return the transport so it can be reused on re-arm.
+            let _ = return_tx.send(transport);
         };
 
         Ok(Box::pin(fut))
