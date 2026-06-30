@@ -4,6 +4,7 @@
 //! A device is connected once at the program level and shared across tabs.
 
 use dioxus::prelude::*;
+use rb_core::DeviceHandle;
 use rb_device::DeviceId;
 
 use crate::tab_state::TabId;
@@ -210,18 +211,51 @@ fn DeviceDropdown(
                                     key: "{driver}-{address}",
                                     class: "{row_class}",
                                     onclick: move |_| {
+                                        let state = state.clone();
+                                        let sr = sr.clone();
+                                        let is_connected = is_connected;
                                         let tab_id = state.borrow().active_tab;
                                         if !is_connected {
-                                            let _ = state.borrow_mut().connect_and_assign(tab_id, &sr);
+                                            // Phase 1: clone registry, drop borrow, connect async.
+                                            let registry = state.borrow().device_manager.registry().clone();
+                                            let driver = sr.driver.clone();
+                                            let candidate = sr.candidate.clone();
+                                            spawn(async move {
+                                                let result = registry.connect(&driver, &candidate).await;
+                                                // Phase 2: brief borrow to store and assign.
+                                                match result {
+                                                    Ok(device) => {
+                                                        let label = format!("{}/{}", device.info().vendor, device.info().model);
+                                                        let id = device.id().clone();
+                                                        let handle = DeviceHandle::new(device);
+                                                        let content = crate::logic_analyzer::init_content(handle.device());
+                                                        let mut s = state.borrow_mut();
+                                                        s.device_manager.store_connected(id.clone(), handle, label);
+                                                        s.assign_device_to_tab(tab_id, id.clone());
+                                                        if let Some(tab) = s.tabs.get_mut(&tab_id) {
+                                                            tab.content = Some(crate::tab_content::TabContent::LogicAnalyzer(content));
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        state.borrow_mut().device_manager.connect_error = Some(e.to_string());
+                                                    }
+                                                }
+                                                data_version += 1;
+                                                open.set(false);
+                                            });
                                         } else {
                                             // Already connected — assign the existing DeviceId.
                                             let did = state.borrow().device_manager.device_id_for_result(&sr);
                                             if let Some(did) = did {
-                                                state.borrow_mut().assign_device_to_tab(tab_id, did);
+                                                let mut s = state.borrow_mut();
+                                                s.assign_device_to_tab(tab_id, did.clone());
+                                                if let Some(tab) = s.tabs.get_mut(&tab_id) {
+                                                    tab.content = Some(crate::logic_analyzer::default_content());
+                                                }
                                             }
+                                            data_version += 1;
+                                            open.set(false);
                                         }
-                                        data_version += 1;
-                                        open.set(false);
                                     },
                                     span { class: "text-[10px] {status_color} flex-shrink-0", "{status_icon}" }
                                     span { class: "text-zinc-400 font-mono text-[10px] truncate", "{driver}" }

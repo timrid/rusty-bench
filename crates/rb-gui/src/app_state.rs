@@ -6,21 +6,17 @@
 
 use std::collections::HashMap;
 
-use rb_core::{
-    AcquisitionCommand, AcquisitionState, DeviceHandle,
-};
+use rb_core::DeviceHandle;
 use rb_device::DeviceId;
 
-use crate::logic_analyzer::acquisition::{AcquisitionConfig, DeviceAcquisition};
 use crate::logic_analyzer::control;
-use crate::tab_content::{LogicAnalyzerContent, TabContent};
 use crate::device_manager::DeviceManager;
 use crate::tab_state::{TabId, TabSource, TabState};
 
 // Executors: tokio LocalSet when native feature is enabled (non-wasm),
 // LocalPool otherwise (non-wasm tests only; WASM uses wasm-bindgen-futures).
 #[cfg(not(any(feature = "native", target_arch = "wasm32")))]
-use {futures::executor::LocalPool, futures::executor::LocalSpawner, futures::task::LocalSpawnExt};
+use {futures::executor::LocalPool, futures::executor::LocalSpawner};
 #[cfg(feature = "native")]
 use tokio::task::LocalSet;
 
@@ -51,9 +47,6 @@ pub struct AppState {
     pub pending_disconnect: Option<TabId>,
     pub pending_start: Option<TabId>,
     pub pending_stop: Option<TabId>,
-    /// Tab that initiated a WASM async connect (assign device on completion).
-    #[cfg(target_arch = "wasm32")]
-    pub pending_wasm_assign: Option<TabId>,
 }
 
 impl AppState {
@@ -77,7 +70,7 @@ impl AppState {
         let device_ids = device_manager.connected_device_ids();
         if let Some(did) = device_ids.into_iter().next() {
             tab.source = TabSource::Device(did.clone());
-            tab.content = Some(TabContent::LogicAnalyzer(LogicAnalyzerContent::default()));
+            tab.content = Some(crate::logic_analyzer::default_content());
             if let Some(label) = device_manager.device_label(&did) {
                 tab.label = label.to_string();
             }
@@ -100,8 +93,6 @@ impl AppState {
             pending_disconnect: None,
             pending_start: None,
             pending_stop: None,
-            #[cfg(target_arch = "wasm32")]
-            pending_wasm_assign: None,
         }
     }
 
@@ -142,47 +133,12 @@ impl AppState {
     }
 
     /// Assigns a device (by [`DeviceId`]) to a tab and updates the tab label.
-    /// Also builds the initial [`AcquisitionConfig`] from the device's capabilities
-    /// and sets the [`TabContent`] to [`TabContent::LogicAnalyzer`].
+    /// The caller is responsible for setting the appropriate [`TabContent`].
     pub fn assign_device_to_tab(&mut self, tab_id: TabId, device_id: DeviceId) {
         if let Some(tab) = self.tabs.get_mut(&tab_id) {
             tab.source = TabSource::Device(device_id.clone());
-            // Build config from device capabilities.
-            if let Some(handle) = self.device_manager.device_handle(&device_id) {
-                let config = AcquisitionConfig::from_device(handle.device());
-                tab.content = Some(TabContent::LogicAnalyzer(LogicAnalyzerContent {
-                    acquisition_config: config,
-                    ..LogicAnalyzerContent::default()
-                }));
-            } else {
-                tab.content = Some(TabContent::default());
-            }
-            // Update label from device info.
             if let Some(label) = self.device_manager.device_label(&device_id) {
                 tab.label = label.to_string();
-            }
-        }
-    }
-
-    /// Connects to a device candidate and assigns it to the given tab.
-    /// Returns the [`DeviceId`] on success.
-    pub fn connect_and_assign(
-        &mut self,
-        tab_id: TabId,
-        scan_result: &rb_core::ScanResult,
-    ) -> Result<DeviceId, rb_core::SessionError> {
-        match self.device_manager.connect_blocking(scan_result) {
-            Ok(device_id) => {
-                self.assign_device_to_tab(tab_id, device_id.clone());
-                Ok(device_id)
-            }
-            Err(e) => {
-                // On WASM, connect is async — remember the tab for later assignment.
-                #[cfg(target_arch = "wasm32")]
-                {
-                    self.pending_wasm_assign = Some(tab_id);
-                }
-                Err(e)
             }
         }
     }
@@ -220,19 +176,6 @@ impl AppState {
     pub fn apply_pending_actions(&mut self) {
         self.device_manager.apply_pending_actions();
         self.device_manager.collect_returns();
-
-        // On WASM: if an async connect just completed, assign the device to the tab.
-        #[cfg(target_arch = "wasm32")]
-        if let Some(tab_id) = self.pending_wasm_assign {
-            for did in self.device_manager.connected_device_ids() {
-                let already_assigned = self.tabs.values().any(|t| t.assigned_device_id() == Some(&did));
-                if !already_assigned {
-                    self.assign_device_to_tab(tab_id, did);
-                    self.pending_wasm_assign = None;
-                    break;
-                }
-            }
-        }
 
         if let Some(tab_id) = self.pending_disconnect.take() {
             self.close_tab(tab_id);
@@ -311,7 +254,6 @@ impl AppState {
     #[cfg(target_arch = "wasm32")]
     pub fn wasm_pending(&self) -> bool {
         self.device_manager.pending_wasm_scan.is_some()
-            || self.device_manager.pending_wasm_connect.is_some()
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -404,7 +346,7 @@ mod tests {
         let mut app = AppState::default();
         let demo = scan_for_demo(&app);
         let tab_id = app.active_tab;
-        let did = app.connect_and_assign(tab_id, &demo).unwrap();
+        let did = block_on(connect_and_assign(&mut app, tab_id, &demo)).unwrap();
         assert!(app.device_manager.is_connected(&did));
         let active = app.active_tab_state().unwrap();
         assert_eq!(active.assigned_device_id().cloned(), Some(did));
@@ -415,7 +357,7 @@ mod tests {
         let mut app = AppState::default();
         let demo = scan_for_demo(&app);
         let tab_id = app.active_tab;
-        let did = app.connect_and_assign(tab_id, &demo).unwrap();
+        let did = block_on(connect_and_assign(&mut app, tab_id, &demo)).unwrap();
 
         app.disconnect_blocking(tab_id);
         let active = app.active_tab_state().unwrap();
@@ -431,7 +373,7 @@ mod tests {
         let tab_id = app.active_tab;
 
         // Connect and assign the device.
-        let _did = app.connect_and_assign(tab_id, &demo).unwrap();
+        let _did = block_on(connect_and_assign(&mut app, tab_id, &demo)).unwrap();
 
         // Start acquisition.
         control::start(&mut app, tab_id);
@@ -473,6 +415,26 @@ mod tests {
         app.close_tab(id2);
         assert_eq!(app.tabs.len(), 1);
         assert_eq!(app.active_tab, initial);
+    }
+
+    /// Test helper: async connect + assign.
+    async fn connect_and_assign(
+        app: &mut AppState,
+        tab_id: TabId,
+        scan_result: &rb_core::ScanResult,
+    ) -> Result<DeviceId, rb_core::SessionError> {
+        let device = app.device_manager.registry()
+            .connect(&scan_result.driver, &scan_result.candidate).await?;
+        let label = format!("{}/{}", device.info().vendor, device.info().model);
+        let id = device.id().clone();
+        let content = crate::logic_analyzer::init_content(device.as_ref());
+        let handle = DeviceHandle::new(device);
+        app.device_manager.store_connected(id.clone(), handle, label);
+        app.assign_device_to_tab(tab_id, id.clone());
+        if let Some(tab) = app.tabs.get_mut(&tab_id) {
+            tab.content = Some(crate::tab_content::TabContent::LogicAnalyzer(content));
+        }
+        Ok(id)
     }
 
     fn scan_for_demo(app: &AppState) -> rb_core::ScanResult {

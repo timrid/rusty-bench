@@ -41,3 +41,18 @@ impl Default for LogicAnalyzerContent {
         }
     }
 }
+
+// ── Content factory ──────────────────────────────────────────────────────────
+
+/// Creates a [`TabContent::LogicAnalyzer`] with default settings.
+pub fn default_content() -> crate::tab_content::TabContent {
+    crate::tab_content::TabContent::LogicAnalyzer(LogicAnalyzerContent::default())
+}
+
+/// Creates a [`LogicAnalyzerContent`] from a connected device's capabilities.
+pub fn init_content(device: &dyn rb_device::Device) -> LogicAnalyzerContent {
+    LogicAnalyzerContent {
+        acquisition_config: AcquisitionConfig::from_device(device),
+        ..LogicAnalyzerContent::default()
+    }
+}
