@@ -24,11 +24,6 @@ pub struct AppState {
     /// The currently active (visible) tab.
     pub active_tab: TabId,
     next_tab_id: u64,
-
-    // Deferred actions.
-    pub pending_disconnect: Option<TabId>,
-    pub pending_start: Option<TabId>,
-    pub pending_stop: Option<TabId>,
 }
 
 impl AppState {
@@ -57,9 +52,6 @@ impl AppState {
             tabs,
             active_tab: first_id,
             next_tab_id: 2,
-            pending_disconnect: None,
-            pending_start: None,
-            pending_stop: None,
         }
     }
 
@@ -122,36 +114,45 @@ impl AppState {
 
     // ── Device connection (delegates to DeviceManager) ────────────────────────
 
-    /// Triggers a device scan.
-    pub fn trigger_scan(&mut self) {
-        self.device_manager.trigger_scan();
+    /// Triggers a device scan (always async, no blocking).
+    /// Spawns a platform-appropriate task that updates scan results and bumps `data_version`.
+    pub fn trigger_scan(
+        app_ref: &std::rc::Rc<std::cell::RefCell<AppState>>,
+        mut data_version: dioxus::prelude::Signal<u64>,
+    ) {
+        let registry = app_ref.borrow().device_manager.registry_clone();
+        let app = app_ref.clone();
+
+        // Dioxus spawn handles both desktop (tokio) and WASM (wasm-bindgen).
+        dioxus::prelude::spawn(async move {
+            #[cfg(target_arch = "wasm32")]
+            {
+                let _ = crate::app_state::request_supported_usb_devices().await;
+            }
+            let result = registry.scan_all().await.map_err(|e| e.to_string());
+            let mut s = app.borrow_mut();
+            match result {
+                Ok(results) => {
+                    s.device_manager.scan_results = results;
+                    s.device_manager.scan_error = None;
+                }
+                Err(e) => {
+                    s.device_manager.scan_results.clear();
+                    s.device_manager.scan_error = Some(e);
+                }
+            }
+            data_version += 1;
+        });
     }
 
     /// Disconnect the device from the given tab and the program.
-    pub fn disconnect_blocking(&mut self, tab_id: TabId) {
+    pub fn disconnect(&mut self, tab_id: TabId) {
         control::clear_acquisition(self, tab_id);
         if let Some(tab) = self.tabs.get_mut(&tab_id) {
             if let Some(did) = tab.assigned_device_id().cloned() {
                 self.device_manager.disconnect(&did);
             }
             tab.set_assigned_device_id(None);
-        }
-    }
-
-    // ── Pending actions ───────────────────────────────────────────────────────
-
-    pub fn apply_pending_actions(&mut self) {
-        self.device_manager.apply_pending_actions();
-        self.device_manager.collect_returns();
-
-        if let Some(tab_id) = self.pending_disconnect.take() {
-            self.close_tab(tab_id);
-        }
-        if let Some(tab_id) = self.pending_start.take() {
-            control::apply_start(self, tab_id);
-        }
-        if let Some(tab_id) = self.pending_stop.take() {
-            control::apply_stop(self, tab_id);
         }
     }
 
@@ -191,17 +192,6 @@ impl AppState {
 
     pub fn any_running(&self) -> bool {
         self.tabs.values().any(|t| t.is_running())
-    }
-
-    /// Returns true if any WASM async operation is pending.
-    #[cfg(target_arch = "wasm32")]
-    pub fn wasm_pending(&self) -> bool {
-        self.device_manager.pending_wasm_scan.is_some()
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn wasm_pending(&self) -> bool {
-        false
     }
 }
 
@@ -302,7 +292,7 @@ mod tests {
         let tab_id = app.active_tab;
         let did = block_on(connect_and_assign(&mut app, tab_id, &demo)).unwrap();
 
-        app.disconnect_blocking(tab_id);
+        app.disconnect(tab_id);
         let active = app.active_tab_state().unwrap();
         assert!(active.assigned_device_id().is_none());
         assert!(active.logic_analyzer().acquisition.as_ref().is_none());
@@ -319,7 +309,7 @@ mod tests {
         let _did = block_on(connect_and_assign(&mut app, tab_id, &demo)).unwrap();
 
         // Start acquisition.
-        control::start(&mut app, tab_id);
+        control::start_sync(&mut app, tab_id);
 
         let active = app.active_tab_state().unwrap();
         assert!(active.logic_analyzer().acquisition.as_ref().is_some());

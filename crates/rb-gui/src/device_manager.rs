@@ -25,9 +25,6 @@ pub struct DeviceManager {
     pub connect_error: Option<String>,
     /// Receivers for handles returning from completed acquisition futures.
     pending_returns: Vec<oneshot::Receiver<(DeviceId, DeviceHandle)>>,
-    /// WASM: pending scan result receiver.
-    #[cfg(target_arch = "wasm32")]
-    pub pending_wasm_scan: Option<oneshot::Receiver<Result<Vec<ScanResult>, String>>>,
 }
 
 struct DeviceEntry {
@@ -48,40 +45,12 @@ impl DeviceManager {
             connected: HashMap::new(),
             connect_error: None,
             pending_returns: Vec::new(),
-            #[cfg(target_arch = "wasm32")]
-            pending_wasm_scan: None,
         }
     }
 
-    // ── Scan ──────────────────────────────────────────────────────────────
-
-    /// Triggers a synchronous device scan (native) or queues an async one (WASM).
-    pub fn trigger_scan(&mut self) {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let result = futures::executor::block_on(self.registry.scan_all());
-            match result {
-                Ok(results) => {
-                    self.scan_results = results;
-                    self.scan_error = None;
-                }
-                Err(e) => {
-                    self.scan_results.clear();
-                    self.scan_error = Some(e.to_string());
-                }
-            }
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            let registry = self.registry.clone();
-            let (tx, rx) = oneshot::channel();
-            wasm_bindgen_futures::spawn_local(async move {
-                let _ = crate::app_state::request_supported_usb_devices().await;
-                let result = registry.scan_all().await.map_err(|e| e.to_string());
-                let _ = tx.send(result);
-            });
-            self.pending_wasm_scan = Some(rx);
-        }
+    /// Clones the driver registry for async use (WASM scan/connect).
+    pub fn registry_clone(&self) -> DriverRegistry {
+        self.registry.clone()
     }
 
     // ── Connect / Disconnect ──────────────────────────────────────────────
@@ -186,29 +155,7 @@ impl DeviceManager {
         &self.registry
     }
 
-    // ── Pending actions (WASM) ────────────────────────────────────────────
 
-    /// Processes pending WASM scan results.
-    pub fn apply_pending_actions(&mut self) {
-        // WASM scan
-        #[cfg(target_arch = "wasm32")]
-        if let Some(mut rx) = self.pending_wasm_scan.take() {
-            if let Ok(Some(result)) = rx.try_recv() {
-                match result {
-                    Ok(results) => {
-                        self.scan_results = results;
-                        self.scan_error = None;
-                    }
-                    Err(e) => {
-                        self.scan_results.clear();
-                        self.scan_error = Some(e);
-                    }
-                }
-            } else {
-                self.pending_wasm_scan = Some(rx);
-            }
-        }
-    }
 }
 
 impl Default for DeviceManager {

@@ -153,7 +153,7 @@ fn DeviceDropdown(
                         onclick: {
                             let state = state.clone();
                             move |_| {
-                                state.borrow_mut().trigger_scan();
+                                crate::app_state::AppState::trigger_scan(&state, data_version);
                                 data_version += 1;
                             }
                         },

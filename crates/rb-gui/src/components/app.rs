@@ -4,12 +4,10 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::time::Duration;
 
 use dioxus::prelude::*;
 
 use crate::app_state::AppState;
-use crate::logic_analyzer::control;
 
 use super::device_view::DeviceView;
 use super::top_bar::TopBar;
@@ -19,28 +17,9 @@ pub type AppStateRef = Rc<RefCell<AppState>>;
 
 #[component]
 pub fn App() -> Element {
-    let state: AppStateRef = use_context_provider(|| Rc::new(RefCell::new(AppState::new())));
+    let _state: AppStateRef = use_context_provider(|| Rc::new(RefCell::new(AppState::new())));
+    // data_version is bumped by async drain tasks in control.rs, not by polling
     let data_version = use_signal(|| 0u64);
-
-    // Coroutine: drain + pump every 16ms.
-    let state_for_coro = state.clone();
-    let mut ver = data_version;
-    use_coroutine(move |_rx: UnboundedReceiver<()>| {
-        let state = state_for_coro.clone();
-        async move {
-            loop {
-                futures_timer::Delay::new(Duration::from_millis(16)).await;
-                let had_data = control::drain_all(&mut *state.borrow_mut());
-                control::pump_executor();
-                let was_pending = state.borrow().wasm_pending();
-                state.borrow_mut().apply_pending_actions();
-                if had_data || state.borrow().any_running() || was_pending {
-                    ver += 1;
-                }
-            }
-        }
-    });
-
     let _version = data_version();
 
     rsx! {

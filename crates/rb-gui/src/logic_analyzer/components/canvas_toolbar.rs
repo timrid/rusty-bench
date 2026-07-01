@@ -58,8 +58,7 @@ pub fn CanvasToolbar(
                         let state = state.clone();
                         let tid = tab_id;
                         move |_| {
-                            control::start(&mut *state.borrow_mut(), tid);
-                            data_version.set(data_version() + 1);
+                            control::start(&state, tid, data_version);
                         }
                     },
                     span { class: "text-[10px]", "\u{25B6}" }

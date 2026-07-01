@@ -20,7 +20,6 @@ rb-model.workspace = true
 rb-canvas.workspace = true
 dioxus = { workspace = true, features = ["html"] }
 futures.workspace = true
-futures-timer.workspace = true
 log.workspace = true
 
 # Platform renderers: gated behind features, dx sets the right one automatically.

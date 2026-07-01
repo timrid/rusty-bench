@@ -1,42 +1,223 @@
 //! Logic Analyzer acquisition orchestration.
 //!
-//! Free functions that operate on [`AppState`](crate::app_state::AppState)
-//! and encapsulate all Logic-Analyzer-specific acquisition lifecycle:
-//! start, stop, drain, spawn, and query.
+//! Free functions that operate on [`AppState`](crate::app_state::AppState):
+//! start (async drain for UI / sync for tests), stop, clear, and queries.
 
 use std::cell::RefCell;
+use std::rc::Rc;
 
-use futures::channel::mpsc;
-use rb_core::{
-    run_acquisition, AcquisitionCommand, AcquisitionState, DeviceHandle,
-};
+use dioxus::prelude::{spawn as dioxus_spawn, Signal};
+use futures::channel::{mpsc, oneshot};
+use futures::StreamExt;
+#[cfg(not(target_arch = "wasm32"))]
+use futures::task::LocalSpawnExt;
+use rb_core::{run_acquisition, AcquisitionCommand, AcquisitionState, DeviceHandle};
 use rb_device::DeviceId;
+use rb_model::SampleChunk;
 
 use crate::app_state::AppState;
 use crate::tab_state::TabId;
 
-#[cfg(not(any(feature = "native", target_arch = "wasm32")))]
-use {futures::executor::LocalPool, futures::task::LocalSpawnExt};
-
 use super::acquisition::{AcquisitionConfig, DeviceAcquisition};
+
+pub type AppStateRef = Rc<RefCell<AppState>>;
 
 // ── Test executor ────────────────────────────────────────────────────────────
 
-#[cfg(not(any(feature = "native", target_arch = "wasm32")))]
+#[cfg(not(target_arch = "wasm32"))]
 thread_local! {
-    static TEST_POOL: RefCell<(LocalPool, futures::executor::LocalSpawner)> = RefCell::new({
-        let pool = LocalPool::new();
+    pub(crate) static TEST_POOL: RefCell<(futures::executor::LocalPool, futures::executor::LocalSpawner)> = RefCell::new({
+        let pool = futures::executor::LocalPool::new();
         let spawner = pool.spawner();
         (pool, spawner)
     });
 }
 
-// ── Acquisition control ──────────────────────────────────────────────────────
+// ── Platform spawn ───────────────────────────────────────────────────────────
 
-/// Start acquisition for the given tab.
-/// Takes the device handle from [`DeviceManager`] and spawns the acquisition future.
-pub fn start(app: &mut AppState, tab_id: TabId) {
-    // Check if we need to connect first.
+/// Spawns a future on the platform's executor (UI-only path).
+/// Uses Dioxus's spawn which works on desktop (tokio LocalSet) and WASM.
+fn spawn_future(fut: impl std::future::Future<Output = ()> + 'static) {
+    dioxus_spawn(fut);
+}
+
+/// Spawns the acquisition future using Dioxus spawn (handles both desktop and WASM).
+/// Only falls back to the test LocalPool when no Dioxus/tokio runtime is active.
+fn spawn_acq_future(
+    fut: impl std::future::Future<Output = DeviceHandle> + 'static,
+    return_tx: oneshot::Sender<(DeviceId, DeviceHandle)>,
+    device_id: DeviceId,
+) {
+    let task = async move {
+        let h = fut.await;
+        let _ = return_tx.send((device_id, h));
+    };
+
+    // Only tests don't have a Dioxus/tokio runtime → use LocalPool.
+    #[cfg(not(target_arch = "wasm32"))]
+    if tokio::runtime::Handle::try_current().is_err() {
+        TEST_POOL.with(|p| { let _ = p.borrow().1.spawn_local(task); });
+        return;
+    }
+    // Dioxus spawn works everywhere — desktop (tokio) and WASM (wasm-bindgen).
+    dioxus_spawn(task);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Async drain tasks (UI — event-driven, no polling)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Spawns a background task that drains `data_rx` into the tab's traces
+/// and bumps `data_version` on each chunk, triggering re-renders.
+pub fn spawn_drain_task(
+    mut data_rx: mpsc::UnboundedReceiver<SampleChunk>,
+    app_ref: AppStateRef,
+    tab_id: TabId,
+    mut data_version: Signal<u64>,
+) {
+    spawn_future(async move {
+        while let Some(chunk) = data_rx.next().await {
+            let mut app = app_ref.borrow_mut();
+            if let Some(tab) = app.tabs.get_mut(&tab_id) {
+                if let Some(acq) = tab.logic_analyzer_mut().acquisition.as_mut() {
+                    acq.push_chunk(&chunk);
+                }
+            }
+            drop(app);
+            data_version += 1;
+        }
+    });
+}
+
+/// Spawns a task that awaits a handle-return oneshot (no polling).
+fn spawn_return_task(
+    return_rx: oneshot::Receiver<(DeviceId, DeviceHandle)>,
+    app_ref: AppStateRef,
+) {
+    spawn_future(async move {
+        if let Ok((device_id, handle)) = return_rx.await {
+            app_ref.borrow_mut().device_manager.return_handle(device_id, handle);
+        }
+    });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Acquisition spawn
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Spawns an acquisition future and returns a [`DeviceAcquisition`].
+///
+/// If `drain_info` is `Some`, sets up async drain + handle-return tasks
+/// (no polling needed). If `None`, the caller must drain manually (tests).
+fn spawn(
+    _app: &mut AppState,
+    config: &AcquisitionConfig,
+    mut handle: DeviceHandle,
+    device_id: DeviceId,
+    drain_info: Option<(AppStateRef, TabId, Signal<u64>)>,
+) -> DeviceAcquisition {
+    config.apply_to_handle(&mut handle);
+    let (analog, digital) = config.build_traces();
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        let web_handle = rb_core::runtime::web::spawn_local(handle);
+        let _ = web_handle
+            .commands
+            .unbounded_send(AcquisitionCommand::SetSampleRate(config.sample_rate_hz));
+        let _ = web_handle
+            .commands
+            .unbounded_send(AcquisitionCommand::Start);
+
+        // Async drain for UI
+        if let Some((app_ref, tab_id, ver)) = drain_info {
+            spawn_drain_task(web_handle.data, app_ref, tab_id, ver);
+        }
+
+        return DeviceAcquisition {
+            analog,
+            digital,
+            state: AcquisitionState::Running,
+            sample_count: 0,
+            cmd_tx: web_handle.commands,
+            data_rx: None,
+            config: config.clone(),
+        };
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let (cmd_tx, cmd_rx) = mpsc::unbounded::<AcquisitionCommand>();
+        let (data_tx, data_rx) = mpsc::unbounded::<SampleChunk>();
+        let (return_tx, return_rx) = oneshot::channel();
+
+        // Send config before spawning (cmd_tx is moved into DeviceAcquisition)
+        let _ = cmd_tx.unbounded_send(AcquisitionCommand::SetSampleRate(config.sample_rate_hz));
+        let _ = cmd_tx.unbounded_send(AcquisitionCommand::Start);
+
+        // Spawn the acquisition future (tokio if runtime active, else test pool)
+        let fut = run_acquisition(handle, cmd_rx, Some(data_tx));
+        spawn_acq_future(fut, return_tx, device_id);
+
+        if let Some((app_ref, tab_id, ver)) = drain_info {
+            // UI path: async drain + async handle return
+            spawn_drain_task(data_rx, app_ref.clone(), tab_id, ver);
+            spawn_return_task(return_rx, app_ref);
+
+            DeviceAcquisition {
+                analog,
+                digital,
+                state: AcquisitionState::Running,
+                sample_count: 0,
+                cmd_tx,
+                data_rx: None,
+                config: config.clone(),
+            }
+        } else {
+            // Test path: keep data_rx for manual drain
+            _app.device_manager.register_pending_return(return_rx);
+
+            DeviceAcquisition {
+                analog,
+                digital,
+                state: AcquisitionState::Running,
+                sample_count: 0,
+                cmd_tx,
+                data_rx: Some(data_rx),
+                config: config.clone(),
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Public control API
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Start acquisition for the given tab (UI version with async drain).
+///
+/// Spawns background tasks to drain data and collect the handle return
+/// — no polling needed.
+pub fn start(app_ref: &AppStateRef, tab_id: TabId, data_version: Signal<u64>) {
+    let mut app = app_ref.borrow_mut();
+    _start_impl(
+        &mut app,
+        tab_id,
+        Some((app_ref.clone(), tab_id, data_version)),
+    );
+}
+
+/// Start acquisition (test version — sync, manual drain via [`drain_all`]).
+pub fn start_sync(app: &mut AppState, tab_id: TabId) {
+    _start_impl(app, tab_id, None);
+}
+
+fn _start_impl(
+    app: &mut AppState,
+    tab_id: TabId,
+    drain_info: Option<(AppStateRef, TabId, Signal<u64>)>,
+) {
+    // Check if the assigned device is still connected
     let need_connect = {
         let tab = app.tabs.get(&tab_id);
         tab.is_some_and(|t| {
@@ -44,12 +225,11 @@ pub fn start(app: &mut AppState, tab_id: TabId) {
                 .is_some_and(|did| !app.device_manager.is_connected(did))
         })
     };
-
     if need_connect {
         return;
     }
 
-    // Check if already acquiring — re-run.
+    // If already acquiring, just reset and restart
     let already_acquiring = app
         .tabs
         .get(&tab_id)
@@ -68,19 +248,23 @@ pub fn start(app: &mut AppState, tab_id: TabId) {
         return;
     }
 
-    // Take the handle from DeviceManager.
+    // Fresh start: spawn acquisition future
     let device_id = app
         .tabs
         .get(&tab_id)
         .and_then(|t| t.assigned_device_id().cloned());
-
     let handle = device_id
         .as_ref()
         .and_then(|did| app.device_manager.take_handle(did));
 
-    if let Some(handle) = handle {
-        let device_id = device_id.unwrap();
-        let acq = spawn(app, handle, device_id);
+    if let (Some(device_id), Some(handle)) = (device_id, handle) {
+        let config = app
+            .tabs
+            .get(&tab_id)
+            .map(|t| t.logic_analyzer().acquisition_config.clone())
+            .unwrap_or_default();
+
+        let acq = spawn(app, &config, handle, device_id, drain_info);
         if let Some(tab) = app.tabs.get_mut(&tab_id) {
             tab.logic_analyzer_mut().acquisition = Some(acq);
         }
@@ -89,14 +273,15 @@ pub fn start(app: &mut AppState, tab_id: TabId) {
 
 /// Stop acquisition for the given tab.
 pub fn stop(app: &mut AppState, tab_id: TabId) {
-    let Some(tab) = app.tabs.get_mut(&tab_id) else { return };
-    if let Some(acq) = tab.logic_analyzer_mut().acquisition.as_mut() {
-        acq.send_command(AcquisitionCommand::Stop);
-        acq.state = AcquisitionState::Stopped;
+    if let Some(tab) = app.tabs.get_mut(&tab_id) {
+        if let Some(acq) = tab.logic_analyzer_mut().acquisition.as_mut() {
+            acq.send_command(AcquisitionCommand::Stop);
+            acq.state = AcquisitionState::Stopped;
+        }
     }
 }
 
-/// Clear the acquisition from a tab (stop first, then drop the handle).
+/// Clear the acquisition from a tab (stop + drop).
 pub fn clear_acquisition(app: &mut AppState, tab_id: TabId) {
     if let Some(tab) = app.tabs.get_mut(&tab_id) {
         if let Some(acq) = tab.logic_analyzer_mut().acquisition.as_mut() {
@@ -107,159 +292,28 @@ pub fn clear_acquisition(app: &mut AppState, tab_id: TabId) {
     }
 }
 
-// ── Deferred actions (called from AppState::apply_pending_actions) ───────────
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Queries
+// ═══════════════════════════════════════════════════════════════════════════════
 
-/// Non-blocking version of [`start`] — same logic, used for deferred starts.
-pub(crate) fn apply_start(app: &mut AppState, tab_id: TabId) {
-    let need_connect = app
-        .tabs
-        .get(&tab_id)
-        .is_some_and(|t| {
-            t.assigned_device_id()
-                .is_some_and(|did| !app.device_manager.is_connected(did))
-        });
-
-    if need_connect {
-        return;
-    }
-
-    let already_acquiring = app
-        .tabs
-        .get(&tab_id)
-        .is_some_and(|t| t.logic_analyzer().acquisition.as_ref().is_some());
-
-    if already_acquiring {
-        if let Some(tab) = app.tabs.get_mut(&tab_id) {
-            if let Some(acq) = tab.logic_analyzer_mut().acquisition.as_mut() {
-                let rate = acq.config.sample_rate_hz;
-                acq.send_command(AcquisitionCommand::SetSampleRate(rate));
-                acq.reset_traces();
-                acq.send_command(AcquisitionCommand::Start);
-                acq.state = AcquisitionState::Running;
-            }
-        }
-        return;
-    }
-
-    let device_id = app
-        .tabs
-        .get(&tab_id)
-        .and_then(|t| t.assigned_device_id().cloned());
-
-    let handle = device_id
-        .as_ref()
-        .and_then(|did| app.device_manager.take_handle(did));
-
-    if let Some(handle) = handle {
-        let device_id = device_id.unwrap();
-        let acq = spawn(app, handle, device_id);
-        if let Some(tab) = app.tabs.get_mut(&tab_id) {
-            tab.logic_analyzer_mut().acquisition = Some(acq);
-        }
-    }
+/// Drains acquisition data for the active tab (sync, for tests).
+pub fn drain_all(app: &mut AppState) -> bool {
+    let Some(tab) = app.tabs.get_mut(&app.active_tab) else {
+        return false;
+    };
+    let Some(acq) = tab.logic_analyzer_mut().acquisition.as_mut() else {
+        return false;
+    };
+    let before = acq.sample_count();
+    acq.drain();
+    acq.sample_count() > before
 }
-
-/// Non-blocking version of [`stop`].
-pub(crate) fn apply_stop(app: &mut AppState, tab_id: TabId) {
-    let Some(tab) = app.tabs.get_mut(&tab_id) else { return };
-    if let Some(acq) = tab.logic_analyzer_mut().acquisition.as_mut() {
-        acq.send_command(AcquisitionCommand::Stop);
-        acq.state = AcquisitionState::Stopped;
-    }
-}
-
-// ── Acquisition spawning ─────────────────────────────────────────────────────
-
-/// Spawns an acquisition future and returns the [`DeviceAcquisition`] handle.
-/// The device handle is returned to [`DeviceManager`] when the future completes.
-#[allow(unused_mut)]
-pub fn spawn(
-    app: &mut AppState,
-    mut handle: DeviceHandle,
-    device_id: DeviceId,
-) -> DeviceAcquisition {
-    // Read config from the tab that owns this device.
-    let config = app
-        .tabs
-        .values()
-        .find(|t| t.assigned_device_id() == Some(&device_id))
-        .map(|t| t.logic_analyzer().acquisition_config.clone())
-        .unwrap_or_default();
-
-    // Rebuild handle traces to match config.
-    config.apply_to_handle(&mut handle);
-
-    let (analog, digital) = config.build_traces();
-
-    #[cfg(target_arch = "wasm32")]
-    {
-        let web_handle = rb_core::runtime::web::spawn_local(handle);
-        let _ = web_handle
-            .commands
-            .unbounded_send(AcquisitionCommand::SetSampleRate(config.sample_rate_hz));
-        let _ = web_handle.commands.unbounded_send(AcquisitionCommand::Start);
-        return DeviceAcquisition {
-            analog,
-            digital,
-            state: AcquisitionState::Running,
-            sample_count: 0,
-            cmd_tx: web_handle.commands,
-            data_rx: web_handle.data,
-            config,
-        };
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let (cmd_tx, cmd_rx) = mpsc::unbounded::<AcquisitionCommand>();
-        let (data_tx, data_rx) = mpsc::unbounded();
-
-        let (return_tx, return_rx) = futures::channel::oneshot::channel();
-        app.device_manager.register_pending_return(return_rx);
-
-        let fut = run_acquisition(handle, cmd_rx, Some(data_tx));
-        #[cfg(feature = "native")]
-        {
-            tokio::spawn(async move {
-                let handle = fut.await;
-                let _ = return_tx.send((device_id, handle));
-            });
-        }
-        #[cfg(not(feature = "native"))]
-        {
-            TEST_POOL.with(|pool| {
-                pool.borrow().1.spawn_local(async move {
-                    let handle = fut.await;
-                    let _ = return_tx.send((device_id, handle));
-                }).expect("spawn");
-            });
-        }
-
-        let _ = cmd_tx.unbounded_send(AcquisitionCommand::SetSampleRate(config.sample_rate_hz));
-        let _ = cmd_tx.unbounded_send(AcquisitionCommand::Start);
-
-        DeviceAcquisition {
-            analog,
-            digital,
-            state: AcquisitionState::Running,
-            sample_count: 0,
-            cmd_tx,
-            data_rx,
-            config,
-        }
-    }
-}
-
-// ── Queries ──────────────────────────────────────────────────────────────────
 
 /// Returns the acquisition for a tab.
 pub fn acq_for_tab(app: &AppState, tab_id: TabId) -> Option<&DeviceAcquisition> {
-    app.tabs.get(&tab_id).and_then(|t| t.logic_analyzer().acquisition.as_ref())
-}
-
-/// Returns a mutable reference to the acquisition for a tab.
-pub fn acq_for_tab_mut(app: &mut AppState, tab_id: TabId) -> Option<&mut DeviceAcquisition> {
-    app.tabs.get_mut(&tab_id).and_then(|t| t.logic_analyzer_mut().acquisition.as_mut())
+    app.tabs
+        .get(&tab_id)
+        .and_then(|t| t.logic_analyzer().acquisition.as_ref())
 }
 
 /// Returns the acquisition state for a device, searching across all tabs.
@@ -289,18 +343,8 @@ pub fn active_tab_acq_state(app: &AppState) -> AcquisitionState {
     }
 }
 
-/// Drains acquisition data for the active tab only.
-/// Returns true if any new data arrived.
-pub fn drain_all(app: &mut AppState) -> bool {
-    let Some(tab) = app.tabs.get_mut(&app.active_tab) else { return false };
-    let Some(acq) = tab.logic_analyzer_mut().acquisition.as_mut() else { return false };
-    let before = acq.sample_count();
-    acq.drain();
-    acq.sample_count() > before
-}
-
-/// Drives the test executor (no-op on desktop and WASM).
+/// Drives the test executor (non-WASM only).
 pub fn pump_executor() {
-    #[cfg(not(any(feature = "native", target_arch = "wasm32")))]
+    #[cfg(not(target_arch = "wasm32"))]
     TEST_POOL.with(|pool| pool.borrow_mut().0.run_until_stalled());
 }

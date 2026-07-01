@@ -134,31 +134,50 @@ pub struct DeviceAcquisition {
     /// Sends [`AcquisitionCommand`]s to the spawned future.
     pub cmd_tx: mpsc::UnboundedSender<AcquisitionCommand>,
     /// Receives [`SampleChunk`]s from the spawned future.
-    pub data_rx: mpsc::UnboundedReceiver<SampleChunk>,
+    ///
+    /// In the UI, this is taken out by [`crate::logic_analyzer::control::spawn_drain_task`]
+    /// and drained asynchronously. In tests, it stays `Some` and is drained
+    /// manually via [`drain`](DeviceAcquisition::drain).
+    pub data_rx: Option<mpsc::UnboundedReceiver<SampleChunk>>,
     /// User-editable acquisition configuration.
     pub config: AcquisitionConfig,
 }
 
 impl DeviceAcquisition {
-    pub fn drain(&mut self) {
-        let chunks: Vec<SampleChunk> =
-            std::iter::from_fn(|| self.data_rx.try_recv().ok()).collect();
-        for chunk in &chunks {
-            for (index, trace) in self.analog.iter_mut().enumerate() {
-                if !self.config.analog_enabled.get(index).copied().unwrap_or(true) {
-                    continue;
-                }
-                if let Some(samples) = chunk.analog_channel(index) {
-                    trace.push_raw(samples);
-                }
+    /// Push a single chunk into the trace stores (for async drain).
+    pub fn push_chunk(&mut self, chunk: &SampleChunk) {
+        for (index, trace) in self.analog.iter_mut().enumerate() {
+            if !self.config.analog_enabled.get(index).copied().unwrap_or(true) {
+                continue;
             }
-            if let Some(ref mut digital) = self.digital {
-                if self.config.digital_enabled.iter().any(|e| *e) && !chunk.logic().is_empty() {
-                    digital.push_words(chunk.logic());
-                }
+            if let Some(samples) = chunk.analog_channel(index) {
+                trace.push_raw(samples);
             }
-            self.sample_count += chunk.sample_count();
         }
+        if let Some(ref mut digital) = self.digital {
+            if self.config.digital_enabled.iter().any(|e| *e) && !chunk.logic().is_empty() {
+                digital.push_words(chunk.logic());
+            }
+        }
+        self.sample_count += chunk.sample_count();
+    }
+
+    /// Sync drain: reads all pending chunks from `data_rx` via `try_recv`.
+    /// Used in tests; the UI uses async drain (`spawn_drain_task`).
+    pub fn drain(&mut self) {
+        if let Some(ref mut rx) = self.data_rx {
+            let chunks: Vec<SampleChunk> =
+                std::iter::from_fn(|| rx.try_recv().ok()).collect();
+            for chunk in &chunks {
+                self.push_chunk(chunk);
+            }
+        }
+    }
+
+    /// Takes the data receiver out (for async drain). After this, [`drain`]
+    /// is a no-op — all data flows through the spawned async task.
+    pub fn take_data_rx(&mut self) -> Option<mpsc::UnboundedReceiver<SampleChunk>> {
+        self.data_rx.take()
     }
 
     pub fn sample_count(&self) -> usize {
