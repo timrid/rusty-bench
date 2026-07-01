@@ -47,7 +47,7 @@ pub fn DeviceView(data_version: Signal<u64>) -> Element {
                         class: "bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded text-sm font-medium transition-colors mt-2",
                         onclick: {
                             let state = state.clone();
-                            move |_| { crate::app_state::AppState::trigger_scan(&state, data_version); }
+                            move |_| { crate::app_state::AppState::trigger_scan(&state, data_version, false); }
                         },
                         "\u{27F3}  Scan for Devices"
                     }

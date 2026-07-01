@@ -84,17 +84,28 @@ impl DriverRegistry {
 
     /// Scans every registered driver and returns all discovered candidates.
     ///
-    /// # Errors
-    /// Returns the first [`SessionError::Driver`] if any driver's scan fails.
+    /// Individual driver failures are tolerated — results from successful
+    /// drivers are still returned. This ensures virtual drivers (demo) still
+    /// produce results even when hardware drivers fail (e.g., on WASM without
+    /// WebUSB permission).
     pub async fn scan_all(&self) -> Result<Vec<KnownDevice>, SessionError> {
         let mut results = Vec::new();
         for factory in self.factories.iter() {
-            for candidate in factory.scan().await? {
-                results.push(KnownDevice {
-                    driver: factory.name().to_string(),
-                    candidate,
-                    origin: DeviceOrigin::Discovered,
-                });
+            match factory.scan().await {
+                Ok(candidates) => {
+                    for candidate in candidates {
+                        results.push(KnownDevice {
+                            driver: factory.name().to_string(),
+                            candidate,
+                            origin: DeviceOrigin::Discovered,
+                        });
+                    }
+                }
+                Err(_e) => {
+                    // Tolerate individual driver failures so other drivers
+                    // (e.g. demo) still contribute results.
+                    log::debug!("scan driver '{}' failed: {}", factory.name(), _e);
+                }
             }
         }
         Ok(results)

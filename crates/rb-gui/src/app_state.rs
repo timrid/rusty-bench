@@ -117,17 +117,23 @@ impl AppState {
 
     /// Triggers a device scan (always async, no blocking).
     /// Spawns a platform-appropriate task that updates scan results and bumps `data_version`.
+    ///
+    /// If `request_usb` is true (WASM only), the browser's WebUSB permission
+    /// dialog is shown before scanning — use only for explicit user actions.
     pub fn trigger_scan(
         app_ref: &std::rc::Rc<std::cell::RefCell<AppState>>,
         mut data_version: dioxus::prelude::Signal<u64>,
+        request_usb: bool,
     ) {
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = request_usb; // unused on desktop
         let registry = app_ref.borrow().device_manager.registry_clone();
         let app = app_ref.clone();
 
         // Dioxus spawn handles both desktop (tokio) and WASM (wasm-bindgen).
         dioxus::prelude::spawn(async move {
             #[cfg(target_arch = "wasm32")]
-            {
+            if request_usb {
                 let _ = crate::app_state::request_supported_usb_devices().await;
             }
             let result = registry.scan_all().await.map_err(|e| e.to_string());
