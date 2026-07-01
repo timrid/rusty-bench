@@ -38,11 +38,12 @@ pub fn CanvasToolbar(
             if is_running {
                 button {
                     class: "flex items-center gap-1 px-2 py-1 bg-red-800 hover:bg-red-700 text-red-200 rounded text-xs font-medium transition-colors",
-                    title: "Stop acquisition",
+                    title: "Stop acquisition (device stays connected)",
                     onclick: {
                         let state = state.clone();
                         let tid = tab_id;
                         move |_| {
+                            // Stop acquisition only — device stays connected, UI stays locked.
                             control::stop(&mut *state.borrow_mut(), tid);
                             data_version += 1;
                         }

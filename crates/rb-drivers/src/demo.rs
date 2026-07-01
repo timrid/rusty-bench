@@ -311,6 +311,14 @@ impl Device for DemoDevice {
     fn as_acquisition_source_mut(&mut self) -> Option<&mut dyn AcquisitionSource> {
         Some(&mut self.source)
     }
+
+    fn additional_info(&self) -> Vec<(&str, &str)> {
+        vec![
+            ("Firmware", "1.0.0 (demo)"),
+            ("Connection", "Virtual"),
+            ("Channels", "8"),
+        ]
+    }
 }
 
 /// Discovers and connects [`DemoDevice`]s.

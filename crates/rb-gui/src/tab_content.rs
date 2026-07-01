@@ -48,6 +48,19 @@ impl TabContent {
             TabContent::LogicAnalyzer(la) => la.is_running(),
         }
     }
+
+    /// Stops any running acquisition/generation and clears the active handle.
+    /// Safe to call even if nothing is running.
+    pub fn stop(&mut self) {
+        match self {
+            TabContent::LogicAnalyzer(la) => {
+                if let Some(acq) = la.acquisition.as_mut() {
+                    acq.send_command(rb_core::AcquisitionCommand::Stop);
+                }
+                la.acquisition = None;
+            }
+        }
+    }
 }
 
 impl Default for TabContent {

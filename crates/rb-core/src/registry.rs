@@ -5,14 +5,32 @@ use rb_transport::{DeviceCandidate, DriverFactory};
 
 use crate::error::SessionError;
 
-/// One reachable device found during a scan, tagged with the driver that found it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ScanResult {
-    /// Name of the driver that produced this candidate.
-    pub driver: String,
-    /// The reachable-but-not-yet-connected device.
-    pub candidate: DeviceCandidate,
+/// How we learned about a device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DeviceOrigin {
+    /// Found by a driver scan.
+    Discovered,
+    /// Manually added by the user.
+    Manual,
 }
+
+/// A device we know how to reach, regardless of how we learned about it.
+///
+/// Wraps a [`DeviceCandidate`] with the driver name and provenance.
+/// This is the unit the UI displays in the device dropdown.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KnownDevice {
+    /// The driver to use for connecting.
+    pub driver: String,
+    /// The candidate (identity + opaque address).
+    pub candidate: DeviceCandidate,
+    /// How this entry entered the system.
+    pub origin: DeviceOrigin,
+}
+
+// Compatibility alias — the old name still works.
+pub type ScanResult = KnownDevice;
 
 /// The set of drivers active in this build, ready to scan and connect.
 ///
@@ -68,13 +86,14 @@ impl DriverRegistry {
     ///
     /// # Errors
     /// Returns the first [`SessionError::Driver`] if any driver's scan fails.
-    pub async fn scan_all(&self) -> Result<Vec<ScanResult>, SessionError> {
+    pub async fn scan_all(&self) -> Result<Vec<KnownDevice>, SessionError> {
         let mut results = Vec::new();
         for factory in self.factories.iter() {
             for candidate in factory.scan().await? {
-                results.push(ScanResult {
+                results.push(KnownDevice {
                     driver: factory.name().to_string(),
                     candidate,
+                    origin: DeviceOrigin::Discovered,
                 });
             }
         }

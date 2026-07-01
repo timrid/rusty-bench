@@ -36,7 +36,7 @@ pub fn DeviceView(data_version: Signal<u64>) -> Element {
                     div { class: "text-5xl mb-2", "\u{1F50C}" }
                     h2 { class: "text-lg font-bold text-zinc-400", "No Device" }
                     p { class: "text-xs text-zinc-600 max-w-sm",
-                        "Select a device from the dropdown above. It will be connected automatically."
+                        "Connect a device from the dropdown above to get started."
                     }
                     if let Some(ref err) = connect_error {
                         p { class: "text-xs text-red-400 bg-red-900/20 border border-red-800 rounded px-3 py-1.5 mt-2 max-w-sm",

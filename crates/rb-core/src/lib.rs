@@ -24,7 +24,7 @@ mod session;
 
 pub use error::SessionError;
 pub use handle::{AcquisitionCommand, AcquisitionState, DeviceHandle};
-pub use registry::{DriverRegistry, ScanResult};
+pub use registry::{DeviceOrigin, DriverRegistry, KnownDevice, ScanResult};
 pub use runtime::run_acquisition;
 pub use session::Session;
 

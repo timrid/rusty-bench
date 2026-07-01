@@ -77,6 +77,13 @@ pub trait Device {
         Ok(())
     }
 
+    /// Additional properties discovered after connecting (firmware version,
+    /// connection type, channel count, etc.). Returned as ordered key-value
+    /// pairs for display in the UI. Defaults to an empty list.
+    fn additional_info(&self) -> Vec<(&str, &str)> {
+        vec![]
+    }
+
     /// Logic-analyzer capability, if supported.
     fn as_logic_analyzer(&self) -> Option<&dyn LogicAnalyzer> {
         None

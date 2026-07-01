@@ -9,7 +9,6 @@ use std::collections::HashMap;
 use rb_core::DeviceHandle;
 use rb_device::DeviceId;
 
-use crate::logic_analyzer::control;
 use crate::device_manager::DeviceManager;
 use crate::tab_state::{TabId, TabSource, TabState};
 
@@ -71,14 +70,16 @@ impl AppState {
         id
     }
 
-    /// Closes a tab, stopping any running acquisition.
-    /// If closing the active tab, activates the nearest remaining tab
-    /// or creates a fresh one. Does NOT disconnect the device — the device
-    /// connection is program-level and may be used by other tabs.
+    /// Closes a tab and removes it. If closing the active tab, activates
+    /// the nearest remaining tab or creates a fresh one.
+    ///
+    /// The caller must ensure the tab is not running — close buttons are
+    /// hidden while a device is connected.
     pub fn close_tab(&mut self, id: TabId) {
-        // Stop acquisition if running (delegates to LA control).
-        control::clear_acquisition(self, id);
         if let Some(tab) = self.tabs.get_mut(&id) {
+            if let Some(content) = tab.content.as_mut() {
+                content.stop();
+            }
             tab.set_assigned_device_id(None);
         }
         self.tabs.remove(&id);
@@ -133,11 +134,10 @@ impl AppState {
             let mut s = app.borrow_mut();
             match result {
                 Ok(results) => {
-                    s.device_manager.scan_results = results;
+                    s.device_manager.apply_scan_results(results);
                     s.device_manager.scan_error = None;
                 }
                 Err(e) => {
-                    s.device_manager.scan_results.clear();
                     s.device_manager.scan_error = Some(e);
                 }
             }
@@ -145,18 +145,15 @@ impl AppState {
         });
     }
 
-    /// Disconnect the device from the given tab and the program.
-    pub fn disconnect(&mut self, tab_id: TabId) {
-        control::clear_acquisition(self, tab_id);
-        if let Some(tab) = self.tabs.get_mut(&tab_id) {
-            if let Some(did) = tab.assigned_device_id().cloned() {
-                self.device_manager.disconnect(&did);
-            }
-            tab.set_assigned_device_id(None);
-        }
-    }
-
     // ── Queries ───────────────────────────────────────────────────────────────
+
+    /// Whether the active tab is currently running an acquisition.
+    /// UI elements like tab switching and device re-assignment should be
+    /// disabled while this is true.
+    pub fn is_device_locked(&self) -> bool {
+        self.active_tab_state()
+            .is_some_and(|t| t.is_running())
+    }
 
     pub fn device_label(&self, id: &DeviceId) -> String {
         self.device_manager
@@ -245,6 +242,7 @@ pub(crate) async fn request_supported_usb_devices() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::logic_analyzer::control;
 
     /// Block on a future using a temporary tokio runtime (required by nusb).
     fn block_on<F: std::future::Future>(f: F) -> F::Output {
@@ -262,16 +260,16 @@ mod tests {
         let active = app.active_tab_state().unwrap();
         assert!(active.assigned_device_id().is_none());
         assert!(active.logic_analyzer().acquisition.as_ref().is_none());
-        assert!(app.device_manager.scan_results.is_empty());
+        assert!(app.device_manager.known_devices().is_empty());
     }
 
     #[test]
     fn scan_populates_results() {
         let mut app = AppState::default();
         let results = block_on(app.device_manager.registry().scan_all()).unwrap();
-        app.device_manager.scan_results = results;
-        assert!(!app.device_manager.scan_results.is_empty());
-        assert!(app.device_manager.scan_results.iter().any(|r| r.driver == "demo"));
+        app.device_manager.apply_scan_results(results);
+        assert!(!app.device_manager.known_devices().is_empty());
+        assert!(app.device_manager.known_devices().iter().any(|r| r.driver == "demo"));
     }
 
     #[test]
@@ -286,20 +284,7 @@ mod tests {
     }
 
     #[test]
-    fn disconnect_removes_device_from_tab() {
-        let mut app = AppState::default();
-        let demo = scan_for_demo(&app);
-        let tab_id = app.active_tab;
-        let did = block_on(connect_and_assign(&mut app, tab_id, &demo)).unwrap();
 
-        app.disconnect(tab_id);
-        let active = app.active_tab_state().unwrap();
-        assert!(active.assigned_device_id().is_none());
-        assert!(active.logic_analyzer().acquisition.as_ref().is_none());
-        assert!(!app.device_manager.is_connected(&did));
-    }
-
-    #[test]
     fn start_spawns_and_pumps_samples() {
         let mut app = AppState::default();
         let demo = scan_for_demo(&app);
@@ -354,7 +339,7 @@ mod tests {
     async fn connect_and_assign(
         app: &mut AppState,
         tab_id: TabId,
-        scan_result: &rb_core::ScanResult,
+        scan_result: &rb_core::KnownDevice,
     ) -> Result<DeviceId, rb_core::SessionError> {
         let device = app.device_manager.registry()
             .connect(&scan_result.driver, &scan_result.candidate).await?;
@@ -362,7 +347,7 @@ mod tests {
         let id = device.id().clone();
         let content = crate::logic_analyzer::init_content(device.as_ref());
         let handle = DeviceHandle::new(device);
-        app.device_manager.store_connected(id.clone(), handle, label);
+        app.device_manager.store_connected(id.clone(), handle, label, &scan_result.driver, scan_result.origin);
         app.assign_device_to_tab(tab_id, id.clone());
         if let Some(tab) = app.tabs.get_mut(&tab_id) {
             tab.content = Some(crate::tab_content::TabContent::LogicAnalyzer(content));
@@ -370,7 +355,7 @@ mod tests {
         Ok(id)
     }
 
-    fn scan_for_demo(app: &AppState) -> rb_core::ScanResult {
+    fn scan_for_demo(app: &AppState) -> rb_core::KnownDevice {
         block_on(app.device_manager.registry().scan_all())
             .unwrap()
             .into_iter()
