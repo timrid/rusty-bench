@@ -9,7 +9,7 @@ use std::rc::Rc;
 use dioxus::prelude::{spawn as dioxus_spawn, Signal};
 use futures::channel::{mpsc, oneshot};
 use futures::StreamExt;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(test)]
 use futures::task::LocalSpawnExt;
 use rb_core::{run_acquisition, AcquisitionCommand, AcquisitionState, DeviceHandle};
 use rb_device::DeviceId;
@@ -24,9 +24,9 @@ pub type AppStateRef = Rc<RefCell<AppState>>;
 
 // ── Test executor ────────────────────────────────────────────────────────────
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(test)]
 thread_local! {
-    pub(crate) static TEST_POOL: RefCell<(futures::executor::LocalPool, futures::executor::LocalSpawner)> = RefCell::new({
+    static TEST_POOL: RefCell<(futures::executor::LocalPool, futures::executor::LocalSpawner)> = RefCell::new({
         let pool = futures::executor::LocalPool::new();
         let spawner = pool.spawner();
         (pool, spawner)
@@ -39,28 +39,6 @@ thread_local! {
 /// Uses Dioxus's spawn which works on desktop (tokio LocalSet) and WASM.
 fn spawn_future(fut: impl std::future::Future<Output = ()> + 'static) {
     dioxus_spawn(fut);
-}
-
-/// Spawns the acquisition future using Dioxus spawn (handles both desktop and WASM).
-/// Only falls back to the test LocalPool when no Dioxus/tokio runtime is active.
-fn spawn_acq_future(
-    fut: impl std::future::Future<Output = DeviceHandle> + 'static,
-    return_tx: oneshot::Sender<(DeviceId, DeviceHandle)>,
-    device_id: DeviceId,
-) {
-    let task = async move {
-        let h = fut.await;
-        let _ = return_tx.send((device_id, h));
-    };
-
-    // Only tests don't have a Dioxus/tokio runtime → use LocalPool.
-    #[cfg(not(target_arch = "wasm32"))]
-    if tokio::runtime::Handle::try_current().is_err() {
-        TEST_POOL.with(|p| { let _ = p.borrow().1.spawn_local(task); });
-        return;
-    }
-    // Dioxus spawn works everywhere — desktop (tokio) and WASM (wasm-bindgen).
-    dioxus_spawn(task);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -119,73 +97,59 @@ fn spawn(
     config.apply_to_handle(&mut handle);
     let (analog, digital) = config.build_traces();
 
-    #[cfg(target_arch = "wasm32")]
-    {
-        let web_handle = rb_core::runtime::web::spawn_local(handle);
-        let _ = web_handle
-            .commands
-            .unbounded_send(AcquisitionCommand::SetSampleRate(config.sample_rate_hz));
-        let _ = web_handle
-            .commands
-            .unbounded_send(AcquisitionCommand::Start);
+    // ── Channel setup (same for all platforms) ────────────────────────────
+    let (cmd_tx, cmd_rx) = mpsc::unbounded::<AcquisitionCommand>();
+    let (data_tx, data_rx) = mpsc::unbounded::<SampleChunk>();
+    let (return_tx, return_rx) = oneshot::channel();
 
-        // Async drain for UI
-        if let Some((app_ref, tab_id, ver)) = drain_info {
-            spawn_drain_task(web_handle.data, app_ref, tab_id, ver);
-        }
+    let _ = cmd_tx.unbounded_send(AcquisitionCommand::SetSampleRate(config.sample_rate_hz));
+    let _ = cmd_tx.unbounded_send(AcquisitionCommand::Start);
 
-        return DeviceAcquisition {
+    // ── Spawn acquisition future ──────────────────────────────────────────
+    let fut = run_acquisition(handle, cmd_rx, Some(data_tx));
+    if drain_info.is_some() {
+        // UI: Dioxus spawn works on desktop (tokio) and WASM (wasm-bindgen).
+        dioxus_spawn(async move {
+            let h = fut.await;
+            let _ = return_tx.send((device_id, h));
+        });
+    } else {
+        #[cfg(test)]
+        TEST_POOL.with(|p| {
+            let _ = p.borrow().1.spawn_local(async move {
+                let h = fut.await;
+                let _ = return_tx.send((device_id, h));
+            });
+        });
+    }
+
+    // ── Build DeviceAcquisition ───────────────────────────────────────────
+    if let Some((app_ref, tab_id, ver)) = drain_info {
+        // UI path: async drain + async handle return
+        spawn_drain_task(data_rx, app_ref.clone(), tab_id, ver);
+        spawn_return_task(return_rx, app_ref);
+
+        DeviceAcquisition {
             analog,
             digital,
             state: AcquisitionState::Running,
             sample_count: 0,
-            cmd_tx: web_handle.commands,
+            cmd_tx,
             data_rx: None,
             config: config.clone(),
-        };
-    }
+        }
+    } else {
+        // Test path: keep data_rx for manual drain
+        _app.device_manager.register_pending_return(return_rx);
 
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let (cmd_tx, cmd_rx) = mpsc::unbounded::<AcquisitionCommand>();
-        let (data_tx, data_rx) = mpsc::unbounded::<SampleChunk>();
-        let (return_tx, return_rx) = oneshot::channel();
-
-        // Send config before spawning (cmd_tx is moved into DeviceAcquisition)
-        let _ = cmd_tx.unbounded_send(AcquisitionCommand::SetSampleRate(config.sample_rate_hz));
-        let _ = cmd_tx.unbounded_send(AcquisitionCommand::Start);
-
-        // Spawn the acquisition future (tokio if runtime active, else test pool)
-        let fut = run_acquisition(handle, cmd_rx, Some(data_tx));
-        spawn_acq_future(fut, return_tx, device_id);
-
-        if let Some((app_ref, tab_id, ver)) = drain_info {
-            // UI path: async drain + async handle return
-            spawn_drain_task(data_rx, app_ref.clone(), tab_id, ver);
-            spawn_return_task(return_rx, app_ref);
-
-            DeviceAcquisition {
-                analog,
-                digital,
-                state: AcquisitionState::Running,
-                sample_count: 0,
-                cmd_tx,
-                data_rx: None,
-                config: config.clone(),
-            }
-        } else {
-            // Test path: keep data_rx for manual drain
-            _app.device_manager.register_pending_return(return_rx);
-
-            DeviceAcquisition {
-                analog,
-                digital,
-                state: AcquisitionState::Running,
-                sample_count: 0,
-                cmd_tx,
-                data_rx: Some(data_rx),
-                config: config.clone(),
-            }
+        DeviceAcquisition {
+            analog,
+            digital,
+            state: AcquisitionState::Running,
+            sample_count: 0,
+            cmd_tx,
+            data_rx: Some(data_rx),
+            config: config.clone(),
         }
     }
 }
@@ -208,6 +172,7 @@ pub fn start(app_ref: &AppStateRef, tab_id: TabId, data_version: Signal<u64>) {
 }
 
 /// Start acquisition (test version — sync, manual drain via [`drain_all`]).
+#[cfg(test)]
 pub fn start_sync(app: &mut AppState, tab_id: TabId) {
     _start_impl(app, tab_id, None);
 }
@@ -343,8 +308,8 @@ pub fn active_tab_acq_state(app: &AppState) -> AcquisitionState {
     }
 }
 
-/// Drives the test executor (non-WASM only).
+/// Drives the test executor.
+#[cfg(test)]
 pub fn pump_executor() {
-    #[cfg(not(target_arch = "wasm32"))]
     TEST_POOL.with(|pool| pool.borrow_mut().0.run_until_stalled());
 }
