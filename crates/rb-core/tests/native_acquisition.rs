@@ -82,6 +82,9 @@ impl Oscilloscope for PanicDevice {
     fn sample_rate_hz(&self) -> f64 {
         1.0
     }
+    fn supported_sample_rates(&self) -> &[f64] {
+        &[1_000.0, 10_000.0, 100_000.0, 1_000_000.0]
+    }
     async fn set_sample_rate_hz(&mut self, _hz: f64) -> DeviceResult<()> {
         Ok(())
     }

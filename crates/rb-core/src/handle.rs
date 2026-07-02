@@ -104,6 +104,22 @@ impl DeviceHandle {
         self.digital = digital;
     }
 
+    /// Discards all acquired samples by recreating traces with the same
+    /// channels and timebase. Called at the start of every acquisition so
+    /// that Stop → Start begins a fresh capture.
+    fn clear_traces(&mut self) {
+        for trace in &mut self.analog {
+            let tb = *trace.timebase();
+            let ch = trace.channel().clone();
+            *trace = AnalogTrace::new(ch, tb);
+        }
+        if let Some(digital) = &mut self.digital {
+            let tb = *digital.timebase();
+            let channels = digital.channels().to_vec();
+            *digital = DigitalTrace::new(channels, tb);
+        }
+    }
+
     /// This device's stable identifier.
     #[must_use]
     pub fn id(&self) -> &DeviceId {
@@ -158,6 +174,9 @@ impl DeviceHandle {
 
     /// Arms every acquirable capability and enters [`Running`](AcquisitionState::Running).
     ///
+    /// Clears any previously acquired trace data so that re-arm (Stop → Start)
+    /// begins a fresh capture rather than appending to the prior run.
+    ///
     /// Does NOT start the bulk data streaming — call [`start_streaming`] after
     /// this to begin the push-based data flow.
     ///
@@ -165,6 +184,7 @@ impl DeviceHandle {
     /// Returns [`SessionError::NotAcquirable`] if the device streams no samples,
     /// or a [`SessionError::Device`] if arming fails.
     pub async fn arm(&mut self) -> Result<(), SessionError> {
+        self.clear_traces();
         let mut armed_any = false;
         if let Some(scope) = self.device.as_oscilloscope_mut() {
             scope.arm().await?;

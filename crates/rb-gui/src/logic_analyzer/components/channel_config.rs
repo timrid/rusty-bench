@@ -22,6 +22,7 @@ pub fn ChannelConfig(
     let analog_enabled = cfg.analog_enabled.clone();
     let digital_enabled = cfg.digital_enabled.clone();
     let sample_rate_hz = cfg.sample_rate_hz;
+    let supported = cfg.supported_sample_rates.clone();
     let sc = sample_count();
     drop(cfg);
 
@@ -36,20 +37,43 @@ pub fn ChannelConfig(
                 span { class: "text-[9px] font-bold text-zinc-500 uppercase tracking-wider", "Rate" }
             }
             div { class: "px-2 pb-1.5",
-                input {
-                    r#type: "text",
-                    class: "w-full px-1.5 py-0.5 bg-zinc-800 border border-zinc-700 rounded text-xs text-zinc-300 font-mono",
-                    value: "{fmt_rate(sample_rate_hz)}",
-                    oninput: {
-                        let mut config = config;
-                        let on_sample_rate_change = on_sample_rate_change;
-                        move |evt| {
-                            if let Some(hz) = parse_rate(&evt.value()) {
-                                config.write().sample_rate_hz = hz;
-                                on_sample_rate_change.call(hz);
+                if supported.is_empty() {
+                    input {
+                        r#type: "text",
+                        class: "w-full px-1.5 py-0.5 bg-zinc-800 border border-zinc-700 rounded text-xs text-zinc-300 font-mono",
+                        value: "{fmt_rate(sample_rate_hz)}",
+                        oninput: {
+                            let mut config = config;
+                            let on_sample_rate_change = on_sample_rate_change;
+                            move |evt| {
+                                if let Some(hz) = parse_rate(&evt.value()) {
+                                    config.write().sample_rate_hz = hz;
+                                    on_sample_rate_change.call(hz);
+                                }
+                            }
+                        },
+                    }
+                } else {
+                    select {
+                        class: "w-full px-1 py-0.5 bg-zinc-800 border border-zinc-700 rounded text-xs text-zinc-300 font-mono",
+                        onchange: {
+                            let mut config = config;
+                            let on_sample_rate_change = on_sample_rate_change;
+                            move |evt| {
+                                if let Ok(hz) = evt.value().parse::<f64>() {
+                                    config.write().sample_rate_hz = hz;
+                                    on_sample_rate_change.call(hz);
+                                }
+                            }
+                        },
+                        for &rate in &supported {
+                            option {
+                                value: "{rate}",
+                                selected: (rate - sample_rate_hz).abs() < 1.0,
+                                "{fmt_rate(rate)}"
                             }
                         }
-                    },
+                    }
                 }
             }
 

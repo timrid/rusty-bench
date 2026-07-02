@@ -102,6 +102,42 @@ const MAX_RENUM_DELAY_MS: u64 = 3000;
 /// Poll interval during renumeration wait.
 const RENUM_POLL_MS: u64 = 100;
 
+/// The fixed sample rates (Hz) that fx2lafw hardware can achieve exactly.
+///
+/// Taken from sigrok's fx2lafw driver.  The rates are computed from the FX2LP's
+/// 48 MHz / 30 MHz clock dividers.  In 16‑bit mode the maximum usable rate is
+/// 12 MHz; in 8‑bit mode it is 24 MHz.  Rates above the current mode's ceiling
+/// are filtered out by [`supported_sample_rates`].
+///
+/// [`supported_sample_rates`]: LogicAnalyzer::supported_sample_rates
+const FX2LAFW_SAMPLE_RATES: [f64; 17] = [
+    // kHz range
+    20_000.0,
+    25_000.0,
+    50_000.0,
+    100_000.0,
+    200_000.0,
+    250_000.0,
+    500_000.0,
+    // MHz range
+    1_000_000.0,
+    2_000_000.0,
+    3_000_000.0,
+    4_000_000.0,
+    6_000_000.0,
+    8_000_000.0,
+    // ≥12 MHz: 16‑bit mode stops here
+    12_000_000.0,
+    16_000_000.0,
+    24_000_000.0,
+    48_000_000.0,
+];
+
+/// Maximum sample rate (Hz) for 8-bit mode (≤8 channels).
+const MAX_RATE_8BIT: f64 = 24_000_000.0;
+/// Maximum sample rate (Hz) for 16-bit mode (9–16 channels).
+const MAX_RATE_16BIT: f64 = 12_000_000.0;
+
 // -- Transfer buffer sizing --------------
 
 /// Maximum number of concurrent bulk-IN transfers.
@@ -150,8 +186,10 @@ struct DelayConfig {
 
 /// Compute the GPIF delay and select a clock source for a target sample rate.
 ///
-/// Prefers 48 MHz when it yields an exact division, otherwise falls back to
-/// 30 MHz.  The delay is `clock_hz / target_hz - 1`, capped at [`MAX_GPIF_DELAY`].
+/// Prefers 48 MHz when it yields an exact division whose delay stays within
+/// [`MAX_GPIF_DELAY`], otherwise falls back to 30 MHz.  Slow rates (≤~31 kHz)
+/// require the 30 MHz clock to keep the delay under the hardware limit.
+/// The delay is `clock_hz / target_hz - 1`.
 fn compute_delay(target_hz: f64) -> DelayConfig {
     for &clock in &[CLOCK_48MHZ, CLOCK_30MHZ] {
         // fx2lafw only uses this clock if the division is exact
@@ -159,11 +197,16 @@ fn compute_delay(target_hz: f64) -> DelayConfig {
         if (div_f - div_f.round()).abs() > 1e-6 {
             continue;
         }
-        let delay = (div_f as u16).saturating_sub(1).min(MAX_GPIF_DELAY);
-        let actual = clock / (delay as f64 + 1.0);
+        // If the required delay exceeds the GPIF hardware limit, this clock
+        // is too fast for the requested rate — try the next (slower) clock.
+        let delay_raw = (div_f as u16).saturating_sub(1);
+        if delay_raw > MAX_GPIF_DELAY {
+            continue;
+        }
+        let actual = clock / (delay_raw as f64 + 1.0);
         return DelayConfig {
             clock_hz: clock,
-            delay,
+            delay: delay_raw,
             actual_rate_hz: actual,
         };
     }
@@ -457,9 +500,33 @@ impl LogicAnalyzer for Fx2lafwDevice {
         self.actual_rate
     }
 
+    fn supported_sample_rates(&self) -> &[f64] {
+        let max_rate = if self.sample_wide {
+            MAX_RATE_16BIT
+        } else {
+            MAX_RATE_8BIT
+        };
+        // All rates are sorted ascending; find the partition point for the
+        // current mode's ceiling.
+        let split = FX2LAFW_SAMPLE_RATES.partition_point(|&r| r <= max_rate);
+        &FX2LAFW_SAMPLE_RATES[..split]
+    }
+
     async fn set_sample_rate_hz(&mut self, hz: f64) -> DeviceResult<()> {
-        self.config.sample_rate_hz = hz;
-        // Rate is applied on next arm(); just store the target.
+        let supported = self.supported_sample_rates().to_vec();
+        // Find the nearest supported rate.
+        let best = supported
+            .iter()
+            .min_by(|a, b| {
+                (**a - hz)
+                    .abs()
+                    .partial_cmp(&(**b - hz).abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .copied()
+            .ok_or_else(|| DeviceError::Protocol("no supported sample rate".into()))?;
+        self.config.sample_rate_hz = best;
+        // Rate is applied on next arm().
         Ok(())
     }
 
@@ -621,6 +688,12 @@ impl AcquisitionSource for Fx2lafwDevice {
             // Cancel any remaining pending bulk-IN transfers so the pipe is
             // clean for the next acquisition (re-arm support).
             let _ = transport.clear_in_halt().await;
+            // Drain all completions (including cancelled ones) from the nusb
+            // queue.  Otherwise stale cancellations linger at the front and
+            // are returned by the first `next_bulk_in()` on re-arm.
+            while transport.pending_bulk_in() > 0 {
+                let _ = transport.next_bulk_in().await;
+            }
             // Return the transport so it can be reused on re-arm.
             let _ = return_tx.send(transport);
         };
@@ -1356,6 +1429,34 @@ mod tests {
         let dc = compute_delay(1.0);
         assert_eq!(dc.delay, MAX_GPIF_DELAY);
         assert!(dc.actual_rate_hz > 0.0);
+    }
+
+    #[test]
+    fn delay_slow_rate_uses_30mhz_not_capped() {
+        // 20 kHz: 48 MHz delay = 2399 > MAX_GPIF_DELAY, so must fall
+        // through to 30 MHz where delay = 1499 ≤ 1536.
+        let dc = compute_delay(20_000.0);
+        assert!((dc.clock_hz - CLOCK_30MHZ).abs() < 1.0);
+        assert_eq!(dc.delay, 1499); // 30M / 20k - 1
+        assert!((dc.actual_rate_hz - 20_000.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn delay_slow_rate_25khz_uses_30mhz() {
+        // 25 kHz: 48 MHz delay = 1919 > MAX_GPIF_DELAY, fall through to 30 MHz.
+        let dc = compute_delay(25_000.0);
+        assert!((dc.clock_hz - CLOCK_30MHZ).abs() < 1.0);
+        assert_eq!(dc.delay, 1199); // 30M / 25k - 1
+        assert!((dc.actual_rate_hz - 25_000.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn delay_mid_rate_50khz_prefers_48mhz() {
+        // 50 kHz: 48 MHz delay = 959 ≤ 1536, so should pick 48 MHz.
+        let dc = compute_delay(50_000.0);
+        assert!((dc.clock_hz - CLOCK_48MHZ).abs() < 1.0);
+        assert_eq!(dc.delay, 959);
+        assert!((dc.actual_rate_hz - 50_000.0).abs() < 1.0);
     }
 
     #[test]

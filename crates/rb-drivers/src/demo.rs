@@ -232,6 +232,12 @@ impl DemoDevice {
     }
 }
 
+/// Sample rates advertised by the demo device (spanning LF audio to 1 MSa/s).
+const DEMO_SAMPLE_RATES: &[f64] = &[
+    1_000.0, 5_000.0, 10_000.0, 20_000.0, 50_000.0,
+    100_000.0, 200_000.0, 500_000.0, 1_000_000.0,
+];
+
 #[async_trait(?Send)]
 impl Oscilloscope for DemoDevice {
     fn channels(&self) -> &[AnalogChannel] {
@@ -240,6 +246,10 @@ impl Oscilloscope for DemoDevice {
 
     fn sample_rate_hz(&self) -> f64 {
         self.source.config.sample_rate_hz
+    }
+
+    fn supported_sample_rates(&self) -> &[f64] {
+        DEMO_SAMPLE_RATES
     }
 
     async fn set_sample_rate_hz(&mut self, hz: f64) -> DeviceResult<()> {
@@ -265,6 +275,10 @@ impl LogicAnalyzer for DemoDevice {
 
     fn sample_rate_hz(&self) -> f64 {
         self.source.config.sample_rate_hz
+    }
+
+    fn supported_sample_rates(&self) -> &[f64] {
+        DEMO_SAMPLE_RATES
     }
 
     async fn set_sample_rate_hz(&mut self, hz: f64) -> DeviceResult<()> {

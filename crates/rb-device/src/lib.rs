@@ -72,6 +72,9 @@ mod tests {
         fn sample_rate_hz(&self) -> f64 {
             self.sample_rate_hz
         }
+        fn supported_sample_rates(&self) -> &[f64] {
+            &[1_000.0, 10_000.0, 100_000.0, 1_000_000.0]
+        }
         async fn set_sample_rate_hz(&mut self, hz: f64) -> DeviceResult<()> {
             if hz <= 0.0 {
                 return Err(DeviceError::InvalidParameter(

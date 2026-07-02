@@ -24,6 +24,9 @@ pub struct AcquisitionConfig {
     /// Desired sample rate in Hz.  Sent via [`SetSampleRate`](AcquisitionCommand::SetSampleRate)
     /// before every [`Start`](AcquisitionCommand::Start).
     pub sample_rate_hz: f64,
+    /// The list of sample rates the device supports, in hertz.
+    /// Empty when the driver does not advertise a fixed list (free input).
+    pub supported_sample_rates: Vec<f64>,
     /// Analog channel descriptors (device capabilities, stable).
     pub analog_channels: Vec<AnalogChannel>,
     /// Per-analog-channel enable flags. A disabled channel is still present in
@@ -52,22 +55,35 @@ impl AcquisitionConfig {
             .map(|la| la.channels().to_vec())
             .unwrap_or_default();
 
-        // Prefer analog rate, fall back to digital, then the default.
-        // Some drivers (e.g. fx2lafw) report 0.0 before the first arm();
-        // use the configured default in that case.
-        let raw_rate = device
+        // Collect supported sample rates (prefer analog, fall back to digital).
+        let supported_sample_rates = device
             .as_oscilloscope()
-            .map(|s| s.sample_rate_hz())
-            .or_else(|| device.as_logic_analyzer().map(|la| la.sample_rate_hz()))
-            .unwrap_or(0.0);
-        let sample_rate_hz = if raw_rate > 0.0 {
-            raw_rate
-        } else {
-            DEFAULT_SAMPLE_RATE_HZ
-        };
+            .map(|s| s.supported_sample_rates().to_vec())
+            .or_else(|| {
+                device
+                    .as_logic_analyzer()
+                    .map(|la| la.supported_sample_rates().to_vec())
+            })
+            .unwrap_or_default();
+
+        // Prefer the first supported rate, then the current device rate,
+        // then the hard-coded default.
+        let sample_rate_hz = supported_sample_rates
+            .first()
+            .copied()
+            .or_else(|| {
+                let raw = device
+                    .as_oscilloscope()
+                    .map(|s| s.sample_rate_hz())
+                    .or_else(|| device.as_logic_analyzer().map(|la| la.sample_rate_hz()))
+                    .unwrap_or(0.0);
+                if raw > 0.0 { Some(raw) } else { None }
+            })
+            .unwrap_or(DEFAULT_SAMPLE_RATE_HZ);
 
         Self {
             sample_rate_hz,
+            supported_sample_rates,
             analog_enabled: vec![true; analog_channels.len()],
             digital_enabled: vec![true; digital_channels.len()],
             analog_channels,
@@ -105,6 +121,7 @@ impl Default for AcquisitionConfig {
     fn default() -> Self {
         Self {
             sample_rate_hz: DEFAULT_SAMPLE_RATE_HZ,
+            supported_sample_rates: Vec::new(),
             analog_channels: Vec::new(),
             analog_enabled: Vec::new(),
             digital_channels: Vec::new(),

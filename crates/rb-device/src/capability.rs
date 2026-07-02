@@ -27,6 +27,10 @@ pub trait LogicAnalyzer {
     fn channels(&self) -> &[DigitalChannel];
     /// The configured acquisition sample rate, in hertz.
     fn sample_rate_hz(&self) -> f64;
+    /// The list of sample rates this device supports, in hertz.
+    /// A front-end may use this to populate a drop-down; [`set_sample_rate_hz`]
+    /// should validate against this list.
+    fn supported_sample_rates(&self) -> &[f64];
     /// Requests a new acquisition sample rate, in hertz.
     async fn set_sample_rate_hz(&mut self, hz: f64) -> DeviceResult<()>;
     /// Arms the device so it begins streaming samples into its store.
@@ -42,6 +46,8 @@ pub trait Oscilloscope {
     fn channels(&self) -> &[AnalogChannel];
     /// The configured acquisition sample rate, in hertz.
     fn sample_rate_hz(&self) -> f64;
+    /// The list of sample rates this device supports, in hertz.
+    fn supported_sample_rates(&self) -> &[f64];
     /// Requests a new acquisition sample rate, in hertz.
     async fn set_sample_rate_hz(&mut self, hz: f64) -> DeviceResult<()>;
     /// Arms the device so it begins streaming samples into its store.
