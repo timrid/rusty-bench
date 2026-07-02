@@ -1,0 +1,1804 @@
+commit b6ec4813b592757e39784b9b370f3b12ae876954
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Thu Nov 14 21:45:52 2019 +0100
+
+    configure.ac: Bump package version to 0.1.7.
+
+commit 8da0cd02228bb6890eb5068e6507bf6ce0d2fdd2
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Thu Nov 14 21:45:25 2019 +0100
+
+    Increase FX2LAFW_VERSION_MINOR to 4.
+    
+    There have been changes since the last release, but they have been
+    compatible ones that don't require any host-side (libsigrok) changes,
+    thus only increase FX2LAFW_VERSION_MINOR (but not FX2LAFW_VERSION_MAJOR).
+
+commit 24a04d22869658abcc96067349a588845cf9a80c
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Thu Nov 14 21:45:10 2019 +0100
+
+    NEWS: Add list of user-visible changes so far.
+
+commit b283ba837a113c2c5085319aa993e2a70e118734
+Author: Kate J. Temkin <k@ktemkin.com>
+Date:   Wed Aug 21 18:59:55 2019 -0600
+
+    allow captures of up to 48MHz, if bus conditions permit
+    
+    We allow the FX2 Waveform to operate using only a single state
+    (and thus at a rate equal to the max IFCLK of 48MHz) by allowing
+    the decision point state to re-execute its operation.
+    
+    We accordingly remove the guards preventing operation with
+    zero-duration wait states; allowing waveforms with no wait states
+    to be generated.
+
+commit 4e52e8a1fa6be86fed185389a1455cd20cc81463
+Author: Daniel Trnka <daniel.trnka@gmail.com>
+Date:   Sun Sep 15 09:51:26 2019 +0200
+
+    build: use sdar instead of deprecated sdcclib
+    
+    This fixes bug #1404
+
+commit 87da1d2ca36220b7e55a80b3825a3cbf96c747b7
+Author: Philip Gottschling <gottschlingp@gmail.com>
+Date:   Sat Dec 29 14:58:50 2018 +0100
+
+    bugfix in hantek 6022BL voltage range selection
+    
+    This fixes bug #1360.
+
+commit 8e269f7bfe3c6934a12f7a33274a6bf249a02610
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Fri Dec 28 13:33:52 2018 +0100
+
+    Makefile.am: Split an overly long line.
+
+commit 7a4d2e556c911dcd4182369fb2fbbd8dc70bf4f3
+Author: majekw <majek@w7i.pl>
+Date:   Sun Dec 2 00:16:28 2018 +0100
+
+    Add YiXingDianZi MDSO firmware support.
+
+commit fac71cc2015cd5ca9fbec4dd19fdf44c8206e246
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Sat Nov 17 20:39:59 2018 +0100
+
+    Bump required sdcc version to >= 3.4.0.
+    
+    There is an issue with some sdcc versions that causes problems, e.g. only
+    the first scan for an FX2 device succeeds, the second one yields
+    LIBUSB_ERROR_PIPE (see bug #1326).
+    
+    Recent tests have shown that sdcc 3.3.0 produces broken fx2lafw firmware
+    files, and sdcc 3.1.0 errors out during the build. Versions 3.4.0, 3.5.0,
+    3.6.9, and 3.8.0 (for example) all seem to work fine.
+    
+    Thus, increase the minimum required sdcc version to 3.4.0.
+    
+    This fixes bug #1326.
+
+commit 14728a53624f000db0fa8388ecdb8b021250322b
+Author: Sergey Alirzaev <zl29ah@gmail.com>
+Date:   Thu Apr 12 10:20:30 2018 +0300
+
+    sainsmart-dds120: make the "1kHz" reference signal 1kHz
+
+commit 0fdc160d822b7ccb23487307a64b1ef6be2acccc
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Wed Jan 24 19:47:03 2018 +0100
+
+    configure.ac: Bump package version to 0.1.6.
+
+commit 3fe2ae62bbd0bd04d956123014efd6f2f2b12971
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Wed Jan 24 19:46:01 2018 +0100
+
+    Increase FX2LAFW_VERSION_MINOR to 3.
+    
+    There have been changes since the last release, but they have been
+    compatible ones that don't require any host-side (libsigrok) changes,
+    thus only increase FX2LAFW_VERSION_MINOR (but not FX2LAFW_VERSION_MAJOR).
+
+commit f3e9593b3d205ae4699dacc6a201f01f755757ef
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Wed Jan 24 19:44:20 2018 +0100
+
+    NEWS: Add list of user-visible changes so far.
+
+commit 553c0ee354bb2ae5eb36c8ba84f22b948708e785
+Author: Maciej Kurc <mkurc1234@gmail.com>
+Date:   Wed Jan 24 19:39:04 2018 +0100
+
+    fx2lafw: Factor out LED control.
+    
+    Also, make the LED polarity compile-time configurable.
+    
+    [Note: This is a slightly modified version of a patch from Maciej Kurc.]
+
+commit f6ef2ff72979fd6504b930d7db9506f35ce07d37
+Author: Gerhard Sittig <gerhard.sittig@gmx.net>
+Date:   Fri Dec 29 16:06:23 2017 +0100
+
+    fx2lafw: silence integer overflow compile warnings
+    
+    Explicitly mark literals for control bitfield values as unsigned. This
+    avoids a compiler warning when the MSB gets set in assignments to a BYTE.
+    
+    The warning was not seen with SDCC v3.3, but with v3.6.9:
+    
+      SDCC     fx2lafw.rel
+      ./source/fx2lafw.c:66: warning 158: overflow in implicit constant conversion
+      SDCC     gpif-acquisition.rel
+      ./source/gpif-acquisition.c:65: warning 158: overflow in implicit constant conversion
+
+commit 14d3dfb79dca9e261dbebd5a381155e5a93ce0e0
+Author: Gerhard Sittig <gerhard.sittig@gmx.net>
+Date:   Fri Dec 29 16:05:04 2017 +0100
+
+    fx2lafw: fixup missing semicolon after macro "function call"
+    
+    Since RESETFIFO() macro currently is "phrased unfortunately", the call
+    site got away with the omission of a semicolon. Adding the missing
+    semicolon does not harm the current implementation, and unbreaks the
+    build when RESETFIFO() gets improved in the future.
+
+commit 57b6b3a357e22769e7cbb4416c93bedbdd0c0ec6
+Author: Stefan Brüns <stefan.bruens@rwth-aachen.de>
+Date:   Sun Dec 31 07:51:53 2017 +0100
+
+    fx2lafw: Insert SYNCDELAYs where necessary according to TRM
+
+commit cfeb1a3602f587eb981c4ce1f9ff368997f4e0e0
+Author: Stefan Brüns <stefan.bruens@rwth-aachen.de>
+Date:   Wed Jan 3 23:59:41 2018 +0100
+
+    fx2lafw: Delay start of GPIF until first BULK IN request is received
+    
+    Apparently the host controller may issue the CONTROL transfer with
+    the START command earlier than any of the BULK IN requests. The result
+    is a filled up EP2 packet FIFO, which aborts the acquisition.
+    
+    Waiting for the first BULK IN request matches the sample code in the
+    TRM, see e.g. Figure 10-30.
+    
+    This fixes bug #655.
+
+commit edf37359a4dedfd8c54f42a25cbef1c7d0814887
+Author: Stefan Brüns <stefan.bruens@rwth-aachen.de>
+Date:   Wed Jan 3 23:57:02 2018 +0100
+
+    fx2lafw: add definitions for IBN (IN BULK NAK) interrupt
+
+commit d83553cc682f8e5ac30af3724584e030604842c5
+Author: Stefan Brüns <stefan.bruens@rwth-aachen.de>
+Date:   Fri Dec 29 02:38:23 2017 +0100
+
+    fx2lafw: remove break after return
+
+commit 7a655031609c053c999dbad90c99fa4b0d63652c
+Author: Stefan Brüns <stefan.bruens@rwth-aachen.de>
+Date:   Fri Dec 29 02:45:39 2017 +0100
+
+    fx2lafw: Disable SOF interrupt, it is not used
+
+commit fdaf46b9ac162543b9b23e5a0cf95127d6ea49cc
+Author: Gerhard Sittig <gerhard.sittig@gmx.net>
+Date:   Mon Dec 18 14:50:06 2017 +0100
+
+    scopes: improve C preprocessor macro robustness
+    
+    For pin and LED control related #define directives use C language
+    compound statements. This lets call sites use the macros in intended
+    ways (like regular function calls) without needing to worry about their
+    implementation details, or suffering from unexpected behaviour.
+    
+    Strictly speaking the single statement variants don't require the
+    wrapper, but I've added one for improved future maintenance.
+
+commit ba63ce8b9aba391c41cde4605ef9b941d4a879b3
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Mon Apr 24 15:42:05 2017 +0200
+
+    scopes: Move a code comment.
+
+commit 37521a3b07b1dd757e1cef9b6357a23d477ee303
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Mon Apr 24 15:07:56 2017 +0200
+
+    Makefile.am: Fix a 'make distclean' error.
+
+commit b11ae8d63a1cb54034e43084d512666056a75f43
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Mon Apr 24 15:06:08 2017 +0200
+
+    scopes: Makefile.am: Add and use SDCC_LINK_FLAGS_SCOPE.
+
+commit 72295bd729dde3e065ecb40b4bf8b479bee23e90
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Mon Apr 24 15:04:09 2017 +0200
+
+    scopes: Rename dscr_hantek_6022be.inc to dscr_scope.inc.
+
+commit fd70a923c92d0f33d2b7ae4bf17339e2ff28454c
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Mon Apr 24 14:47:26 2017 +0200
+
+    scopes: Unify code-base, remove duplicate code/files.
+    
+    All currently supported scopes (and those that will be added in the
+    future) now use the common include/scopes.inc firmware implementation.
+    
+    Only the device-specific code and #defines are moved to the respective
+    subdirectory in hw/.
+    
+    The now-obsolete hantek_6022be.c, hantek_6022bl.c, and sainsmart_dds120.c
+    files are removed.
+
+commit b48a78c1beb65f7ea2e3ae8bfe33859ead122d86
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Mon Apr 24 11:34:18 2017 +0200
+
+    scopes: Add include/scope.inc.
+    
+    This is a copy of hantek_6022be.c, with device-specific code removed.
+    
+    This includes some #defines at the top of the file, samplerates[],
+    and set_voltage().
+
+commit 2c57c00b18c085fb72579470368bc18a5985ef37
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Mon Apr 24 08:30:06 2017 +0200
+
+    scopes: Factor out TIMER2_VAL.
+
+commit 297fb13a138176c664bb80ef71f2d4f685793b29
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Thu Apr 20 00:47:03 2017 +0200
+
+    scopes: Factor out SET_COUPLING() and SET_CALIBRATION_PULSE().
+
+commit e1c5ba21853765725d723efdef22bedef7cfecc6
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Sat Apr 15 20:17:24 2017 +0200
+
+    scopes: Factor out CTL_BIT, OUT0, and OE_CTL.
+
+commit beaa03fc313bdf646a62c85b03cb2462d8b0778b
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Sat Apr 8 17:11:41 2017 +0200
+
+    scopes: Use RENUMERATE_UNCOND() for all devices.
+
+commit 4d971e019068b5747fe439b177c57cd635f3b9dd
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Sat Apr 8 17:10:31 2017 +0200
+
+    scopes: Initialize PORTA/C/E consistently for all devices.
+
+commit 65b34f7ea6d5f250a09c878d929e5c5312093e54
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Sat Apr 8 16:58:42 2017 +0200
+
+    scopes: Factor out LED_CLEAR(), LED_GREEN(), LED_RED().
+
+commit e583c3fcd0bd1e4a44846fba5e80bbea1ff215a2
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Sat Apr 8 16:39:07 2017 +0200
+
+    scopes: Factor out TOGGLE_CALIBRATION_PIN().
+
+commit be6d306de12082c887c30e364dcf66438acc6183
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Mon Apr 3 16:03:05 2017 +0200
+
+    scopes: Factor out SET_ANALOG_MODE().
+
+commit 3968bbfb63b0946841e4f2d78339523a55ef9124
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Mon Apr 3 15:55:03 2017 +0200
+
+    scopes: Adapt/fix some code comments, cosmetics.
+
+commit cf43e09a111d7d6bf482521149bd33d85947dede
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Sun Dec 17 15:19:26 2017 +0100
+
+    fx2lafw: Blink LED on pin PA1 during acquisition.
+    
+    All FX2 based logic analyzer devices will now toggle PA1 during
+    acquisition, and keep it high while idle.
+    
+    On fx2grok-tiny and fx2grok-flat there's a LED connected to PA1.
+    Thus, those devices will visually indicate whether a firmware has been
+    uploaded (LED will light up and stay like that while the device is
+    idle). During any acquisition the LED will blink.
+    
+    The PA1 pin is not used on most other FX2 based LA devices, so that
+    shouldn't cause any issues (tested on hardware).
+    
+    On certain devices with LA and analog support the PA1 pin is used for
+    other purposes (e.g. Hantek 6022BL, Instrustar ISDS205X) but even there
+    this won't cause any issues in practice (tested on hardware).
+
+commit d67ced51c6900f948c5e1ff13d30d6aa90cb1300
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Fri Jun 9 08:47:40 2017 +0200
+
+    configure.ac: Bump package version to 0.1.5.
+
+commit dd90e9e13320f48b454d8a6ba9e77351b8a5a31b
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Fri Jun 9 00:46:16 2017 +0200
+
+    NEWS: Add list of user-visible changes so far.
+
+commit 02d3622255a4eee3aa6ed3ab86b24885cef92544
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Tue Jun 6 16:15:21 2017 +0200
+
+    HACKING: Update URL to Linux kernel coding style.
+
+commit 6fcab61f470a44889a919e0bf172c07bb2614d01
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Fri Jan 27 01:05:14 2017 +0100
+
+    hantek_6022be.c: Fix a code comment.
+    
+    What's actually used there is OE2/CTL2.
+
+commit f6eb6aeceec7f1920b7814eeb87c635623ae6746
+Author: Jan Losinski <losinski@wh2.tu-dresden.de>
+Date:   Thu Jan 12 22:51:05 2017 +0100
+
+    Enable full port A as output on 6022BL
+    
+    Signed-off-by: Jan Losinski <losinski@wh2.tu-dresden.de>
+
+commit 90fdecb7399353d9b806b303c92d20be810943b3
+Author: Jan Losinski <losinski@wh2.tu-dresden.de>
+Date:   Thu Jan 12 22:50:25 2017 +0100
+
+    Select enable OE0 instead of OE2 in 6022BL
+    
+    Signed-off-by: Jan Losinski <losinski@wh2.tu-dresden.de>
+
+commit a76fd2a9590f03cf26f47a04b2d0cb27f111c621
+Author: Jan Losinski <losinski@wh2.tu-dresden.de>
+Date:   Thu Jan 12 22:10:15 2017 +0100
+
+    Switch from OE2/CTL2 to OE0/CTL0 on 6022BL
+    
+    On this device CTL0 is soldered to IFCLK.
+    
+    Signed-off-by: Jan Losinski <losinski@wh2.tu-dresden.de>
+
+commit 59562384e15df70a4e836637300b71c800e35a8a
+Author: Jan Losinski <losinski@wh2.tu-dresden.de>
+Date:   Thu Jan 12 22:09:39 2017 +0100
+
+    Set PA7 in 6022BL again before sampling.
+    
+    Signed-off-by: Jan Losinski <losinski@wh2.tu-dresden.de>
+
+commit ae56b4f66d6d3263497399f5740a8703cb4bd178
+Author: Jan Losinski <losinski@wh2.tu-dresden.de>
+Date:   Thu Jan 12 16:41:39 2017 +0100
+
+    Change I/O ports for voltage selection on 6022BL
+    
+    The 6022BL has the multiplexers connected to port A bits instead of
+    port C.
+    
+    Signed-off-by: Jan Losinski <losinski@wh2.tu-dresden.de>
+
+commit eb52aca4c6382ec0bb4f7236c494a16c9fd62b01
+Author: Jan Losinski <losinski@wh2.tu-dresden.de>
+Date:   Thu Jan 12 16:40:47 2017 +0100
+
+    Set PA7 to high, to select analog mode.
+    
+    Signed-off-by: Jan Losinski <losinski@wh2.tu-dresden.de>
+
+commit cbd1bc65eeeae1c9a21970395941c77654fd32f0
+Author: Jan Losinski <losinski@wh2.tu-dresden.de>
+Date:   Thu Jan 12 16:39:32 2017 +0100
+
+    Change probe cal pin for 6022BL to PC2
+    
+    In contrast to the 6022BE it is not connected to PA7 but to PC2 on the
+    6022BL.
+    
+    Signed-off-by: Jan Losinski <losinski@wh2.tu-dresden.de>
+
+commit 1d203181ea88f0b609142adae4b650f950b857dd
+Author: Sebastian Tabares Amaya <sytabaresa@gmail.com>
+Date:   Tue Dec 27 20:17:32 2016 -0500
+
+    Initial support for Hantek 6022BL
+    
+    Based on 6022BE, changed Makefile.am, added 6022BL directory.
+
+commit 040a6eaec8c3ca523b1ce32bf0b119788b8ddb0f
+Author: Gerhard Sittig <gerhard.sittig@gmx.net>
+Date:   Thu Oct 20 09:23:33 2016 +0200
+
+    license: remove FSF postal address from boiler plate license text
+    
+    Remove the FSF postal address as it might change (it did in the past).
+    Reference the gnu.org website instead which is more stable.
+
+commit 2970556e910ee24673d909816c4cc6cf784fae4c
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Tue Oct 4 13:21:24 2016 +0200
+
+    configure.ac: Bump package version to 0.1.4.
+
+commit 1940f9fc5f94c31b9ac1172bdcbfdf775e8dd346
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Tue Oct 4 13:20:52 2016 +0200
+
+    NEWS: Add list of user-visible changes so far.
+
+commit b2893cc9f1b6a2fa4a53f32a85f29195b3ac4878
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Tue Oct 4 13:22:29 2016 +0200
+
+    Increase FX2LAFW_VERSION_MINOR to 2.
+    
+    There have been changes since the last release, but they have been
+    compatible ones that don't require any host-side (libsigrok) changes,
+    thus only increase FX2LAFW_VERSION_MINOR (but not FX2LAFW_VERSION_MAJOR).
+
+commit e59a70a92242d4c0d53ea0b065f61b43c2c43b03
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Sun Oct 30 12:12:31 2016 +0100
+
+    Use per-device USB serial number strings.
+    
+    These are not actual "serial numbers" in the strict sense, i.e. two
+    devices of the same type (e.g. two USBee ZX devices) would have the
+    same string.
+    
+    Using two different actual serial numbers in such a case is not possible
+    since both devices would get the exact same firmware file (uploaded to
+    RAM via USB) and thus the exact same hardcoded "serial number". All devices
+    where fx2lafw is currently used don't have an EEPROM where the firmware
+    (and thus a different serial number) could be stored persistently; it's
+    always re-uploaded to the device's RAM upon connecting the device to USB.
+    
+    However, the USB serial number field is still useful in that we can
+    store a nice device(-type) indicator string there. The benefit is that
+    an lsusb of an fx2lafw (after firmware upload) would yield something
+    specific like "USBee ZX" or "Hantek 6022BE" in addition to the very
+    generic "fx2lafw".
+
+commit 3878baac72b0db18a254b84f65a65a0f033e9be4
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Mon Oct 31 14:44:35 2016 +0100
+
+    Add "fx2lafw-" prefix to the 6022BE/DDS120 firmware files.
+
+commit b2fc269ae6d7586d8f8024354a490ecd55f77834
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Wed Oct 12 22:24:02 2016 +0200
+
+    Use the same VID/PID for Hantek 6022BE and SainSmart DDS120.
+    
+    (one of the official sigrok VID/PIDs, 1D50:608E)
+    
+    Encode the fact that they're different versions/revisions/variants
+    of the same device (more or less rebadges with only little changes)
+    in the USB product version field.
+
+commit 46e097cc30a9680362c4a0122e10dea79455ab01
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Wed Oct 12 22:16:13 2016 +0200
+
+    Makefile.am: Remove unneeded duplication.
+
+commit 01c919588b6ba25f926d97f899cfd2a5a082f453
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Sat Oct 8 16:41:10 2016 +0200
+
+    Add and use macros to simplify USB descriptor files.
+    
+    The macros in include/common.inc were provided by
+    Stefan Brüns <stefan.bruens@rwth-aachen.de>, thanks!
+
+commit 520598e2a91a2f68780744346ffb3998be50a9d4
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Sat Sep 3 15:33:51 2016 +0200
+
+    Makefile.am: Add dscr_hantek_6022be.inc to the tarball.
+
+commit 5fea0267f505f1ccc06c4516e246d875a4ae73bf
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Wed Aug 10 09:52:55 2016 +0200
+
+    HACKING: Prefer git pull requests over mailing list patches.
+    
+    Also, drop the reference to gitorious.org (no longer available).
+
+commit eccff92104ffb44e4344c87fc6743eec20b06694
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Wed Aug 10 09:44:45 2016 +0200
+
+    README: Drop obsolete and unneeded section.
+    
+    The firmware requirements should be documented in libsigrok itself, the
+    firmware in this repo doesn't know anything about its users per se.
+
+commit 6aa5d1f472dd35faed9085f6b2b24fa218314043
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Wed Aug 10 09:42:19 2016 +0200
+
+    gpif-acquisition.c: Minor cosmetics, drop obsolete comment.
+
+commit b93872aadb4d9aa576b9ce8d56dd2d0d8f953230
+Author: Paul Fertser <fercerpav@gmail.com>
+Date:   Fri Jul 15 23:19:10 2016 +0300
+
+    Refactor and bugfix the delay adding code for analog capture
+    
+    There're two essential modifications in this change:
+    
+    1. Fix timing for capture frequencies less than 200 kHz;
+    2. Sample ADC output after CLK is set low, as per the TLC5510
+    datasheet.
+    
+    The second point is also important as the capture state sets CLK low,
+    so with the previous code there might have been a very short glitch on
+    this line during capture. Not confirmed by measurements, but it's
+    cleaner this way.
+    
+    Signed-off-by: Paul Fertser <fercerpav@gmail.com>
+
+commit 1f99664cd09baa9bc584c884d7fd509d332d984e
+Author: Paul Fertser <fercerpav@gmail.com>
+Date:   Fri Jul 15 23:19:09 2016 +0300
+
+    Remove bogus part of OUTPUT used for analog sampling
+    
+    Since TRICTL = 0, FX2 always either pushes or pulls the CTLx pins.
+    
+    Signed-off-by: Paul Fertser <fercerpav@gmail.com>
+
+commit 10bb1488807fc35a95d2158b118b03bfc026ee4b
+Author: Paul Fertser <fercerpav@gmail.com>
+Date:   Fri Jul 15 23:19:08 2016 +0300
+
+    Fix typo in gpif_make_data_dp_state function name
+    
+    Signed-off-by: Paul Fertser <fercerpav@gmail.com>
+
+commit 41e02f6589989a2ef0c1d3c2be4317a662f393be
+Author: Paul Fertser <fercerpav@gmail.com>
+Date:   Fri Jul 15 23:19:07 2016 +0300
+
+    Change arguments of gpif_make_delay_state() to remove layering violation
+    
+    This function is called only for adding delay states to the waveform
+    so OPCODE is always the same.
+    
+    While at it, fix confusing comments.
+    
+    Signed-off-by: Paul Fertser <fercerpav@gmail.com>
+
+commit b68bc8eaca5454a158a0472afe45aac8c7f20717
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Wed Aug 10 09:38:14 2016 +0200
+
+    dscr*.inc: Document polling intervals better.
+
+commit 1cba57320f126176f6e45f3d0930e0fe9967a370
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Wed Aug 10 08:23:09 2016 +0200
+
+    dscr_hantek_6022be.inc: Fix incorrect comments, add additional ones.
+
+commit 3c9925a24936ed1cb225aa61e7d0971b7c9f680f
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Wed Aug 10 08:19:20 2016 +0200
+
+    dscr_hantek_6022be.inc: Change vendor string to "sigrok".
+
+commit e0c25b8e13abdba0de4dc57006dc195f4200b38a
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Wed Aug 10 08:07:32 2016 +0200
+
+    dscr_hantek_6022be.inc: Cosmetic and consistency changes.
+    
+    This makes the file a lot more readable and also easier to compare
+    to the other dscr.inc files.
+    
+    Also, fix some typos (or copy-paste errors) in some comments.
+
+commit ae087fd964d575a79f39ae086a035a3e4edf88bc
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Wed Aug 10 07:40:43 2016 +0200
+
+    dscr.inc: Shorten representation of two strings.
+
+commit bb9fd89f1c2668855475a441e1a5f2092a10fa3a
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Thu Aug 4 17:24:00 2016 +0200
+
+    hantek-6022be/sainsmart-dds120: Hook up correct per-device VID/PID.
+
+commit 4349f28686db6fe1f0c8863246f653277afb8b01
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Thu Aug 4 17:18:14 2016 +0200
+
+    Deduplicate hantek-6022be/sainsmart-dds120's dscr.inc.
+
+commit e16027445b508591ec8830fd74d0542e52a1c1d3
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Thu Aug 4 17:16:48 2016 +0200
+
+    hantek-6022be/sainsmart-dds120: Use the same USB product string.
+
+commit 823ff1e02ab3d100c1ef0d0fe3bbcc6b05aba446
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Wed Jul 13 00:10:21 2016 +0200
+
+    README: Mention the Sainsmart DDS120 firmware.
+
+commit 66255d9cae682fe637319bd59678ddf03595e466
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Tue Jul 12 23:48:13 2016 +0200
+
+    Add CWAV USBee ZX firmware support.
+    
+    This fixes bug #764.
+
+commit 386296a75ef7c2b3fbbd668de838a16bc13ee461
+Author: Benjamin Larsson <benjamin@southpole.se>
+Date:   Thu May 19 00:36:25 2016 +0200
+
+    Silence warnings
+    
+    The following warnings are fixed by this:
+    
+     hantek_6022be.c:424: warning 158: overflow in implicit constant conversion
+     sainsmart_dds120.c:359: warning 158: overflow in implicit constant conversion
+     sainsmart_dds120.c:363: warning 158: overflow in implicit constant conversion
+     sainsmart_dds120.c:366: warning 158: overflow in implicit constant conversion
+     sainsmart_dds120.c:370: warning 158: overflow in implicit constant conversion
+     sainsmart_dds120.c:494: warning 158: overflow in implicit constant conversion
+
+commit 24373950c5858ea7761ac8aa77b51c717558316b
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Thu May 19 00:17:16 2016 +0200
+
+    Add a few more code comments.
+
+commit 552a42e560835b12a1f8a51eec750792a196c6e5
+Author: Benjamin Larsson <benjamin@southpole.se>
+Date:   Wed May 18 22:50:06 2016 +0200
+
+    fx2lafw: clock CTL1 the same as CTL2
+    
+    The LHT00SU1 has it's clock pins swapped compared to other hardware.
+    By duplicating the CTL2 pin both the socket and the adc will
+    have the same clock frequency.
+
+commit 5b8b366d255733ca647f96c19a4c77a00583508e
+Author: Markus Siegert <markus@drsiegert.de>
+Date:   Sun Apr 10 22:03:13 2016 +0200
+
+    Use 1D50:608E for open source Sainsmart DDS120 firmware
+
+commit a425fae9a25f54af8d514aff8824382f7b317ba4
+Author: Benjamin Larsson <benjamin@southpole.se>
+Date:   Sat Apr 23 18:22:19 2016 +0200
+
+    Support changing calibration pulse frequency
+
+commit 33c275bbd292b21149cb76094e280b6ea2f62cae
+Author: Benjamin Larsson <benjamin@southpole.se>
+Date:   Sat Apr 23 18:19:12 2016 +0200
+
+    Add more sample rates
+
+commit 75ad0fa51ea581cbea1f1c0fb173856822c6e971
+Author: Benjamin Larsson <benjamin@southpole.se>
+Date:   Sun Apr 3 17:39:07 2016 +0200
+
+    Add support for setting Sainsmart AC/DC coupling
+
+commit ce1d0a869e4761d30b698b6bb1ea015a0470f09e
+Author: Benjamin Larsson <benjamin@southpole.se>
+Date:   Fri Mar 18 22:12:56 2016 +0100
+
+    Initial Sainsmart DDS120 firmware
+
+commit 8f87f8779a3977bd3cb8ec5003f43acdc44dbba6
+Author: Benjamin Larsson <benjamin@southpole.se>
+Date:   Thu Apr 28 00:58:26 2016 +0200
+
+    Add CMD_START_FLAGS_CLK_CTL2 command flag
+    
+    This command will generate a suitable clock on pin CTL2 for
+    devices with an analog input.
+
+commit c7d1f48c01801ba990fe6f9e881c688e5c90d24e
+Author: Benjamin Larsson <benjamin@southpole.se>
+Date:   Thu Apr 28 00:49:10 2016 +0200
+
+    Enable more control over the GPIF state machine
+
+commit a77606e9b63d2333f1253b8e0cb8071aed6d8609
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Thu Mar 10 23:31:18 2016 +0100
+
+    hw/hantek-6022be/dscr.a51: License header cosmetics.
+
+commit 38e32023c4b2dc92d51d969e1958bd1ee941804f
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Thu Mar 10 23:24:16 2016 +0100
+
+    hantek_6022be.c: Simplify handle_vendorcommand().
+
+commit 374453b93a012f483dc9da29ac4713b561e1aacb
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Thu Mar 10 23:19:48 2016 +0100
+
+    hantek_6022be.c: Minor cosmetics.
+
+commit 0ab4ea5da80c9f3d3e523dcaa259f5e97dcda0b8
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Thu Mar 10 23:15:05 2016 +0100
+
+    hantek_6022be.c: Make a few variables and functions static.
+
+commit fb4075d535596e9721f89d1cd98ab5ebe4540a2f
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Thu Mar 10 23:12:24 2016 +0100
+
+    hantek_6022be.c: Move main() for consistency.
+
+commit cc789c14085a371976fa7ef1bc281eb7bac34086
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Thu Mar 10 23:10:06 2016 +0100
+
+    hantek_6022be.c: Adapt to fx2lafw coding style, minor simplifications.
+
+commit 484b3aa0cf59216dee289c187fc6a232fdcf8ded
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Thu Mar 10 22:43:41 2016 +0100
+
+    hantek_6022be.c: Drop unneeded debug code, random cruft.
+
+commit 52ec81d349f5917587e98519b04ff109cf5cf32e
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Thu Mar 10 22:38:52 2016 +0100
+
+    README: Update to mention the Hantek 6022BE firmware.
+
+commit 1974eccb66634e2d7535a892d1c703665f757408
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Thu Mar 10 22:19:14 2016 +0100
+
+    hantek_6022be.c: Fix build error.
+    
+    Drop handle_get_descriptor(), since it's already provided by
+    fx2lib/lib/setupdat.c, in order to fix the following linker error:
+    
+      Multiple definition of _handle_get_descriptor
+      Makefile:925: recipe for target 'hw/hantek-6022be/hantek-6022be.ihx' failed
+
+commit 6139dad4829bf7d412f4ad847cf1d02aecb20bbe
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Thu Mar 10 21:46:29 2016 +0100
+
+    Makefile.am: Hook up building of hantek-6022be.fw.
+    
+    The FX2 firmware for the Hantek 6022BE USB-based oscilloscope uses most
+    of the existing fx2lafw build infrastructure and our existing fx2lib setup,
+    but requires slightly different sdcc linker settings due to different code
+    and XRAM sizes and locations, etc.
+
+commit 189db3d41e4c3d8a4aec5ec605c03df75577d531
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Thu Mar 10 21:02:12 2016 +0100
+
+    Add FX2 firmware for the Hantek 6022BE USB scope.
+    
+    This firmware was originally created by Jochen Hoenicke in 05/2015
+    for the Hantek6022API github project by Robert Cope. Full credit for
+    the implementation of the firmware goes to Jochen Hoenicke, thanks!
+    
+    Github project:
+    
+      https://github.com/rpcope1/Hantek6022API
+    
+    We're incorporating the firmware into the sigrok-firmware-fx2lafw
+    repo/tarball for convenience of sigrok users. E.g. so that they can
+    easily get it with the other fx2lafw firmware files from distro
+    packages, the build scripts in sigrok-util automatically build/install
+    it, the sigrok Windows installers automatically ship it, the sigrok
+    Android APKs automatically ship it, etc. etc.
+    
+    The files we're integrating into fx2lafw from Hantek6022API are taken from
+    the PyHT6022/HantekFirmware/custom directory of that repo, using the state
+    as of 03/2016 (the files were last modified in 05/2015, though).
+    
+    The git hash of the last relevant commit there was:
+    
+      0498e2ab239aabb1084c19e1e24faf56764b217e
+    
+    Files integrated into fx2lafw:
+    
+     - hw/hantek-6022be/dscr.a51: Copied unmodified.
+    
+     - hantek_6022be.c: This file is created by appending the
+       contents of the original device.c and fw.c together without
+       other modifications.
+    
+    The license of both files is LGPL 2.1 (or later).
+
+commit 05f4369545dad41969b112893a8bb4146e98fc0a
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Thu Mar 10 21:01:29 2016 +0100
+
+    README: Update prebuilt firmware download location.
+
+commit a6fb49c00691a917a1734afbf3071ca2ad0c1c46
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Thu Nov 26 23:41:51 2015 +0100
+
+    configure.ac: Bump package version to 0.1.3.
+
+commit ca7b6c32f649bd05c1edbf52fa933dbe8ed79de1
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Thu Nov 26 23:40:46 2015 +0100
+
+    NEWS: Add list of user-visible changes so far.
+
+commit b27c7431ca700def18d55343078e523fdc0ab9d0
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Thu Nov 26 23:38:10 2015 +0100
+
+    README: Any sdcc 3.x version works fine.
+    
+    E.g. 3.5 also works fine as of today.
+
+commit 623f27bad7565de305c462ff050f3823fc2110a6
+Author: Daniel Elstner <daniel.kitta@gmail.com>
+Date:   Tue Nov 10 13:28:40 2015 +0100
+
+    build: Distribute autogen.sh
+
+commit 5379bf8639ea61c38e2535ceafdd036b3aed3ba4
+Author: Daniel Elstner <daniel.kitta@gmail.com>
+Date:   Mon Nov 9 14:57:33 2015 +0100
+
+    build: Customize silent rule prefixes for sdas/sdcc
+    
+    Be fancy and print custom SDAS and SDCC prefixes in silent-rules
+    mode.
+
+commit 9a8e9e608edda4dcc6a89a8051a56f302863c938
+Author: Daniel Elstner <daniel.kitta@gmail.com>
+Date:   Mon Nov 9 14:27:12 2015 +0100
+
+    build: Allow dist-bin from non-git sources
+    
+    Do not require the source directory to be a git checkout when
+    creating the tarball of binary firmware files.
+
+commit 0dc651eba4b01c936bac3380ae11deed34d082e3
+Author: Daniel Elstner <daniel.kitta@gmail.com>
+Date:   Mon Nov 9 11:51:26 2015 +0100
+
+    build: Simplify dist-changelog target
+    
+    When not building from git, it is not necessary to manually copy
+    the ChangeLog file from the source directory to the distribution,
+    since Automake already does that for us.
+
+commit 92f54a3e99b0c6b952380725219fc606ca082ef9
+Author: Daniel Elstner <daniel.kitta@gmail.com>
+Date:   Mon Nov 9 11:10:48 2015 +0100
+
+    build: Check SDCC version during configure
+    
+    Require at least SDCC version 2.9.0.
+    
+    This fixes bug #696.
+
+commit aa6a27fb7c1398ab467ad5ade6111665bbddc0d7
+Author: Daniel Elstner <daniel.kitta@gmail.com>
+Date:   Sat Nov 7 19:14:06 2015 +0100
+
+    Update git ignore list
+
+commit 88d4ba3e4b3c0b8587b2a338a0bf09640d1edb7e
+Author: Daniel Elstner <daniel.kitta@gmail.com>
+Date:   Sat Nov 7 19:02:43 2015 +0100
+
+    build: Switch to non-recursive make
+
+commit 4c4035a7b45d6e865fac0a4ac96c83ab6baf7a13
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Wed Oct 21 22:23:44 2015 +0200
+
+    Add fx2lafw firmware for FX2 devices with sigrok VID/PID.
+    
+    The two new firmware images fx2lafw-sigrok-fx2-{8,16}ch.fw can be used
+    on Cypress FX2 devices where one of the two official sigrok fx2lafw
+    USB VID/PID pairs is hardcoded in an external EEPROM.
+    
+    The sigrok project owns USB product IDs allocated via the Openmoko project:
+    
+      http://wiki.openmoko.org/wiki/USB_Product_IDs
+    
+    The following two VID/PID pairs are available for devices that use
+    a Cypress FX2(LP) chip *directly* as 8-channel or 16-channel logic analyzer,
+    and use the respective USB-based protocol. They are *not* meant for
+    other devices which just happen to also have an FX2 (e.g. in addition to
+    an FPGA) and/or devices that use a different USB-based protocol.
+    
+     - 1D50:608C: fx2lafw-sigrok-fx2-8ch.fw
+    
+     - 1D50:608D: fx2lafw-sigrok-fx2-16ch.fw
+
+commit c547f69e7c62a49368da12b6717e2569efb4cc8a
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Tue Apr 7 02:42:11 2015 +0200
+
+    autogen.sh: Drop obsolete MinGW/MSYS items.
+    
+    For Windows builds (which require MinGW-w64) we currently support:
+    
+     - cross-builds using MXE (mxe.cc) and possibly other cross-compile setups
+    
+     - native builds using MSYS2 (sf.net/projects/msys2/)
+    
+    Neither of those require explicitly specifying ACLOCAL_DIR.
+
+commit 70b415b64e67a93ab39f86862fada1381b503bbb
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Wed Jul 23 00:06:59 2014 +0200
+
+    Drop references to obsolete sigrok-commits mailing list.
+
+commit 4c9f15c9b885f4c08ed6c49df9fd382fa4008261
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Tue May 6 23:13:35 2014 +0200
+
+    configure.ac: Bump package version to 0.1.2.
+
+commit 75a66a81e1d13284058b3d3cb3506b079567489e
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Tue May 6 20:38:21 2014 +0200
+
+    NEWS: Add list of user-visible changes so far.
+
+commit b2bd00c4b2e7db5889fc2543fe9a2f132b59b95a
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Tue May 6 20:41:19 2014 +0200
+
+    Increase FX2LAFW_VERSION_MINOR to 1.
+    
+    There have been changes since the last release, but they have been
+    compatible ones that don't require any host-side (libsigrok) changes,
+    thus only increase FX2LAFW_VERSION_MINOR (but not FX2LAFW_VERSION_MAJOR).
+
+commit 6398a5191b3fb474238a1cbeef661e950dd68f55
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Thu Jun 27 15:12:04 2013 +0200
+
+    Bugfix: Tristate pins after acquisition.
+    
+    Fix a typo which lead to the data pins not being tri-stated after an
+    aquisition (when the GPIF is idle) but rather being driven.
+    
+    Thanks Ignacio García Pérez and Clemens Novak for reporting and testing.
+
+commit bf4dba5d9b2b01118605d4203f9410b25f673bd3
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Fri Apr 26 13:50:58 2013 +0200
+
+    README: Add "Copyright and license" section.
+
+commit a986cfff887aefe65cfd0923a31ae2843b7e3ae4
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Tue Apr 23 22:35:32 2013 +0200
+
+    GPL headers: Use correct project name.
+
+commit b77e31824a872c9e80c0ee376479ecc9f337fc86
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Tue Apr 16 23:50:46 2013 +0200
+
+    Prepare for the 0.1.1 release.
+
+commit fc6f8a337f2d4ab3a1c31a1a5a45e03aa0b53f6f
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Wed Apr 17 00:09:41 2013 +0200
+
+    COPYING.LESSER: Replace LGPLv3 with LGPLv2.1.
+    
+    The file incorrectly contained a copy of the LGPL, version 3. It should
+    have contained version 2.1 though, since that's the license of the
+    fx2lib files it applies to.
+
+commit c610cc7e94974d40e8bb6fd99acfb585f40fcc12
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Wed Apr 17 00:06:20 2013 +0200
+
+    Document the download for pre-built firmware files.
+
+commit 71223dc9fd91abbd7b08e3d0138e9a83f0d4dda7
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Tue Apr 16 23:21:32 2013 +0200
+
+    README: sdcc 3.2.x works fine, document that.
+
+commit 8f4904e5d9f63af143ce78708cf7b1f30d63ae09
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Sun Mar 17 14:53:25 2013 +0100
+
+    Fix parallel build (e.g. via "-j 2").
+    
+    This fixes bug #68.
+
+commit 3bed3f21fafc672bd26039aec34fd3ae0f480b90
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Sun Mar 17 14:47:25 2013 +0100
+
+    NEWS: Fix typo.
+
+commit 860cfff0d63e9d4b085e63c50282a40ff21bd12d
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Sun Mar 17 14:42:19 2013 +0100
+
+    configure.ac: Fix typo in 'sdcc-sdcclib'.
+
+commit 471fe66134dec39680b6abc7dbe457b20c1df073
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Sun Mar 17 14:40:33 2013 +0100
+
+    Abort configure if the required tools are not found.
+
+commit a123aff72dcd98bdb3a0e3b2cdf3964b49a20186
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Sun Mar 17 14:04:00 2013 +0100
+
+    README: Refer to INSTALL and new Building wiki page.
+
+commit 3a7ae082fcdd2610bf936f8fddcc07e93aa1a0ec
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Thu Mar 7 11:32:30 2013 +0100
+
+    Support sdcc tool names as used on Fedora.
+    
+    Fedora (e.g. Fedora 18) names the sdcc tools like this:
+    
+     sdcc-sdcc, sdcc-sdcclib, sdcc-makebin, etc.
+
+commit 39ac5a27ab438ec17ff0198748141f50f08b72d8
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Sun Mar 3 19:57:18 2013 +0100
+
+    Fixup DESTDIR usage.
+    
+    Drop superfluous slash, otherwise the install directory would be e.g.
+    
+     /foo//usr/local/share/sigrok-firmware
+    
+    or
+    
+     //usr/local/share/sigrok-firmware
+    
+    depending on whether DESTDIR was set via "DESTDIR=/foo", or not.
+
+commit 8ca25313c231a0284b214ac31f8c1179286a8cc6
+Author: Alexandru Gagniuc <mr.nuke.me@gmail.com>
+Date:   Fri Feb 22 11:38:49 2013 -0600
+
+    buildsystem: Obey DESTDIR when running make install
+    
+    For more details, see:
+    http://www.gnu.org/prep/standards/html_node/DESTDIR.html
+    http://www.gnu.org/software/automake/manual/html_node/Extending.html
+    
+    This closes bug #67.
+
+commit 9e7a268db08095e2585d845a51a9e5c89ba90fbd
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Thu Feb 21 15:46:36 2013 +0100
+
+    Support older Cypress FX2 (not FX2LP) too.
+    
+    The Cypress FX2 chip is an older version of the FX2LP chip with a few
+    differences that might be relevant for fx2lafw, the major one being
+    that is has less internal SRAM.
+    
+    We adapt the linking step to work for both FX2 and FX2LP, thus
+    keeping only one set of *.fw files for both chip versions.
+    
+    Changes to the fx2lafw driver in libsigrok are not required.
+    
+    Some logic analyzer devices such as older USBee SX versions or more recent
+    devices which use a "fake" FX2LP (which is actually an FX2) need this.
+    
+    This closes bug #3.
+
+commit 0a7ae4e2b527279c927146dc7b99d9cfd39c1ed2
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Sat Jan 26 13:37:59 2013 +0100
+
+    NEWS: Add user-visible changes so far.
+
+commit 92c99f68cf5e37fe32b470d74d8e1937dab34e7f
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Sat Jan 26 13:36:36 2013 +0100
+
+    README: Add all build dependencies.
+
+commit 3cdd47225331282c0e1d37ba8d7b947e84f48d9e
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Sat Jan 26 13:15:47 2013 +0100
+
+    (Re-)add the convenience target 'distbin'.
+    
+    This creates a sigrok-firmware-fx2lafw-bin-x.y.z.tar.gz tarball containing
+    just the *.fw files, so that users don't have to build them manually.
+    
+    The normal 'make dist' produces a source code tarball, as usual.
+
+commit 36074319ac7c80ac0d80334b8664d0bd8e6dee90
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Wed Jan 9 19:34:06 2013 +0100
+
+    Use a standard autotools setup.
+    
+    fx2lafw now uses a standard autoconf/automake based build and
+    configuration system like most other sigrok subprojects (instead of two
+    sets of custom, not very portable Makefiles).
+    
+     $ ./configure && make && make install
+    
+    It now supports all the usual things one expects, for example:
+    
+     - The --prefix et. al. options to specify installation paths.
+    
+     - Standard set of 'make' targets, e.g. 'install', 'uninstall',
+       'dist', etc.
+    
+     - In-tree builds as well as out-of-tree builds.
+    
+     - Works pretty much everywhere portably, regardless of 'make'
+       implementation (GNU Make or BSD make or...) and regardless of shell
+       (bash, sh, dash, ksh, csh, ...).
+    
+     - The build output matches the usual 'silent rules' output of other
+       (sigrok / autotools) projects. Using 'make V=1' one can get the full
+       build output.
+
+commit 2b421d0ecf9ec717a6864da01a071d3c9bfeec7e
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Thu Nov 22 23:16:41 2012 +0100
+
+    Use makebin if objcopy is not available.
+    
+    Some systems might not have objcopy (e.g. on Mac OS it might not be
+    available per default). We use objcopy if it is found, otherwise we try
+    to use the 'makebin' utility (shipped with sdcc) instead.
+    
+    Thanks 'Harble' on IRC for the report.
+
+commit c899ab4fb5e623632d4a02d97a05a2dbb320942d
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Tue Oct 16 15:28:41 2012 +0200
+
+    Fix #include guard names.
+
+commit e323c15dc4d27d452602e147102e6cdfd4c7d0c3
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Tue Oct 16 15:24:29 2012 +0200
+
+    Add a HACKING file.
+
+commit 9b782efd3bbe88110dd47a8ccd7f8dd927ccdf36
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Thu Oct 11 00:53:54 2012 +0200
+
+    Makefile: Update repo URL.
+
+commit a75447f1e3a1b8a2ee41bebea7b31df50fd94da6
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Wed Oct 10 23:58:33 2012 +0200
+
+    README: Add status, update URL, add more info.
+
+commit 9a556ec56e6b7b8a4c798142049b024ce40ded86
+Author: Ivan Fedorov <oxyum@oxyum.ru>
+Date:   Wed Aug 1 00:26:54 2012 +0400
+
+    Add basic support for USBee DX and clones
+
+commit 63f84b32e6f516e236b90f7b9100836bbd220bbd
+Author: Ivan Fedorov <oxyum@oxyum.ru>
+Date:   Wed Aug 1 00:24:16 2012 +0400
+
+    Add .gitignore
+
+commit d9531f65337ecc903759f9f55bc32719e93d2d27
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Tue Jul 24 21:04:50 2012 +0200
+
+    Makefile: Add a 'distbin' target.
+    
+    This creates a sigrok-firmware-fx2lafw-bin-x.y.z.tar.gz tarball which
+    only contains pre-built *.fw files (and some docs), but no source code
+    of fx2lafw.
+    
+    This tarball can be provided as a convenience download for users who do
+    not want to mess with building their own firmware files from source.
+
+commit d319a25de291b75b6bb76463bdc1aa1c851182d8
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Tue Jul 24 16:36:30 2012 +0200
+
+    NEWS: Add today's date as release date for 0.1.0.
+
+commit fbc26f625b78af0335178f0f01d99f651c506484
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Tue Jul 24 16:35:06 2012 +0200
+
+    Makefile.include: Fix build on MinGW/Windows.
+    
+    The trailing slash causes issues on MinGW/Windows, apparently.
+
+commit de1a21789295e0eaeebce1012ca968364364bee7
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Mon Jul 23 15:40:25 2012 +0200
+
+    Update install instructions.
+
+commit 94ca1bed405209b1fa36466174449f07b14127ab
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Mon Jul 23 15:20:05 2012 +0200
+
+    Drop fx2lib files we don't really need.
+    
+    Document the origins and license of the fx2lib code more precisely.
+
+commit 0bac7de529ed84f6b2236e41f435c5a4cd86ff95
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Mon Jul 23 14:55:04 2012 +0200
+
+    Don't ship the .git/ directory in the tarball.
+
+commit d33eeacaf5129815c290146ba85b3a36c86f02fa
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Sun Jul 22 18:29:48 2012 +0200
+
+    Fix 'make clean'.
+    
+    Things like "rm -f *.{asm,ihx,lnk,lst,map,mem,rel,rst,sym,adb,cdb,lib}"
+    aren't really portable or work everywhere.
+    
+    Also, invoke fx2lib's clean upon an fx2lafw clean.
+
+commit cd13b02dd60f0e93bd0ef7ef8e271c3b47a31117
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Sun Jul 22 18:22:15 2012 +0200
+
+    Makefiles: Add missing "2>/dev/null" in some places.
+
+commit 4836f7921c83b4713e897ee8c38e48a4433325c4
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Sun Jul 22 18:19:15 2012 +0200
+
+    s/make/$(MAKE)/ to fix build on FreeBSD.
+    
+    On FreeBSD (and possibly) elsewhere you'd invoke the build via "gmake",
+    thus hardcoded "make" invokations in our Makefiles will break the build.
+    
+    Use $(MAKE) everywhere, which always does the right thing.
+
+commit 6a90b4a9f172e4ba1b623e29e6267a6b2fe2b20c
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Wed Jul 18 19:27:18 2012 +0200
+
+    Add initial NEWS file.
+
+commit d4c182415452e083b05daab41cb8ff71184f392b
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Wed Jul 18 19:15:13 2012 +0200
+
+    Add 'dist' target which creates a tarball.
+
+commit 38abb1cbfea603add533f1a533e8166dfec3c370
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Wed Jul 18 19:05:42 2012 +0200
+
+    Makefile: Add a 'ChangeLog' target.
+
+commit a15c1f062cebebe9454f1dd69c6a257d15aeff46
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Wed Jul 18 19:02:29 2012 +0200
+
+    Makefile: Add an 'install' target.
+    
+    This installs all *.fw files into /usr/local/share/sigrok-firmware,
+    which can be overridden via DESTDIR, like this:
+    
+     make install DESTDIR=/tmp/foo
+
+commit 365795313f4f7f204f159f443e06847de7d48264
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Wed Jul 18 18:52:59 2012 +0200
+
+    Remove obsolete and unused DEBUG code.
+
+commit c7e02d8c24b6f89a274b33300dd47925f5ffb69f
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Tue Jul 17 17:47:56 2012 +0200
+
+    Cosmetics, update docs.
+
+commit cb87c238f743afa9e563740e1bec436ea839796e
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Wed Jul 18 12:49:43 2012 +0200
+
+    Add missing #include guards.
+    
+    Without them there will be issues sooner or later, and the build _is_
+    broken already on MinGW without them.
+
+commit b8fa53aa1c203413c179a80c8513706a3155c7e8
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Wed Jul 18 12:34:32 2012 +0200
+
+    Fix a left-over __data in our fx2lib copy.
+
+commit 8819f75c56450ef49739c3e968d70c7c777d9161
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Wed Jul 18 12:24:26 2012 +0200
+
+    Update fx2lafw code to work with recent sdcc.
+
+commit d1bee53d988c28311d2b9cc6c43c861c38cce67d
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Wed Jul 18 12:16:21 2012 +0200
+
+    Support old and new sdcc/sdas8051/asx8051 versions.
+    
+    Tested on Debian with old and new sdcc (2.9.0 and 3.1.0).
+    
+    Testers for Fedora and other distros are welcome!
+
+commit 3608c1063d17c56c038434eba5a6b11f26e530b5
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Wed Jul 18 11:31:24 2012 +0200
+
+    Import fx2lib into fx2lafw directly.
+    
+    We want a local fx2lib copy in fx2lafw for various reasons, e.g. to make
+    life simpler for all distros (none of which ship any fx2lib packages,
+    and neither would it make sense to do so really), and as we'll want/need
+    local changes to fix build issues and possibly other stuff anyway.
+    
+    This copy of fx2lib is not the main upstream version from
+    
+      git://github.com/mulicheng/fx2lib.git
+    
+    which has been last updated in 2010, but rather from
+    
+      git://github.com/ubixum/fx2lib.git
+    
+    The only difference is that the latter contains one patch which fixes
+    some issues with more recent sdcc versions (interrupt vs. __interrupt,
+    _asm vs. __asm, xdata vs. __xdata__, and many others).
+    
+    The imported fx2lib copy is "416c104cbd" from Feb 12, 2012.
+
+commit 8b13135e5fd175911ad9d8283b17fc97fe0c7709
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Tue Jun 26 01:47:27 2012 +0200
+
+    README: Update usage instructions.
+
+commit 5d492e1866e88087934a2d006af6fc7e5762fd0d
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Thu May 10 23:55:33 2012 +0200
+
+    Cosmetics.
+
+commit daf6d940fca76d60e236f492ef95885966553bcf
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Mon May 7 15:58:04 2012 +0100
+
+    Support wide sampling
+
+commit fb08a72db5979d9b34e3f1bb59dd32aceb9bf32d
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Mon May 7 12:42:45 2012 +0100
+
+    Added support for 100kHz and 50kHz sampling
+
+commit 7563058183da25d5d968f5e43d4d098b34871e36
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Fri Apr 20 19:56:11 2012 +0100
+
+    Removed a magic number
+
+commit a371bdee728dac611e020aee9219a0b5af15b5af
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Thu Apr 19 21:02:50 2012 +0100
+
+    Made the DP state the DATA sample state
+
+commit 7dfad4cbb5d105ea49114d3134711a24bc2bf742
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Thu Apr 19 21:00:16 2012 +0100
+
+    Moved GPIF state generator code into helper functions
+
+commit c23ad6029b1a4262fa5ad07e962f693cd7cbea06
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Sun May 6 19:47:04 2012 +0200
+
+    fx2lafw: Support for querying REVID.
+
+commit 312f8b3466280bb789a597c9e6d2a1f7337c5e55
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Sun May 6 17:10:23 2012 +0200
+
+    fx2lafw: Add Braintechnology USB-LPS support.
+
+commit 3211bba26b421c7cc11b35d3daef17ef05970429
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Thu Apr 19 00:45:29 2012 +0200
+
+    cypress-fx2/Makefile: Add missing 'fx2lafw-' prefix.
+    
+    Otherwise the generated .fw filename will be incorrect.
+
+commit 572ac4c4c2e04fc12cf11dc1d60d528209f9919c
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Wed Apr 18 22:25:15 2012 +0100
+
+    Added support for Default Cypress FX2 without EEPROM
+
+commit a4d8b708a8cc30525c9148f77dc3d664a2d285f8
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Wed Apr 18 22:22:33 2012 +0100
+
+    Added dscr.inc to reduce duplication in dscr.a51 files
+
+commit cd29817daca53a88fd252198a90d7e806553d4d3
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Tue Apr 10 22:16:25 2012 +0200
+
+    Cosmetics, coding style.
+
+commit 18544912fb14f1beb10fe375aad9743a8e8df790
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Tue Apr 10 18:30:46 2012 +0100
+
+    Implemented CMD_GET_FW_VERSION
+
+commit f55de58e61972dc5510ddde42799e872f27ba198
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Sat Apr 7 17:39:57 2012 +0100
+
+    Corrected a typo in the root makefile
+
+commit e086d6ee9d5b6c681c706b9c4f8353b54565abaf
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Sat Mar 24 12:46:29 2012 +0000
+
+    Removed unneeded declarations
+
+commit 8375421ce76f7170be575c3abdc1bbb71243a05a
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Sat Mar 24 12:36:41 2012 +0000
+
+    Added missing command to clean rule
+
+commit f7f91781e4d4d5543371d76bb295316a6655e535
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Sat Mar 24 12:29:25 2012 +0000
+
+    Moved main() into fx2lafw.c
+
+commit 00060cecdb4d3332f2a1a705436de3b6d08d1106
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Sat Mar 24 12:25:35 2012 +0000
+
+    Removed debug script
+
+commit 5a95b634a88e49ac269a731a2e8596931506b63a
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Wed Mar 14 22:21:13 2012 +0000
+
+    Upsized EP2 FIFO to 4x 1024
+
+commit 576c66275f9fbc419b6449a72dd870d29bb4bf31
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Wed Mar 14 21:44:08 2012 +0000
+
+    Removed debug routines - they turned out not to be so useful, and occupy valuable FIFO space
+
+commit 920d03436aee786fe4f366354f8ed0cb6432abe6
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Tue Mar 13 18:34:09 2012 +0000
+
+    Replaced gpif-capture with gpif-acquisition saleae-logic/Makefile
+
+commit 95550c959e60a61d27e65f978328f8adf63893d5
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Mon Mar 12 22:13:20 2012 +0000
+
+    Added support for USBee SX
+
+commit 75fd9ca5eeb560caa092d88c04f5b7da7dddfdb0
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Mon Mar 12 22:07:33 2012 +0000
+
+    Added rules to Makefile to convert firmware to binary
+
+commit 293d7e9e38e0a69ab8e51ab9601bfb0bd6c5c9b8
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Sun Mar 11 20:52:53 2012 +0000
+
+    Reset EP2 when GPIF acquisition completes
+
+commit baecf744abd88bde4e8badf5535872f58e3873d4
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Sun Mar 11 15:36:03 2012 +0000
+
+    Fixed GPIF waveform branch, and annotated population code
+
+commit d478dcbed58c157e790a32d26878f940ed5ec888
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Sun Mar 11 15:03:52 2012 +0000
+
+    Not need to SYNCDELAY after writing to GPIF_WAVE_DATA
+
+commit 7d028644be4df07ef4dc899b3e228755ecade924
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Sun Mar 11 15:03:06 2012 +0000
+
+    No need to populate reserved words
+
+commit 1e588d0627db7ba16458be72aba6961747b6a4d6
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Sun Mar 11 14:38:59 2012 +0000
+
+    Specify that one transaction will occur in each acquisition
+
+commit 2d62ae473486c48c3922c7eb644cc96b428d46b2
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Sat Mar 10 22:46:25 2012 +0000
+
+    Corrected EP2FIFOCFG setup
+
+commit 3b969d92f4cecf79ebe4289e0facb98dea9b844d
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Sat Mar 10 22:46:00 2012 +0000
+
+    Ensure GPIF is idle before reconfiguration
+
+commit 809dc77960b924ec0ee1fd884f670b21039aea59
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Sat Mar 10 22:45:16 2012 +0000
+
+    Do not read-modify-write IFCONFIG
+
+commit 8242a4d10ec4750820eff0eccc859188645b065a
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Sun Mar 4 18:01:25 2012 +0000
+
+    Do not change device id after firmware download
+
+commit 28d52f414aea134690fba92d62b40607e55550bf
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Sun Mar 4 14:50:28 2012 +0000
+
+    Renamed fx2lafw_run to fx2lafw_poll
+
+commit 2846a114f69c29a64dc7e6ae9d12195f8c4c18ab
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Sun Mar 4 14:13:27 2012 +0000
+
+    Implemented sample rate control
+
+commit 3b6919fa4ed05ab312162e27ef8a2bc5ec5b7976
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Sat Mar 3 17:04:25 2012 +0000
+
+    Removed CMD_STOP and renumbered commands
+
+commit 64d4773073e3b40c7c4a4eef609df959fa7591c9
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Sat Mar 3 16:21:57 2012 +0000
+
+    Moved command definitions into command.h
+
+commit 8f5f7854a31be8928a33178cebe4c334d1c23451
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Sat Mar 3 15:00:27 2012 +0000
+
+    Removed CMD_SET_SAMPLRATE
+
+commit 421e7d6da138dc122cf33791f3631156f73cccd7
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Sat Mar 3 10:15:46 2012 +0000
+
+    Generate GPIF WAVEDATA on demand
+
+commit e41576ec531630354c5b48ed0caa83caa1a4c14e
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Wed Feb 29 20:45:02 2012 +0000
+
+    Moved gpif code out to separate source file
+
+commit 91f1e17f79efcd2cea5e3d43efe4b339a664d830
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Thu Feb 23 00:26:10 2012 +0100
+
+    Update README.
+
+commit 7ff5a031c021873a321d132fa61d260e21fe3a14
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Thu Feb 23 00:18:48 2012 +0100
+
+    Move dscr.a51 to individual project subdirs.
+
+commit d2c3ea5ab6229485500ffa0cb50c61677193ed9f
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Thu Feb 23 00:16:44 2012 +0100
+
+    Move individual firmware projects to hw/ subdir.
+
+commit 6e078ef420ca8f2edbd51aa4f851d726d68ab7f6
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Thu Feb 23 00:13:26 2012 +0100
+
+    Add saleae-logic/ subdir/project.
+
+commit 1b6280b73ded6e078ef9e39fbd3717dc9cfbb546
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Wed Feb 22 23:54:30 2012 +0100
+
+    Add top-level Makefile.
+    
+    Also, rename fx2lafw.mk to Makefile.include.
+
+commit 106ee45c35ebae9b2ec9370813ab20cbbe22d2e2
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Wed Feb 22 23:30:13 2012 +0100
+
+    Various cosmetics and bugfixes.
+
+commit a75a9ccb67defc791ccf9fdf73d4e149436dae3f
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Sat Feb 18 17:08:25 2012 +0000
+
+    Moved includes into a common include directory
+
+commit 9f8d67d93eeaddf2f18367f9c9d8cca26cbbb980
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Sat Feb 18 17:05:42 2012 +0000
+
+    Moved main() in cwav-usbeeax
+
+commit 60b99ccceb5ab9b7a7544b362794bf599a960d90
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Sat Feb 18 17:06:14 2012 +0000
+
+    Added root as an include directory
+
+commit 8f4a701f47ff5a17a2c8f79de59ddeb27656dbaa
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Sat Feb 18 18:05:25 2012 +0000
+
+    Added autovector include to fx2lafw header. Software will crash without it
+
+commit 2f5ee650e5ce9390e13a971ce9472b9696121bb7
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Sat Feb 18 17:00:19 2012 +0000
+
+    Added first device specific directory for the CWAV USBee AX
+
+commit 1cbff47d1d2c78f62e8adb0896a9cecef9574bdd
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Sat Feb 18 16:43:25 2012 +0000
+
+    Rearranged main() in preparation for split according to device versions
+
+commit bf40d70e45ba8bdd45d68a35e8e7d12a0ff1e8bf
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Sat Feb 18 09:29:34 2012 +0000
+
+    Implemented _assert
+
+commit 8ee491edbe31d980abe261307ef893bce9a16760
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Sat Feb 18 09:29:04 2012 +0000
+
+    Added INFO, WARN and ERR macros
+
+commit 4329f2ed3c366517be5ecbff95a83cf3998ea288
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Sat Feb 18 12:52:24 2012 +0000
+
+    Added a debug client
+
+commit c430e296be053c17d4d5f40c53378d401ab07a17
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Sat Feb 18 08:50:24 2012 +0000
+
+    Added basic debugf for sending debug messages over USB
+
+commit e1c8448f400a3f0099274c8f1ce4a0745f04d650
+Author: Joel Holdsworth <joel@airwebreathe.org.uk>
+Date:   Wed Feb 15 20:12:37 2012 +0000
+
+    Allow path to fx2lib to be set with a variable
+
+commit c7283c28a0ce6757630624e366589f8ce90949f7
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Tue Feb 21 01:44:50 2012 +0100
+
+    Draft how commands could be implemented.
+
+commit 4ad20a4c57699f7ea5ce88fc132feaf7471743c1
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Tue Feb 21 01:30:33 2012 +0100
+
+    Eliminate EP1, commands should use EP0.
+    
+    The protocol should be implemented using control requests of type
+    'vendor-specific' (bmRequestType[6:5] = 2).
+
+commit bee5946d03f60500debb8923ac137981bd65e9cf
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Tue Feb 21 01:15:07 2012 +0100
+
+    Document USB language identifier document location.
+
+commit e7434142313d9f42fb476a13f08d379900ba5b2d
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Tue Feb 21 01:12:03 2012 +0100
+
+    Use #defines for REVCTL bits.
+
+commit dc7ac8bfeea9cae7bbfee5839889a3b37f3d62f5
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Tue Feb 21 00:55:23 2012 +0100
+
+    First somewhat working GPIF waveform and setup code.
+    
+    This samples data forever, and has no mechanism to detect or report lost
+    samples. This is just for testing purposes, do not use productively!
+
+commit fb0b6d28a7c5222d96b80cf68126cee77ec39e2e
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Sat Feb 18 21:40:29 2012 +0100
+
+    First attempt at a sampling GPIF waveform (untested!).
+
+commit 060dc3fe95b5e167c3c09ba0e8bc164c2ec25d69
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Tue Feb 14 21:40:54 2012 +0100
+
+    README: Add git repo URL.
+
+commit d5f5ea7394647699061f7185c884328defff9b7d
+Author: Uwe Hermann <uwe@hermann-uwe.de>
+Date:   Tue Feb 14 21:22:55 2012 +0100
+
+    Initial version (work in progress).
+    
+    This does not work, yet.

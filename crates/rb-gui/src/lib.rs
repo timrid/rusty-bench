@@ -13,9 +13,10 @@
 #![forbid(unsafe_code)]
 
 pub mod components;
+pub mod device_manager;
+pub mod firmware;
 pub mod logic_analyzer;
 pub mod tab_content;
-pub mod device_manager;
 pub mod tab_state;
 pub(crate) mod app_state;
 

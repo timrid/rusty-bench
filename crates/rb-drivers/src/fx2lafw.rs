@@ -6,7 +6,7 @@
 //!
 //! # Protocol overview
 //! - Firmware upload: Cypress EZ-USB bootloader via control endpoint 0 (vendor
-//!   request `0xA0`).  The FX2LP firmware (`.ihx`) is written to internal RAM
+//!   request `0xA0`).  The FX2LP firmware (`.fw`) is written to internal RAM
 //!   chunk by chunk, then execution jumps to the entry point.
 //! - After firmware is running, all commands use EP0 vendor control transfers:
 //!   - `CMD_GET_FW_VERSION` (bRequest `0xB0`, IN): reads `{major, minor}` (2 bytes)
@@ -74,8 +74,6 @@ const CYPRESS_FW_WRITE: u8 = 0xA0;
 /// FX2LP internal RAM start address for firmware upload.
 #[allow(dead_code)]
 const FW_BASE_ADDR: u16 = 0x0000;
-/// Entry point where execution begins after firmware upload.
-const FW_ENTRY: u16 = 0x0000;
 
 // -- Endpoints ------------------------------------------------------------------
 
@@ -670,112 +668,48 @@ fn decode_samples(data: &[u8], sample_wide: bool, max_samples: usize) -> SampleC
 
 // ── Firmware upload ────────────────────────────────────────────────────────────
 
-/// Parse Intel HEX format data chunks.
+/// Upload raw binary firmware (sigrok `.fw` format) to the FX2LP via the
+/// Cypress EZ-USB vendor request protocol:
 ///
-/// Returns a list of `(address, data)` pairs extracted from I8HEX / I16HEX
-/// records.  Extended Linear Address (0x04) records set the upper 16 bits
-/// of the address.  EOF record (0x01) terminates parsing.
-fn parse_ihex(data: &[u8]) -> Result<Vec<(u16, Vec<u8>)>, String> {
-    let mut result: Vec<(u16, Vec<u8>)> = Vec::new();
-    let mut base_addr: u32 = 0;
-
-    for line in data.split(|&b| b == b'\n') {
-        let line = line.trim_ascii();
-        if line.is_empty() {
-            continue;
-        }
-        if line.first() != Some(&b':') {
-            continue; // Not an Intel HEX record.
-        }
-        // Minimum record: `:BBAAAATTCC` (11 hex chars + colon = 12 bytes)
-        let hex = std::str::from_utf8(line).map_err(|_| "non-UTF-8 in HEX line".to_string())?;
-        if hex.len() < 11 {
-            return Err(format!("malformed HEX record: too short ({hex})"));
-        }
-
-        let byte_count = u8::from_str_radix(&hex[1..3], 16).map_err(|e| e.to_string())? as usize;
-        let addr = u16::from_str_radix(&hex[3..7], 16).map_err(|e| e.to_string())?;
-        let rectype = u8::from_str_radix(&hex[7..9], 16).map_err(|e| e.to_string())?;
-
-        // Expected length: `:BBAAAATTHHDD...CC`
-        let expected_len = 9 + byte_count * 2 + 2; // 9 hex chars before data + data + checksum
-        if hex.len() < expected_len {
-            return Err(format!(
-                "HEX record truncated: expected {expected_len} chars, got {}",
-                hex.len()
-            ));
-        }
-
-        match rectype {
-            0x00 => {
-                // Data record
-                let mut bytes = Vec::with_capacity(byte_count);
-                for j in 0..byte_count {
-                    let off = 9 + j * 2;
-                    let b =
-                        u8::from_str_radix(&hex[off..off + 2], 16).map_err(|e| e.to_string())?;
-                    bytes.push(b);
-                }
-                let full_addr = (base_addr + u32::from(addr)) as u16;
-                result.push((full_addr, bytes));
-            }
-            0x01 => {
-                // End Of File
-                break;
-            }
-            0x04 => {
-                // Extended Linear Address (upper 16 bits)
-                if byte_count != 2 {
-                    return Err("bad Extended Linear Address record".to_string());
-                }
-                let hi = u16::from_str_radix(&hex[9..13], 16).map_err(|e| e.to_string())?;
-                base_addr = u32::from(hi) << 16;
-            }
-            _ => {
-                // Ignore other record types (start segment address, etc.)
-            }
-        }
-    }
-
-    Ok(result)
-}
-
-/// Upload Intel HEX firmware to the FX2LP via control transfers.
-///
-/// - Writes each data chunk to the appropriate RAM address.
-/// - Starts execution at the entry point after all chunks are written.
+/// 1. Put CPU in reset (write `0x01` to CPUCS register at `0xE600`).
+/// 2. Write firmware data in 4 KB chunks starting at address `0x0000`.
+/// 3. Release CPU reset (write `0x00` to CPUCS), which starts execution.
 ///
 /// # Errors
-/// Returns an error if any control transfer fails or the firmware format is
-/// invalid.
+/// Returns an error if any control transfer fails.
 pub async fn upload_firmware(
     transport: &mut dyn UsbTransport,
-    ihex_data: &[u8],
+    data: &[u8],
 ) -> Result<(), String> {
-    let chunks = parse_ihex(ihex_data)?;
-    for (addr, data) in &chunks {
+    const MAX_CHUNK: usize = 4096;
+    /// CPU Control & Status register (FX2LP internal address).
+    const CPUCS_ADDR: u16 = 0xE600;
+
+    // 1. Put CPU in reset.
+    transport
+        .control_transfer(0x40, CYPRESS_FW_WRITE, CPUCS_ADDR, 0x0000, &[0x01])
+        .await
+        .map_err(|e| format!("CPU reset on failed: {e}"))?;
+
+    // 2. Upload firmware in 4 KB chunks.
+    for (offset, chunk) in data.chunks(MAX_CHUNK).enumerate() {
+        let addr = (offset * MAX_CHUNK) as u16;
         transport
-            .control_transfer(
-                0x40, // vendor, host-to-device
-                CYPRESS_FW_WRITE,
-                *addr,
-                0x0000,
-                data,
-            )
+            .control_transfer(0x40, CYPRESS_FW_WRITE, addr, 0x0000, chunk)
             .await
             .map_err(|e| format!("firmware upload failed at 0x{addr:04X}: {e}"))?;
     }
-    // Start execution.
-    transport
-        .control_transfer(
-            0x40, // vendor, host-to-device
-            CYPRESS_FW_WRITE,
-            FW_ENTRY,
-            0x0000,
-            &[],
-        )
-        .await
-        .map_err(|e| format!("firmware start failed: {e}"))?;
+
+    // 3. Release CPU reset → device resets and re-enumerates.
+    // The control transfer often fails with "device disconnected" because
+    // the FX2LP resets before the USB stack can send the ACK. This is
+    // expected — we just log the outcome and proceed to wait for
+    // renumeration.
+    let _ = transport
+        .control_transfer(0x40, CYPRESS_FW_WRITE, CPUCS_ADDR, 0x0000, &[0x00])
+        .await;
+    // Ignore errors here — the device is already resetting.
+
     Ok(())
 }
 
@@ -955,22 +889,37 @@ pub fn known_vid_pids() -> Vec<(u16, u16)> {
 /// On native builds (with the `fx2lafw` feature + `nusb`) the factory
 /// enumerates USB devices directly.  On the web the caller must provide
 /// pre-authorized candidates via [`set_candidates`](Self::set_candidates).
+///
+/// To enable automatic firmware upload for bootloader devices (Cypress FX2
+/// without EEPROM), set a [`crate::FirmwareLoader`] via
+/// [`set_firmware_loader`](Self::set_firmware_loader).
 pub struct Fx2lafwFactory {
     candidates: Vec<DeviceCandidate>,
+    firmware_loader: Option<Box<dyn crate::FirmwareLoader>>,
 }
 
 impl Fx2lafwFactory {
-    /// Creates a factory with an empty candidate list.
+    /// Creates a factory with an empty candidate list and no firmware loader.
     #[must_use]
     pub fn new() -> Self {
         Self {
             candidates: Vec::new(),
+            firmware_loader: None,
         }
     }
 
     /// Sets (or replaces) the list of pre-enumerated candidates (web use).
     pub fn set_candidates(&mut self, candidates: Vec<DeviceCandidate>) {
         self.candidates = candidates;
+    }
+
+    /// Sets the firmware loader used to upload firmware to bootloader devices
+    /// during [`scan`](DriverFactory::scan).
+    pub fn set_firmware_loader(
+        &mut self,
+        loader: Box<dyn crate::FirmwareLoader>,
+    ) {
+        self.firmware_loader = Some(loader);
     }
 }
 
@@ -999,11 +948,14 @@ impl DriverFactory for Fx2lafwFactory {
     }
 
     async fn connect(&self, candidate: &DeviceCandidate) -> DriverResult<Box<dyn Device>> {
-        connect_usb(candidate).await
+        connect_usb(candidate, self.firmware_loader.as_deref()).await
     }
 }
 
 /// Enumerate USB devices matching known fx2lafw or Cypress bootloader VID/PID pairs.
+///
+/// Bootloader devices are included in the results with a boot flag in the
+/// address string.  Firmware upload happens during [`connect`], not here.
 #[cfg(feature = "fx2lafw")]
 async fn scan_usb() -> DriverResult<Vec<DeviceCandidate>> {
     let devices = nusb::list_devices()
@@ -1019,7 +971,6 @@ async fn scan_usb() -> DriverResult<Vec<DeviceCandidate>> {
         };
 
         let serial = dev.serial_number().unwrap_or("").to_string();
-        // Address encodes VID, PID, serial, and a bootloader flag.
         let boot_flag = if is_bootloader(vid, pid) { "1" } else { "0" };
         let address = format!("{:04X}:{:04X}:{}:{}", vid, pid, serial, boot_flag);
 
@@ -1035,11 +986,17 @@ async fn scan_usb() -> DriverResult<Vec<DeviceCandidate>> {
 
 /// Connect to a USB device previously found by [`scan_usb`].
 ///
-/// If the device is in Cypress bootloader mode, firmware must be uploaded first
-/// (via [`upload_firmware`]), then the driver waits for renumeration and connects
-/// to the newly-enumerated fx2lafw device.
+/// If the device is not yet running fx2lafw firmware but a
+/// [`crate::FirmwareLoader`] is available, firmware is uploaded
+/// automatically.  The Cypress FX2LP hardware handles the 0xA0 vendor
+/// request regardless of which firmware is currently loaded, so this
+/// works for bootloader devices (0x04B4:0x8613) as well as devices
+/// running original vendor firmware (e.g. Saleae Logic at 0x0925:0x3881).
 #[cfg(feature = "fx2lafw")]
-async fn connect_usb(candidate: &DeviceCandidate) -> DriverResult<Box<dyn Device>> {
+async fn connect_usb(
+    candidate: &DeviceCandidate,
+    firmware_loader: Option<&dyn crate::FirmwareLoader>,
+) -> DriverResult<Box<dyn Device>> {
     // Parse the address: "VID:PID:SERIAL:BOOTFLAG"
     let parts: Vec<&str> = candidate.address.split(':').collect();
     if parts.len() < 2 {
@@ -1048,19 +1005,169 @@ async fn connect_usb(candidate: &DeviceCandidate) -> DriverResult<Box<dyn Device
     let target_vid = u16::from_str_radix(parts[0], 16).map_err(|_| DriverError::NotFound)?;
     let target_pid = u16::from_str_radix(parts[1], 16).map_err(|_| DriverError::NotFound)?;
     let target_serial = parts.get(2).copied().unwrap_or("");
-    let is_boot = parts.get(3).copied().unwrap_or("0") == "1";
 
-    // If the device is in bootloader mode, firmware must have been uploaded
-    // externally before calling connect.  We expect to find the device at a
-    // fx2lafw VID/PID by now.
-    if is_boot {
-        return Err(DriverError::Transport(rb_transport::TransportError::Io(
-            "device is in bootloader mode — upload firmware first, then reconnect".into(),
-        )));
+    let profile =
+        find_profile(target_vid, target_pid).ok_or(DriverError::NotFound)?;
+
+    // ── Firmware upload: needed if device doesn't already run fx2lafw ──
+    if let (Some(loader), Some(fw_name)) =
+        (firmware_loader, profile.firmware_file)
+    {
+        // Quick check: is fx2lafw already running?
+        let mut needs_upload = true;
+        if let Ok(dev_info) =
+            find_usb_device(target_vid, target_pid, target_serial).await
+        {
+            if let Ok(device) = dev_info.open().await {
+                if let Ok(interface) = device.detach_and_claim_interface(0).await
+                {
+                    let mut transport: Box<dyn UsbTransport> = Box::new(
+                        rb_transport::nusb::NusbTransport::new(
+                            interface, 0x00, 0x00,
+                        )
+                        .map_err(|e| {
+                            DriverError::Transport(
+                                rb_transport::TransportError::Io(e.to_string()),
+                            )
+                        })?,
+                    );
+                    // Try the fx2lafw-specific vendor request.
+                    // Any error means the device is not running fx2lafw.
+                    if let Ok((major, _minor)) =
+                        get_fw_version(&mut *transport).await
+                    {
+                        if major == REQUIRED_FW_MAJOR {
+                            log::debug!(
+                                "fx2lafw: {:04X}:{:04X} already running fx2lafw v{major}",
+                                target_vid, target_pid
+                            );
+                            needs_upload = false;
+                        }
+                    }
+                    drop(transport);
+                }
+            }
+        }
+
+        if needs_upload {
+            log::info!(
+                "fx2lafw: {:04X}:{:04X} needs firmware, uploading {} …",
+                target_vid, target_pid, fw_name
+            );
+
+            // 1. Load firmware bytes.
+            let fw_data = loader.load_firmware(fw_name).await.map_err(|e| {
+                DriverError::Transport(rb_transport::TransportError::Io(e))
+            })?;
+
+            // 2. Open the device.
+            let dev_info =
+                find_usb_device(target_vid, target_pid, target_serial)
+                    .await?;
+            let device = dev_info.open().await.map_err(|e| {
+                DriverError::Transport(rb_transport::TransportError::Io(
+                    e.to_string(),
+                ))
+            })?;
+            let interface =
+                device.detach_and_claim_interface(0).await.map_err(|e| {
+                    DriverError::Transport(rb_transport::TransportError::Io(
+                        e.to_string(),
+                    ))
+                })?;
+
+            let mut transport: Box<dyn UsbTransport> = Box::new(
+                rb_transport::nusb::NusbTransport::new(interface, 0x00, 0x00)
+                    .map_err(|e| {
+                        DriverError::Transport(
+                            rb_transport::TransportError::Io(e.to_string()),
+                        )
+                    })?,
+            );
+
+            // 3. Upload firmware via Cypress 0xA0 vendor request.
+            upload_firmware(&mut *transport, &fw_data).await.map_err(
+                |e| {
+                    DriverError::Transport(rb_transport::TransportError::Io(
+                        e,
+                    ))
+                },
+            )?;
+            drop(transport);
+
+            // 4. Wait for renumeration.
+            let max_polls =
+                (MAX_RENUM_DELAY_MS / RENUM_POLL_MS) as usize;
+            for _ in 0..max_polls {
+                futures_timer::Delay::new(std::time::Duration::from_millis(
+                    RENUM_POLL_MS,
+                ))
+                .await;
+
+                let devices = nusb::list_devices().await.map_err(|e| {
+                    DriverError::Transport(
+                        rb_transport::TransportError::Io(e.to_string()),
+                    )
+                })?;
+
+                for dev in devices {
+                    let dev_vid = dev.vendor_id();
+                    let dev_pid = dev.product_id();
+                    if let Some(re_profile) = find_profile(dev_vid, dev_pid) {
+                        let dev_serial =
+                            dev.serial_number().unwrap_or("");
+                        // Reuse the original candidate address so the
+                        // connected device matches the scan result in the UI.
+                        let address = candidate.address.clone();
+                        let mut info = DeviceInfo::new(
+                            re_profile.vendor,
+                            re_profile.model,
+                        );
+                        if !dev_serial.is_empty() {
+                            info = info.with_serial(dev_serial);
+                        }
+
+                        log::info!(
+                            "fx2lafw: re-enumerated as {:04X}:{:04X}",
+                            dev_vid, dev_pid
+                        );
+
+                        let new_candidate =
+                            DeviceCandidate::new(info, address);
+                        return open_and_connect(
+                            &new_candidate,
+                            dev_vid,
+                            dev_pid,
+                            dev_serial,
+                        )
+                        .await;
+                    }
+                }
+            }
+
+            return Err(DriverError::Transport(
+                rb_transport::TransportError::Io(
+                    "device did not re-enumerate after firmware upload"
+                        .into(),
+                ),
+            ));
+        }
     }
 
-    // Find and open the device by VID/PID/serial.
-    let dev_info = find_usb_device(target_vid, target_pid, target_serial).await?;
+    // ── Normal device (already has fx2lafw firmware) ───────────────────────
+
+    open_and_connect(candidate, target_vid, target_pid, target_serial).await
+}
+
+/// Open a USB device by VID/PID/serial and wrap it in an [`Fx2lafwDevice`].
+#[cfg(feature = "fx2lafw")]
+async fn open_and_connect(
+    candidate: &DeviceCandidate,
+    vid: u16,
+    pid: u16,
+    serial: &str,
+) -> DriverResult<Box<dyn Device>> {
+    let dev_info = find_usb_device(vid, pid, serial).await?;
     let device = dev_info
         .open()
         .await
@@ -1076,8 +1183,8 @@ async fn connect_usb(candidate: &DeviceCandidate) -> DriverResult<Box<dyn Device
     // All commands go through EP0 control transfers — no bulk OUT endpoint needed.
     let transport: Box<dyn UsbTransport> = Box::new(rb_transport::nusb::NusbTransport::new(
         interface, EP_DATA, // bulk IN  = EP2 IN  (0x82)
-        0x00,    // bulk OUT = unused (firmware has no bulk OUT endpoint)
-    ));
+        0x00,    // bulk OUT = unused
+    ).map_err(|e| DriverError::Transport(rb_transport::TransportError::Io(e.to_string())))?);
 
     let id = DeviceId::new(&candidate.address);
     let info = candidate.info.clone();
@@ -1089,7 +1196,7 @@ async fn connect_usb(candidate: &DeviceCandidate) -> DriverResult<Box<dyn Device
 /// Upload firmware to a device in bootloader mode, then wait for renumeration
 /// and return a connected [`Device`].
 ///
-/// The `firmware_data` is the Intel HEX (`.ihx`) file content.
+/// The `firmware_data` is raw binary (sigrok `.fw` format).
 /// `boot_serial` is the serial number of the bootloader device (may be empty).
 ///
 /// After upload, this function polls for a new device at the fx2lafw VID/PID
@@ -1113,7 +1220,7 @@ pub async fn upload_firmware_and_connect(
 
     let mut transport: Box<dyn UsbTransport> = Box::new(rb_transport::nusb::NusbTransport::new(
         interface, 0x00, 0x00,
-    ));
+    ).map_err(|e| DriverError::Transport(rb_transport::TransportError::Io(e.to_string())))?);
 
     // 2. Upload firmware.
     upload_firmware(&mut *transport, firmware_data)
@@ -1147,7 +1254,7 @@ pub async fn upload_firmware_and_connect(
                     }
 
                     let candidate = DeviceCandidate::new(info, address);
-                    return connect_usb(&candidate).await;
+                    return connect_usb(&candidate, None).await;
                 }
             }
         }
@@ -1172,13 +1279,27 @@ async fn find_usb_device(vid: u16, pid: u16, serial: &str) -> DriverResult<nusb:
         .ok_or(DriverError::NotFound)
 }
 
+/// Returns the list of firmware file names for all supported devices that
+/// require a firmware upload (i.e. devices that ship without fx2lafw
+/// pre-installed).
+#[must_use]
+pub fn known_firmware_files() -> Vec<&'static str> {
+    SUPPORTED_DEVICES
+        .iter()
+        .filter_map(|p| p.firmware_file)
+        .collect()
+}
+
 #[cfg(not(feature = "fx2lafw"))]
 async fn scan_usb() -> DriverResult<Vec<DeviceCandidate>> {
     Ok(Vec::new())
 }
 
 #[cfg(not(feature = "fx2lafw"))]
-async fn connect_usb(_candidate: &DeviceCandidate) -> DriverResult<Box<dyn Device>> {
+async fn connect_usb(
+    _candidate: &DeviceCandidate,
+    _firmware_loader: Option<&dyn crate::FirmwareLoader>,
+) -> DriverResult<Box<dyn Device>> {
     Err(DriverError::NotFound)
 }
 
@@ -1882,69 +2003,41 @@ mod tests {
         pool.run_until_stalled();
     }
 
-    // ── Intel HEX parsing ─────────────────────────────────────────────────────
-
-    #[test]
-    fn parse_ihex_single_data_record() {
-        let hex = b":02000000123456\n";
-        let chunks = parse_ihex(hex).unwrap();
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].0, 0x0000);
-        assert_eq!(chunks[0].1, vec![0x12, 0x34]);
-    }
-
-    #[test]
-    fn parse_ihex_skips_eof_record() {
-        let hex = b":02000000123456\n:00000001FF\n";
-        let chunks = parse_ihex(hex).unwrap();
-        assert_eq!(chunks.len(), 1);
-    }
-
-    #[test]
-    fn parse_ihex_extended_linear_address() {
-        let hex = b":02000004123400\n:01000000ABFE\n";
-        let chunks = parse_ihex(hex).unwrap();
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].1, vec![0xAB]);
-    }
-
-    #[test]
-    fn parse_ihex_handles_empty_input() {
-        let chunks = parse_ihex(b"").unwrap();
-        assert!(chunks.is_empty());
-    }
-
-    #[test]
-    fn parse_ihex_skips_non_hex_lines() {
-        let hex = b"not a hex line\n:01000000FF00\n";
-        let chunks = parse_ihex(hex).unwrap();
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].1, vec![0xFF]);
-    }
-
     // ── Firmware upload ───────────────────────────────────────────────────────
 
     #[test]
     fn upload_firmware_sends_control_transfers() {
         let mut transport = MockUsbTransport::new();
-        transport.queue_control_response([]); // response for data write
-        transport.queue_control_response([]); // response for start execution
+        transport.queue_control_response([]); // CPU reset on
+        transport.queue_control_response([]); // data write
+        transport.queue_control_response([]); // CPU reset off
 
-        let hex = b":02000000123400\n:00000001FF\n";
-        let result = block_on(upload_firmware(&mut transport, hex));
+        // Raw binary data (8 bytes = 1 chunk:
+        //   CPU reset on → write data → CPU reset off = 3 transfers)
+        let fw = [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0];
+        let result = block_on(upload_firmware(&mut transport, &fw));
         assert!(result.is_ok());
 
         let ctrl = transport.control_transfers();
-        assert!(ctrl.len() >= 2);
+        assert_eq!(ctrl.len(), 3, "expected 3 transfers: reset on, data, reset off");
+
+        // 1. CPU reset on
         assert_eq!(ctrl[0].request_type, 0x40);
         assert_eq!(ctrl[0].request, 0xA0);
-        assert_eq!(ctrl[0].value, 0x0000);
-        assert_eq!(ctrl[0].data, vec![0x12, 0x34]);
+        assert_eq!(ctrl[0].value, 0xE600);
+        assert_eq!(ctrl[0].data, vec![0x01]);
 
-        let last = ctrl.last().unwrap();
-        assert_eq!(last.request_type, 0x40);
-        assert_eq!(last.request, 0xA0);
-        assert_eq!(last.value, FW_ENTRY);
+        // 2. Firmware data
+        assert_eq!(ctrl[1].request_type, 0x40);
+        assert_eq!(ctrl[1].request, 0xA0);
+        assert_eq!(ctrl[1].value, 0x0000);
+        assert_eq!(ctrl[1].data, fw.to_vec());
+
+        // 3. CPU reset off (starts execution)
+        assert_eq!(ctrl[2].request_type, 0x40);
+        assert_eq!(ctrl[2].request, 0xA0);
+        assert_eq!(ctrl[2].value, 0xE600);
+        assert_eq!(ctrl[2].data, vec![0x00]);
     }
 
     // ── Device profile table ──────────────────────────────────────────────────

@@ -11,6 +11,8 @@ use rb_transport::DeviceCandidate;
 
 /// Managed state for a connected device.
 struct ConnectedState {
+    /// The device's stable identifier (kept even when handle is borrowed).
+    device_id: DeviceId,
     /// The device handle; None while borrowed by an acquisition.
     handle: Option<DeviceHandle>,
     /// Human-readable label (vendor/model).
@@ -40,11 +42,13 @@ pub struct DeviceManager {
 }
 
 impl DeviceManager {
-    /// Creates a new manager with the default driver registry.
+    /// Creates a new manager with the default driver registry and firmware support.
     #[must_use]
     pub fn new() -> Self {
+        let firmware_loader = Box::new(crate::firmware::Fx2lafwAssetLoader::new());
+        let factories = rb_drivers::factories_with_firmware(Some(firmware_loader));
         Self {
-            registry: DriverRegistry::with_default_factories(),
+            registry: DriverRegistry::new(factories),
             devices: Vec::new(),
             scan_error: None,
             connect_error: None,
@@ -110,18 +114,18 @@ impl DeviceManager {
 
         // Try to find an existing slot for this device.
         let existing = self.devices.iter_mut().find(|s| {
-            // Match by device handle ID (from the connected device).
-            s.state.as_ref().is_some_and(|cs| {
-                cs.handle.as_ref().is_some_and(|h| h.device().id() == &device_id)
-            }) || {
-                // Also match by candidate address for scan-discovered slots.
-                let did = DeviceId::new(&s.known.candidate.address);
-                did == device_id
-            }
+            // Match by stored device_id.
+            s.state.as_ref().is_some_and(|cs| cs.device_id == device_id)
+                || {
+                    // Also match by candidate address for scan-discovered slots.
+                    let did = DeviceId::new(&s.known.candidate.address);
+                    did == device_id
+                }
         });
 
         if let Some(slot) = existing {
             slot.state = Some(ConnectedState {
+                device_id: device_id.clone(),
                 handle: Some(handle),
                 label,
             });
@@ -136,6 +140,7 @@ impl DeviceManager {
                     origin,
                 },
                 state: Some(ConnectedState {
+                    device_id: device_id.clone(),
                     handle: Some(handle),
                     label,
                 }),
@@ -147,9 +152,7 @@ impl DeviceManager {
     /// Disconnects a device, dropping its handle and clearing state.
     pub fn disconnect(&mut self, device_id: &DeviceId) {
         if let Some(slot) = self.devices.iter_mut().find(|s| {
-            s.state.as_ref().is_some_and(|cs| {
-                cs.handle.as_ref().is_some_and(|h| h.device().id() == device_id)
-            })
+            s.state.as_ref().is_some_and(|cs| &cs.device_id == device_id)
         }) {
             slot.state = None;
         }
@@ -158,17 +161,16 @@ impl DeviceManager {
     /// Returns true if the device is connected (handle may be borrowed).
     pub fn is_connected(&self, device_id: &DeviceId) -> bool {
         self.devices.iter().any(|s| {
-            s.state.as_ref().is_some_and(|cs| {
-                cs.handle.as_ref().is_some_and(|h| h.device().id() == device_id)
-            })
+            s.state.as_ref().is_some_and(|cs| &cs.device_id == device_id)
         })
     }
 
     /// Returns true if the device handle is available (not borrowed by an acquisition).
     pub fn is_available(&self, device_id: &DeviceId) -> bool {
         self.devices.iter().any(|s| {
-            s.state.as_ref().is_some_and(|cs| cs.handle.is_some()
-                && cs.handle.as_ref().is_some_and(|h| h.device().id() == device_id))
+            s.state.as_ref().is_some_and(|cs| {
+                cs.handle.is_some() && &cs.device_id == device_id
+            })
         })
     }
 
@@ -188,9 +190,7 @@ impl DeviceManager {
                 && s.known.driver == result.driver
                 && s.state.is_some()
             {
-                s.state.as_ref().and_then(|cs| {
-                    cs.handle.as_ref().map(|h| h.device().id().clone())
-                })
+                s.state.as_ref().map(|cs| cs.device_id.clone())
             } else {
                 None
             }
@@ -206,9 +206,7 @@ impl DeviceManager {
         self.devices
             .iter_mut()
             .find(|s| {
-                s.state.as_ref().is_some_and(|cs| {
-                    cs.handle.as_ref().is_some_and(|h| h.device().id() == device_id)
-                })
+                s.state.as_ref().is_some_and(|cs| &cs.device_id == device_id)
             })
             .and_then(|s| s.state.as_mut().and_then(|cs| cs.handle.take()))
     }
@@ -250,19 +248,18 @@ impl DeviceManager {
     /// Returns a reference to the device handle, if available.
     pub fn device_handle(&self, device_id: &DeviceId) -> Option<&DeviceHandle> {
         self.devices.iter().find_map(|s| {
-            s.state.as_ref().and_then(|cs| cs.handle.as_ref())
-                .filter(|h| h.device().id() == device_id)
+            s.state.as_ref()
+                .filter(|cs| &cs.device_id == device_id)
+                .and_then(|cs| cs.handle.as_ref())
         })
     }
 
     /// Returns the device label (vendor/model).
     pub fn device_label(&self, device_id: &DeviceId) -> Option<&str> {
         self.devices.iter().find_map(|s| {
-            s.state.as_ref().and_then(|cs| {
-                cs.handle.as_ref()
-                    .filter(|h| h.device().id() == device_id)
-                    .map(|_| cs.label.as_str())
-            })
+            s.state.as_ref()
+                .filter(|cs| &cs.device_id == device_id)
+                .map(|cs| cs.label.as_str())
         })
     }
 
@@ -270,11 +267,7 @@ impl DeviceManager {
     pub fn connected_device_ids(&self) -> Vec<DeviceId> {
         self.devices
             .iter()
-            .filter_map(|s| {
-                s.state.as_ref().and_then(|cs| {
-                    cs.handle.as_ref().map(|h| h.device().id().clone())
-                })
-            })
+            .filter_map(|s| s.state.as_ref().map(|cs| cs.device_id.clone()))
             .collect()
     }
 

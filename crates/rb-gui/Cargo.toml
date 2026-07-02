@@ -19,6 +19,7 @@ rb-drivers.workspace = true
 rb-model.workspace = true
 rb-transport.workspace = true
 rb-canvas.workspace = true
+async-trait.workspace = true
 dioxus = { workspace = true, features = ["html"] }
 futures.workspace = true
 log.workspace = true

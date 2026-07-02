@@ -16,20 +16,52 @@ pub mod fx2lafw;
 
 use rb_transport::DriverFactory;
 
+/// Resolves driver firmware files by name (e.g. `"fx2lafw-cypress-fx2.fw"`).
+///
+/// The host application (GUI / CLI) implements this trait to provide firmware
+/// bytes at runtime via platform-specific asset loading (Dioxus `asset!()`,
+/// `std::fs`, etc.).  This trait is always available regardless of which
+/// Cargo features are enabled.
+#[async_trait::async_trait(?Send)]
+pub trait FirmwareLoader {
+    /// Returns the firmware bytes for the given file name.
+    async fn load_firmware(&self, name: &str) -> Result<Vec<u8>, String>;
+}
+
 /// Collects a boxed [`DriverFactory`] for every driver enabled at compile time.
 ///
 /// The set is determined entirely by Cargo features: enabling the `demo` feature
 /// adds the synthetic [`demo::DemoFactory`], enabling `fx2lafw` adds the
 /// [`fx2lafw::Fx2lafwFactory`], and so on for future drivers.
+///
+/// Use [`factories_with_firmware`] if you want to provide firmware for
+/// bootloader-based drivers like fx2lafw.
 #[must_use]
 #[allow(clippy::vec_init_then_push)] // push is conditional on enabled drivers
 pub fn factories() -> Vec<Box<dyn DriverFactory>> {
+    factories_with_firmware(None)
+}
+
+/// Like [`factories`], but provides a [`FirmwareLoader`] so that
+/// bootloader devices (Cypress FX2 without EEPROM) are automatically flashed
+/// during [`scan`](DriverFactory::scan).
+#[must_use]
+#[allow(clippy::vec_init_then_push)]
+pub fn factories_with_firmware(
+    firmware_loader: Option<Box<dyn FirmwareLoader>>,
+) -> Vec<Box<dyn DriverFactory>> {
     #[allow(unused_mut)]
     let mut factories: Vec<Box<dyn DriverFactory>> = Vec::new();
     #[cfg(feature = "demo")]
     factories.push(Box::new(demo::DemoFactory::new()));
     #[cfg(feature = "fx2lafw")]
-    factories.push(Box::new(fx2lafw::Fx2lafwFactory::new()));
+    {
+        let mut fxlafw = fx2lafw::Fx2lafwFactory::new();
+        if let Some(loader) = firmware_loader {
+            fxlafw.set_firmware_loader(loader);
+        }
+        factories.push(Box::new(fxlafw));
+    }
     factories
 }
 

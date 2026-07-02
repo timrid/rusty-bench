@@ -31,18 +31,24 @@ impl NusbTransport {
     /// Wraps an opened [`nusb::Interface`] as a bulk-pair transport.
     ///
     /// Pass `0x00` for endpoints that are not used (fx2lafw has no bulk OUT,
-    /// for example).  Opening a non-zero endpoint address that does not exist
-    /// on the interface will panic.
+    /// for example).
     ///
-    /// # Panics
-    /// Panics if a non-zero endpoint address cannot be opened.
-    #[must_use]
-    pub fn new(interface: Interface, bulk_in_ep: u8, bulk_out_ep: u8) -> Self {
+    /// # Errors
+    /// Returns an error if a non-zero endpoint address cannot be opened.
+    pub fn new(
+        interface: Interface,
+        bulk_in_ep: u8,
+        bulk_out_ep: u8,
+    ) -> TransportResult<Self> {
         let ep_in = if bulk_in_ep != 0x00 {
             Some(
                 interface
                     .endpoint::<Bulk, In>(bulk_in_ep)
-                    .expect("bulk IN endpoint not found on interface"),
+                    .map_err(|e| {
+                        TransportError::Io(format!(
+                            "bulk IN endpoint 0x{bulk_in_ep:02X} not found: {e}"
+                        ))
+                    })?,
             )
         } else {
             None
@@ -51,16 +57,20 @@ impl NusbTransport {
             Some(
                 interface
                     .endpoint::<Bulk, Out>(bulk_out_ep)
-                    .expect("bulk OUT endpoint not found on interface"),
+                    .map_err(|e| {
+                        TransportError::Io(format!(
+                            "bulk OUT endpoint 0x{bulk_out_ep:02X} not found: {e}"
+                        ))
+                    })?,
             )
         } else {
             None
         };
-        Self {
+        Ok(Self {
             interface,
             ep_in,
             ep_out,
-        }
+        })
     }
 }
 
