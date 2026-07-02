@@ -801,6 +801,10 @@ struct DeviceProfile {
     model: &'static str,
     /// Whether this device supports 16-bit sampling.
     has_16bit: bool,
+    /// Firmware file name (e.g. `"fx2lafw-saleae-logic.fw"`).
+    /// `None` for devices that ship with fx2lafw firmware pre-installed
+    /// (sigrok VID/PID).
+    firmware_file: Option<&'static str>,
 }
 
 /// Known fx2lafw-compatible devices.
@@ -812,6 +816,7 @@ static SUPPORTED_DEVICES: &[DeviceProfile] = &[
         vendor: "Cypress",
         model: "FX2 (bootloader)",
         has_16bit: true,
+        firmware_file: Some("fx2lafw-cypress-fx2.fw"),
     },
     // USBee AX (and clones)
     DeviceProfile {
@@ -820,6 +825,7 @@ static SUPPORTED_DEVICES: &[DeviceProfile] = &[
         vendor: "CWAV",
         model: "USBee AX",
         has_16bit: false,
+        firmware_file: Some("fx2lafw-cwav-usbeeax.fw"),
     },
     // USBee DX
     DeviceProfile {
@@ -828,6 +834,7 @@ static SUPPORTED_DEVICES: &[DeviceProfile] = &[
         vendor: "CWAV",
         model: "USBee DX",
         has_16bit: true,
+        firmware_file: Some("fx2lafw-cwav-usbeedx.fw"),
     },
     // USBee SX
     DeviceProfile {
@@ -836,6 +843,16 @@ static SUPPORTED_DEVICES: &[DeviceProfile] = &[
         vendor: "CWAV",
         model: "USBee SX",
         has_16bit: false,
+        firmware_file: Some("fx2lafw-cwav-usbeesx.fw"),
+    },
+    // USBee ZX
+    DeviceProfile {
+        vid: 0x08A9,
+        pid: 0x0005,
+        vendor: "CWAV",
+        model: "USBee ZX",
+        has_16bit: false,
+        firmware_file: Some("fx2lafw-cwav-usbeezx.fw"),
     },
     // Saleae Logic (and many clones)
     DeviceProfile {
@@ -844,6 +861,7 @@ static SUPPORTED_DEVICES: &[DeviceProfile] = &[
         vendor: "Saleae",
         model: "Logic",
         has_16bit: false,
+        firmware_file: Some("fx2lafw-saleae-logic.fw"),
     },
     // Braintechnology USB-LPS
     DeviceProfile {
@@ -852,6 +870,7 @@ static SUPPORTED_DEVICES: &[DeviceProfile] = &[
         vendor: "Braintechnology",
         model: "USB-LPS",
         has_16bit: true,
+        firmware_file: Some("fx2lafw-braintechnology-usb-lps.fw"),
     },
     // sigrok FX2 LA 8ch
     DeviceProfile {
@@ -860,6 +879,7 @@ static SUPPORTED_DEVICES: &[DeviceProfile] = &[
         vendor: "sigrok",
         model: "FX2 LA (8ch)",
         has_16bit: false,
+        firmware_file: Some("fx2lafw-sigrok-fx2-8ch.fw"),
     },
     // sigrok FX2 LA 16ch
     DeviceProfile {
@@ -868,14 +888,16 @@ static SUPPORTED_DEVICES: &[DeviceProfile] = &[
         vendor: "sigrok",
         model: "FX2 LA (16ch)",
         has_16bit: true,
+        firmware_file: Some("fx2lafw-sigrok-fx2-16ch.fw"),
     },
-    // fx2lafw-generic PIDs
+    // fx2lafw-generic PIDs (pre-installed firmware, no upload needed)
     DeviceProfile {
         vid: 0x1D50,
         pid: 0x6081,
         vendor: "sigrok",
         model: "fx2lafw",
         has_16bit: false,
+        firmware_file: None,
     },
     DeviceProfile {
         vid: 0x1D50,
@@ -883,6 +905,7 @@ static SUPPORTED_DEVICES: &[DeviceProfile] = &[
         vendor: "sigrok",
         model: "fx2lafw",
         has_16bit: false,
+        firmware_file: None,
     },
     DeviceProfile {
         vid: 0x1D50,
@@ -890,6 +913,7 @@ static SUPPORTED_DEVICES: &[DeviceProfile] = &[
         vendor: "sigrok",
         model: "fx2lafw",
         has_16bit: false,
+        firmware_file: None,
     },
     // sigrok usb-c-grok
     DeviceProfile {
@@ -898,6 +922,7 @@ static SUPPORTED_DEVICES: &[DeviceProfile] = &[
         vendor: "sigrok",
         model: "usb-c-grok",
         has_16bit: false,
+        firmware_file: Some("fx2lafw-usb-c-grok.fw"),
     },
 ];
 
