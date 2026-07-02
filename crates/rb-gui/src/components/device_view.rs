@@ -58,19 +58,18 @@ pub fn DeviceView(data_version: Signal<u64>) -> Element {
 
     // Device connected — show full view.
     // Per-tab view state from the active tab.
-    let (view, config) = {
+    let (view, config, version) = {
         let s = state.borrow();
         let tab = s.active_tab_state();
-        let view = tab
-            .map(|t| t.logic_analyzer().view.clone())
-            .unwrap_or_default();
-        let config = tab
-            .map(|t| t.logic_analyzer().acquisition_config.clone())
-            .unwrap_or_default();
-        (view, config)
+        let la = tab.map(|t| t.logic_analyzer());
+        let view = la.map(|l| l.view.clone()).unwrap_or_default();
+        let config = la.map(|l| l.acquisition_config.clone()).unwrap_or_default();
+        let version = la.map(|l| l.content_version).unwrap_or(0);
+        (view, config, version)
     };
     let mut view_signal = use_signal(move || view);
     let mut config_signal = use_signal(move || config);
+    let mut seen_version = use_signal(move || version);
     let mut sample_count_signal = use_signal(|| 0u64);
     let cursor_sample_pos = use_signal(|| None::<u64>);
 
@@ -86,25 +85,33 @@ pub fn DeviceView(data_version: Signal<u64>) -> Element {
             }
         }
         // Load the new tab's saved view and config.
-        let (new_view, new_config) = {
+        let (new_view, new_config, new_version) = {
             let s = state.borrow();
-            let v = s.tabs.get(&active_tab)
-                .map(|t| t.logic_analyzer().view.clone())
-                .unwrap_or_default();
-            let c = s.tabs.get(&active_tab)
-                .map(|t| t.logic_analyzer().acquisition_config.clone())
-                .unwrap_or_default();
-            (v, c)
+            let la = s.tabs.get(&active_tab).map(|t| t.logic_analyzer());
+            let v = la.map(|l| l.view.clone()).unwrap_or_default();
+            let c = la.map(|l| l.acquisition_config.clone()).unwrap_or_default();
+            let ver = la.map(|l| l.content_version).unwrap_or(0);
+            (v, c, ver)
         };
         view_signal.set(new_view);
         config_signal.set(new_config);
+        seen_version.set(new_version);
         prev_tab.set(active_tab);
     } else {
-        // Same tab — sync view and config state back on each render.
+        // Same tab — check if content was replaced (device switch).
         let mut s = state.borrow_mut();
         if let Some(active) = s.tabs.get_mut(&active_tab) {
-            active.logic_analyzer_mut().view = view_signal.read().clone();
-            active.logic_analyzer_mut().acquisition_config = config_signal.read().clone();
+            let current_version = active.logic_analyzer().content_version;
+            if current_version != seen_version() {
+                // Content was replaced (device switch) — load fresh state.
+                view_signal.set(active.logic_analyzer().view.clone());
+                config_signal.set(active.logic_analyzer().acquisition_config.clone());
+                seen_version.set(current_version);
+            } else {
+                // Content unchanged — persist UI edits back to tab state.
+                active.logic_analyzer_mut().view = view_signal.read().clone();
+                active.logic_analyzer_mut().acquisition_config = config_signal.read().clone();
+            }
         }
     }
 

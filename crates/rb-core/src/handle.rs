@@ -107,7 +107,7 @@ impl DeviceHandle {
     /// Discards all acquired samples by recreating traces with the same
     /// channels and timebase. Called at the start of every acquisition so
     /// that Stop → Start begins a fresh capture.
-    fn clear_traces(&mut self) {
+    pub fn discard_samples(&mut self) {
         for trace in &mut self.analog {
             let tb = *trace.timebase();
             let ch = trace.channel().clone();
@@ -184,7 +184,7 @@ impl DeviceHandle {
     /// Returns [`SessionError::NotAcquirable`] if the device streams no samples,
     /// or a [`SessionError::Device`] if arming fails.
     pub async fn arm(&mut self) -> Result<(), SessionError> {
-        self.clear_traces();
+        self.discard_samples();
         let mut armed_any = false;
         if let Some(scope) = self.device.as_oscilloscope_mut() {
             scope.arm().await?;

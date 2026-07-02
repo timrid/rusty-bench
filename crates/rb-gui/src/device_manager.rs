@@ -254,6 +254,15 @@ impl DeviceManager {
         })
     }
 
+    /// Returns a mutable reference to the device handle, if available.
+    pub fn device_handle_mut(&mut self, device_id: &DeviceId) -> Option<&mut DeviceHandle> {
+        self.devices.iter_mut().find_map(|s| {
+            s.state.as_mut()
+                .filter(|cs| &cs.device_id == device_id)
+                .and_then(|cs| cs.handle.as_mut())
+        })
+    }
+
     /// Returns the device label (vendor/model).
     pub fn device_label(&self, device_id: &DeviceId) -> Option<&str> {
         self.devices.iter().find_map(|s| {

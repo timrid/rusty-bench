@@ -10,6 +10,7 @@ use dioxus::prelude::*;
 use crate::app_state::AppState;
 
 use super::device_view::DeviceView;
+use super::dialog::Dialog;
 use super::top_bar::TopBar;
 
 static TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
@@ -34,6 +35,9 @@ pub fn App() -> Element {
 
             // Status bar
             StatusBar { data_version }
+
+            // Modal dialogs (rendered on top of everything)
+            Dialog { data_version }
         }
     }
 }

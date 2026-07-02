@@ -345,13 +345,41 @@ fn ConnectedDeviceRow(
                     if !is_locked {
                         let did = state.borrow().device_manager.device_id_for_result(&kd);
                         if let Some(did) = did {
-                            let mut s = state.borrow_mut();
-                            let tab_id = s.active_tab;
-                            s.assign_device_to_tab(tab_id, did.clone());
-                            if let Some(tab) = s.tabs.get_mut(&tab_id) {
-                                tab.content = Some(crate::logic_analyzer::default_content());
+                            let target_did = did.clone();
+                            // If already assigned to this device, no-op.
+                            let already_assigned = state.borrow()
+                                .active_tab_state()
+                                .and_then(|t| t.assigned_device_id())
+                                .is_some_and(|id| id == &target_did);
+                            if already_assigned {
+                                open_signal.set(false);
+                                return;
                             }
-                            data_version += 1;
+
+                            let has_samples = state.borrow().active_tab_has_samples();
+
+                            if has_samples {
+                                // Show confirmation dialog; on confirm, the
+                                // Dialog component performs the switch itself.
+                                use crate::components::dialog::{DIALOG, DialogConfig};
+                                *DIALOG.write() = Some(DialogConfig::device_switch(target_did));
+                                open_signal.set(false);
+                            } else {
+                                // No data — switch directly.
+                                let mut s = state.borrow_mut();
+                                let tab_id = s.active_tab;
+                                s.assign_device_to_tab(tab_id, target_did.clone());
+                                // Clear stale traces from the device handle
+                                // so the WaveformView shows fresh channels.
+                                if let Some(h) = s.device_manager.device_handle_mut(&target_did) {
+                                    h.discard_samples();
+                                    let content = crate::logic_analyzer::init_content(h.device());
+                                    if let Some(tab) = s.tabs.get_mut(&tab_id) {
+                                        tab.content = Some(crate::tab_content::TabContent::LogicAnalyzer(content));
+                                    }
+                                }
+                                data_version += 1;
+                            }
                         }
                         open_signal.set(false);
                     }

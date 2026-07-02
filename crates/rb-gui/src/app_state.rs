@@ -10,6 +10,7 @@ use rb_core::DeviceHandle;
 use rb_device::DeviceId;
 
 use crate::device_manager::DeviceManager;
+use crate::tab_content::TabContent;
 use crate::tab_state::{TabId, TabSource, TabState};
 
 // ── App state ─────────────────────────────────────────────────────────────────
@@ -159,6 +160,19 @@ impl AppState {
     pub fn is_device_locked(&self) -> bool {
         self.active_tab_state()
             .is_some_and(|t| t.is_running())
+    }
+
+    /// Whether the active tab currently has recorded sample data.
+    /// Used to decide whether to show a confirmation dialog before switching
+    /// devices.
+    pub fn active_tab_has_samples(&self) -> bool {
+        let Some(tab) = self.active_tab_state() else {
+            return false;
+        };
+        let handle = tab
+            .assigned_device_id()
+            .and_then(|did| self.device_manager.device_handle(did));
+        tab.content.as_ref().is_some_and(|c| c.has_data(handle))
     }
 
     pub fn device_label(&self, id: &DeviceId) -> String {

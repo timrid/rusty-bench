@@ -61,6 +61,16 @@ impl TabContent {
             }
         }
     }
+
+    /// Whether this content currently holds acquired sample data.
+    ///
+    /// `device_handle` is the optional [`DeviceHandle`](rb_core::DeviceHandle)
+    /// from the device pool (may be absent while acquisition is running).
+    pub fn has_data(&self, device_handle: Option<&rb_core::DeviceHandle>) -> bool {
+        match self {
+            TabContent::LogicAnalyzer(la) => la.has_data(device_handle),
+        }
+    }
 }
 
 impl Default for TabContent {
