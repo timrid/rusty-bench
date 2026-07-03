@@ -23,6 +23,7 @@ async-trait.workspace = true
 dioxus = { workspace = true, features = ["html"] }
 futures.workspace = true
 log.workspace = true
+nusb = { workspace = true, optional = true }
 
 # Platform renderers: gated behind features, dx sets the right one automatically.
 dioxus-desktop = { workspace = true, optional = true }
@@ -63,6 +64,7 @@ desktop = [
     "rb-core/native",
     "dep:tokio",
     "dep:dioxus-desktop",
+    "dep:nusb",
     "dioxus/desktop",
 ]
 native = []

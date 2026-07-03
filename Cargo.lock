@@ -4659,6 +4659,7 @@ dependencies = [
  "futures-timer",
  "getrandom 0.3.4",
  "log",
+ "nusb",
  "rb-canvas",
  "rb-core",
  "rb-decode",

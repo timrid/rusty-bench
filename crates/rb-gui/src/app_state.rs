@@ -4,32 +4,16 @@
 //! executor for background acquisition futures. It is framework-agnostic and
 //! testable without a display.
 
-use std::cell::{RefCell, RefMut};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use dioxus::prelude::Signal;
 use rb_core::{DeviceHandle, DeviceOrigin};
 use rb_device::DeviceId;
-#[cfg(not(target_arch = "wasm32"))]
-use tokio::sync::watch;
 
 use crate::device_manager::DeviceManager;
 use crate::tab_state::{TabId, TabSource, TabState};
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-/// Acquires a mutable borrow on `AppState`, yielding briefly if the `RefCell`
-/// is currently borrowed by the Dioxus render cycle.
-async fn borrow_app_mut(app_ref: &Rc<RefCell<AppState>>) -> RefMut<'_, AppState> {
-    loop {
-        match app_ref.try_borrow_mut() {
-            Ok(s) => return s,
-            Err(_) => {
-                futures_timer::Delay::new(std::time::Duration::from_millis(1)).await;
-            }
-        }
-    }
-}
 
 // ── App state ─────────────────────────────────────────────────────────────────
 
@@ -43,10 +27,6 @@ pub struct AppState {
     pub active_tab: TabId,
     next_tab_id: u64,
     next_session_num: u64,
-
-    /// Controls whether background device scanning is active (desktop only).
-    #[cfg(not(target_arch = "wasm32"))]
-    auto_scan_tx: watch::Sender<bool>,
 }
 
 impl AppState {
@@ -67,26 +47,12 @@ impl AppState {
         let mut tabs = HashMap::new();
         tabs.insert(first_id, tab);
 
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            Self {
-                device_manager,
-                tabs,
-                active_tab: first_id,
-                next_tab_id: 2,
-                auto_scan_tx: watch::channel(false).0,
-                next_session_num: 2,
-            }
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            Self {
-                device_manager,
-                tabs,
-                active_tab: first_id,
-                next_tab_id: 2,
-                next_session_num: 2,
-            }
+        Self {
+            device_manager,
+            tabs,
+            active_tab: first_id,
+            next_tab_id: 2,
+            next_session_num: 2,
         }
     }
 
@@ -166,7 +132,7 @@ impl AppState {
     ) -> Result<DeviceId, String> {
         // Clone registry and disconnect any existing device.
         let registry = {
-            let mut s = borrow_app_mut(app_ref).await;
+            let mut s = app_ref.borrow_mut();
             let r = s.device_manager.registry_clone();
             let connected: Vec<DeviceId> = s.device_manager.connected_device_ids();
             for id in &connected {
@@ -186,7 +152,7 @@ impl AppState {
         let id = device.id().clone();
         let content = crate::logic_analyzer::init_content(device.as_ref());
         let handle = DeviceHandle::new(device);
-        let mut s = borrow_app_mut(app_ref).await;
+        let mut s = app_ref.borrow_mut();
         s.device_manager
             .store_connected(id.clone(), handle, label, driver, origin);
         let tab_id = s.active_tab;
@@ -195,6 +161,35 @@ impl AppState {
             tab.content = Some(crate::tab_content::TabContent::LogicAnalyzer(content));
         }
         Ok(id)
+    }
+
+    // ── Hotplug watch ────────────────────────────────────────────────────────
+
+    /// Spawns an event-driven device-discovery loop via `nusb::watch_devices()`.
+    /// On each hotplug event, a device scan runs and `data_version` is bumped.
+    ///
+    /// No-op on WASM (no hotplug support).
+    pub fn spawn_usb_hotplug_watch(app_ref: &Rc<RefCell<AppState>>, mut data_version: Signal<u64>) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use futures::StreamExt;
+
+            let state = app_ref.clone();
+            dioxus::prelude::spawn(async move {
+                let Ok(mut watch) = nusb::watch_devices() else {
+                    log::warn!("nusb::watch_devices not available");
+                    return;
+                };
+                loop {
+                    if watch.next().await.is_some() {
+                        state.borrow_mut().scan_devices().await;
+                        data_version += 1;
+                    }
+                }
+            });
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = (app_ref, data_version);
     }
 
     // ── Device connection (delegates to DeviceManager) ────────────────────────
@@ -249,22 +244,6 @@ impl AppState {
                 self.device_manager.scan_error = Some(e.to_string());
             }
         }
-    }
-
-    /// Enables or disables background device scanning (desktop only).
-    /// Call from any UI component — cheap no-op when the value hasn't changed.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn set_auto_scan(&self, active: bool) {
-        let _ = self.auto_scan_tx.send_replace(active);
-    }
-    /// No-op on WASM — auto-scan is not supported.
-    #[cfg(target_arch = "wasm32")]
-    pub fn set_auto_scan(&self, _active: bool) {}
-
-    /// Returns a receiver that tracks whether auto-scan is active (desktop only).
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn auto_scan_receiver(&self) -> watch::Receiver<bool> {
-        self.auto_scan_tx.subscribe()
     }
 
     // ── Queries ───────────────────────────────────────────────────────────────

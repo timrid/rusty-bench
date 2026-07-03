@@ -126,12 +126,6 @@ fn DeviceDropdown(
     // Track which device is currently being connected (key = "driver-address").
     let connecting_device = use_signal(|| Option::<String>::None);
 
-    // ── Desktop: auto-refresh while dropdown is open ────────────────────
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        state.borrow().set_auto_scan(open());
-    }
-
     rsx! {
         div { class: "relative",
             // Dropdown trigger — always clickable to open the menu
