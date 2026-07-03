@@ -22,14 +22,16 @@ pub fn DeviceView(data_version: Signal<u64>) -> Element {
     let state: AppStateRef = use_context();
     let _version = data_version();
 
-    let s = state.borrow();
+    let Ok(s) = state.try_borrow() else {
+        return rsx! { div { class: "flex-1" } };
+    };
     let active_tab = s.active_tab;
     let device_id = s.device_id_for_tab(active_tab);
     let connect_error = s.device_manager.connect_error.clone();
     drop(s);
 
     // No device connected — show placeholder.
-    let Some(ref device_id) = device_id else {
+    let Some(_device_id) = device_id else {
         return rsx! {
             div { class: "flex-1 flex flex-col items-center justify-center",
                 div { class: "text-center space-y-3",
@@ -59,7 +61,7 @@ pub fn DeviceView(data_version: Signal<u64>) -> Element {
     // Device connected — show full view.
     // Per-tab view state from the active tab.
     let (view, config, version) = {
-        let s = state.borrow();
+        let Ok(s) = state.try_borrow() else { return prev_frame(); };
         let tab = s.active_tab_state();
         let la = tab.map(|t| t.logic_analyzer());
         let view = la.map(|l| l.view.clone()).unwrap_or_default();
@@ -78,7 +80,7 @@ pub fn DeviceView(data_version: Signal<u64>) -> Element {
     if prev_tab() != active_tab {
         // Save current view and config to the old tab.
         {
-            let mut s = state.borrow_mut();
+            let Ok(mut s) = state.try_borrow_mut() else { return prev_frame(); };
             if let Some(old) = s.tabs.get_mut(&prev_tab()) {
                 old.logic_analyzer_mut().view = view_signal.read().clone();
                 old.logic_analyzer_mut().acquisition_config = config_signal.read().clone();
@@ -86,7 +88,7 @@ pub fn DeviceView(data_version: Signal<u64>) -> Element {
         }
         // Load the new tab's saved view and config.
         let (new_view, new_config, new_version) = {
-            let s = state.borrow();
+            let Ok(s) = state.try_borrow() else { return prev_frame(); };
             let la = s.tabs.get(&active_tab).map(|t| t.logic_analyzer());
             let v = la.map(|l| l.view.clone()).unwrap_or_default();
             let c = la.map(|l| l.acquisition_config.clone()).unwrap_or_default();
@@ -99,7 +101,7 @@ pub fn DeviceView(data_version: Signal<u64>) -> Element {
         prev_tab.set(active_tab);
     } else {
         // Same tab — check if content was replaced (device switch).
-        let mut s = state.borrow_mut();
+        let Ok(mut s) = state.try_borrow_mut() else { return prev_frame(); };
         if let Some(active) = s.tabs.get_mut(&active_tab) {
             let current_version = active.logic_analyzer().content_version;
             if current_version != seen_version() {
@@ -117,7 +119,7 @@ pub fn DeviceView(data_version: Signal<u64>) -> Element {
 
     // Update sample_count from the active tab's acquisition.
     {
-        let s = state.borrow();
+        let Ok(s) = state.try_borrow() else { return prev_frame(); };
         if let Some(tab) = s.active_tab_state() {
             let sc = tab.logic_analyzer().acquisition.as_ref()
                 .map(|a| a.sample_count() as u64)
@@ -143,7 +145,7 @@ pub fn DeviceView(data_version: Signal<u64>) -> Element {
                     view: view_signal,
                     sample_count: sample_count_signal,
                     on_sample_rate_change: Callback::new(move |hz| {
-                        let mut s = state.borrow_mut();
+                        let Ok(mut s) = state.try_borrow_mut() else { return; };
                         if let Some(tab) = s.tabs.get_mut(&active_tab) {
                             if let Some(acq) = tab.logic_analyzer_mut().acquisition.as_mut() {
                                 acq.send_command(rb_core::AcquisitionCommand::SetSampleRate(hz));
@@ -165,4 +167,9 @@ pub fn DeviceView(data_version: Signal<u64>) -> Element {
             }
         }
     }
+}
+
+/// Minimal placeholder returned when `AppState` is busy (borrowed by `connect_single`).
+fn prev_frame() -> Element {
+    rsx! { div { class: "flex-1" } }
 }

@@ -138,7 +138,7 @@ pub fn WaveformCanvas(
             let _ver = data_version();
             let sc = sample_count_sig();
             let (analog, digital) = {
-                let s = state.borrow();
+                let Ok(s) = state.try_borrow() else { return; };
                 if let Some(acq) = control::acq_for_tab(&s, tid) {
                     (acq.analog_traces().to_vec(), acq.digital_trace().cloned())
                 } else if let Some(h) = s.handle_for_tab(tid) {

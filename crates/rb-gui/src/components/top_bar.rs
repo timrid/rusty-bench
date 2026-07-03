@@ -5,7 +5,7 @@
 //! way to manage device connections.
 
 use dioxus::prelude::*;
-use rb_core::{DeviceHandle, DeviceOrigin, KnownDevice};
+use rb_core::KnownDevice;
 use rb_device::DeviceId;
 
 use crate::tab_state::TabId;
@@ -114,17 +114,12 @@ fn DeviceDropdown(
 
     let display_text = active_device_label.unwrap_or_else(|| "Select device…".into());
 
-    // Split into connected and not-connected.
-    let connected: Vec<_> = known_devices
-        .iter()
-        .filter(|kd| state.borrow().device_manager.is_connected_result(kd))
-        .cloned()
-        .collect();
-    let not_connected: Vec<_> = known_devices
-        .iter()
-        .filter(|kd| !state.borrow().device_manager.is_connected_result(kd))
-        .cloned()
-        .collect();
+    // Stable-sort: connection state must not reorder the list.
+    let mut known_devices = known_devices;
+    known_devices.sort_by(|a, b| {
+        a.driver.cmp(&b.driver)
+            .then_with(|| a.candidate.address.cmp(&b.candidate.address))
+    });
 
     let has_devices = !known_devices.is_empty();
     let open_signal = open;
@@ -146,7 +141,6 @@ fn DeviceDropdown(
                 onclick: move |_| {
                     let was_closed = !open();
                     open.set(!open());
-                    // Auto-scan when opening the dropdown.
                     if was_closed {
                         crate::app_state::AppState::trigger_scan(&state, data_version, false);
                     }
@@ -157,7 +151,6 @@ fn DeviceDropdown(
 
             // Dropdown menu
             if open() {
-                // Backdrop to close on outside click
                 div {
                     class: "fixed inset-0 z-10",
                     onclick: move |_| open.set(false),
@@ -166,23 +159,16 @@ fn DeviceDropdown(
                 div { class: "absolute top-full left-0 mt-0.5 w-80 bg-zinc-800 border border-zinc-700 rounded shadow-xl z-20 max-h-[70vh] overflow-y-auto",
                     // Error messages
                     if let Some(ref err) = scan_error {
-                        div { class: "px-3 py-1 text-[10px] text-red-400 border-b border-zinc-700",
-                            "{err}"
-                        }
+                        div { class: "px-3 py-1 text-[10px] text-red-400 border-b border-zinc-700", "{err}" }
                     }
                     if let Some(ref err) = connect_error {
-                        div { class: "px-3 py-1 text-[10px] text-red-400 border-b border-zinc-700",
-                            "{err}"
-                        }
+                        div { class: "px-3 py-1 text-[10px] text-red-400 border-b border-zinc-700", "{err}" }
                     }
 
-                    // ── Connected Section ─────────────────────────────────
-                    if !connected.is_empty() {
-                        div { class: "px-3 py-1 text-[10px] font-semibold text-green-400/70 uppercase tracking-wider border-b border-zinc-700",
-                            "Connected"
-                        }
-                        for kd in &connected {
-                            ConnectedDeviceRow {
+                    // ── Device list (single flat list) ──────────────────
+                    if has_devices {
+                        for kd in &known_devices {
+                            DeviceRow {
                                 key: "{kd.driver}-{kd.candidate.address}",
                                 kd: kd.clone(),
                                 is_active: active_device_id.as_ref().is_some_and(|did| {
@@ -190,31 +176,13 @@ fn DeviceDropdown(
                                 }),
                                 is_locked,
                                 open_signal,
-                                data_version,
-                            }
-                        }
-                    }
-
-                    // ── Not Connected Section ────────────────────────────
-                    if !not_connected.is_empty() || !has_devices {
-                        div { class: "px-3 py-1 text-[10px] font-semibold text-zinc-500 uppercase tracking-wider border-b border-zinc-700",
-                            "Not Connected"
-                        }
-                        for kd in &not_connected {
-                            NotConnectedDeviceRow {
-                                key: "{kd.driver}-{kd.candidate.address}",
-                                kd: kd.clone(),
-                                open_signal,
                                 connecting_device,
                                 data_version,
                             }
                         }
-                    }
-
-                    // Empty state
-                    if !has_devices {
+                    } else {
                         div { class: "px-3 py-2 text-xs text-zinc-600 italic",
-                            "No devices found. Click Refresh to scan."
+                            "No devices found."
                         }
                     }
 
@@ -274,14 +242,15 @@ fn DeviceDropdown(
     }
 }
 
-// ── Connected Device Row ──────────────────────────────────────────────────────
+// ── Device Row (unified — single list, auto-connect on click) ─────────────────
 
 #[component]
-fn ConnectedDeviceRow(
+fn DeviceRow(
     kd: KnownDevice,
     is_active: bool,
     is_locked: bool,
     open_signal: Signal<bool>,
+    connecting_device: Signal<Option<String>>,
     data_version: Signal<u64>,
 ) -> Element {
     let state: AppStateRef = use_context();
@@ -292,30 +261,32 @@ fn ConnectedDeviceRow(
     let serial = kd.candidate.info.serial.clone();
     let address = kd.candidate.address.clone();
 
-    // Get additional info (FW version etc.) from the connected device handle.
-    let did_for_info = state
-        .borrow()
-        .device_manager
-        .device_id_for_result(&kd);
-    let additional_info: Vec<(String, String)> = did_for_info
-        .as_ref()
-        .map(|did| {
-            state
-                .borrow()
-                .device_manager
-                .additional_info(did)
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect()
-        })
-        .unwrap_or_default();
+    let is_connected = state.borrow().device_manager.is_connected_result(&kd);
+    let device_key = format!("{}-{}", driver, address);
+    let is_connecting = connecting_device() == Some(device_key.clone());
+
+    // Additional info only for connected devices.
+    let additional_info: Vec<(String, String)> = if is_connected {
+        state.borrow().device_manager.device_id_for_result(&kd)
+            .map(|did| {
+                state.borrow().device_manager.additional_info(&did)
+                    .into_iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
 
     let row_class = if is_active {
         "w-full text-left px-3 py-1.5 text-xs text-zinc-200 bg-zinc-700/30 border-l-2 border-l-blue-500"
-    } else if !is_locked {
-        "w-full text-left px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-700 transition-colors cursor-pointer"
-    } else {
+    } else if is_connected {
+        "w-full text-left px-3 py-1.5 text-xs text-zinc-200 border-l-2 border-l-green-500"
+    } else if is_locked {
         "w-full text-left px-3 py-1.5 text-xs text-zinc-500"
+    } else {
+        "w-full text-left px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-700 transition-colors"
     };
 
     let label = if !model.is_empty() {
@@ -323,8 +294,9 @@ fn ConnectedDeviceRow(
     } else {
         vendor.clone()
     };
-    let sub = if let Some(ref s) = serial {
-        format!("S/N: {} · {}", s, address)
+    let sub = if is_connected {
+        if let Some(ref s) = serial { format!("S/N: {} · {}", s, address) }
+        else { address.clone() }
     } else {
         address.clone()
     };
@@ -335,51 +307,42 @@ fn ConnectedDeviceRow(
                 let state = state.clone();
                 let kd = kd.clone();
                 move |_| {
-                    if !is_locked {
-                        let did = state.borrow().device_manager.device_id_for_result(&kd);
-                        if let Some(did) = did {
-                            let target_did = did.clone();
-                            // If already assigned to this device, no-op.
-                            let already_assigned = state.borrow()
-                                .active_tab_state()
-                                .and_then(|t| t.assigned_device_id())
-                                .is_some_and(|id| id == &target_did);
-                            if already_assigned {
-                                open_signal.set(false);
-                                return;
-                            }
-
-                            let has_samples = state.borrow().active_tab_has_samples();
-
-                            if has_samples {
-                                // Show confirmation dialog; on confirm, the
-                                // Dialog component performs the switch itself.
-                                use crate::components::dialog::{DIALOG, DialogConfig};
-                                *DIALOG.write() = Some(DialogConfig::device_switch(target_did));
-                                open_signal.set(false);
-                            } else {
-                                // No data — switch directly.
-                                let mut s = state.borrow_mut();
-                                let tab_id = s.active_tab;
-                                s.assign_device_to_tab(tab_id, target_did.clone());
-                                // Clear stale traces from the device handle
-                                // so the WaveformView shows fresh channels.
-                                if let Some(h) = s.device_manager.device_handle_mut(&target_did) {
-                                    h.discard_samples();
-                                    let content = crate::logic_analyzer::init_content(h.device());
-                                    if let Some(tab) = s.tabs.get_mut(&tab_id) {
-                                        tab.content = Some(crate::tab_content::TabContent::LogicAnalyzer(content));
-                                    }
-                                }
-                                data_version += 1;
-                            }
-                        }
-                        open_signal.set(false);
+                    if is_locked { return; }
+                    if is_connected {
+                        // Connected device — no-op on row click (disconnect is a separate button).
+                        return;
                     }
+                    // Not connected — auto-connect.
+                    let driver = kd.driver.clone();
+                    let candidate = kd.candidate.clone();
+                    let origin = kd.origin;
+                    let dk = device_key.clone();
+                    connecting_device.set(Some(dk));
+                    let state_for_async = state.clone();
+                    spawn(async move {
+                        let result = crate::app_state::AppState::connect_single(
+                            &state_for_async, &driver, &candidate, origin,
+                        ).await;
+                        if let Err(e) = result {
+                            state_for_async.borrow_mut().device_manager.connect_error = Some(e);
+                        }
+                        connecting_device.set(None);
+                        data_version += 1;
+                        open_signal.set(false);
+                    });
                 }
             },
             div { class: "flex items-center gap-2",
-                span { class: "text-[10px] text-green-400 flex-shrink-0", "\u{26A1}" }
+                // Status icon
+                span { class: "text-[10px] flex-shrink-0",
+                    if is_active {
+                        span { class: "text-blue-400", "\u{25CF}" }
+                    } else if is_connected {
+                        span { class: "text-green-400", "\u{26A1}" }
+                    } else {
+                        span { class: "text-zinc-600", "\u{25CB}" }
+                    }
+                }
                 div { class: "flex-1 min-w-0",
                     div { class: "truncate text-zinc-200", "{label}" }
                     div { class: "text-[9px] text-zinc-500 truncate", "{sub}" }
@@ -391,130 +354,37 @@ fn ConnectedDeviceRow(
                         }
                     }
                 }
-                button {
-                    class: "text-[9px] text-zinc-600 hover:text-red-400 px-1.5 py-0.5 rounded hover:bg-red-900/20 transition-colors flex-shrink-0",
-                    onclick: {
-                        let state = state.clone();
-                        let kd = kd.clone();
-                        move |evt| {
-                            evt.stop_propagation();
-                            let did = state.borrow().device_manager.device_id_for_result(&kd);
-                            if let Some(ref did) = did {
-                                state.borrow_mut().device_manager.disconnect(did);
-                            }
-                            data_version += 1;
-                        }
-                    },
-                    "Disconnect"
-                }
-            }
-        }
-    }
-}
-
-// ── Not Connected Device Row ──────────────────────────────────────────────────
-
-#[component]
-fn NotConnectedDeviceRow(
-    kd: KnownDevice,
-    open_signal: Signal<bool>,
-    connecting_device: Signal<Option<String>>,
-    data_version: Signal<u64>,
-) -> Element {
-    let state: AppStateRef = use_context();
-
-    let driver = kd.driver.clone();
-    let vendor = kd.candidate.info.vendor.clone();
-    let model = kd.candidate.info.model.clone();
-    let address = kd.candidate.address.clone();
-    let origin_label = match kd.origin {
-        DeviceOrigin::Discovered => "Scan",
-        DeviceOrigin::Manual => "Manual",
-        _ => "Unknown",
-    };
-
-    let device_key = format!("{}-{}", driver, address);
-    let is_connecting = connecting_device() == Some(device_key.clone());
-
-    let label = if !model.is_empty() {
-        format!("{} {}", vendor, model)
-    } else if !vendor.is_empty() {
-        vendor.clone()
-    } else {
-        address.clone()
-    };
-
-    let button_class = if is_connecting {
-        "text-[9px] text-yellow-400 px-1.5 py-0.5 rounded border border-yellow-700/50 bg-yellow-900/20 flex-shrink-0 flex items-center gap-1"
-    } else {
-        "text-[9px] text-zinc-500 hover:text-green-400 px-1.5 py-0.5 rounded hover:bg-green-900/20 border border-zinc-700 hover:border-green-700 transition-colors flex-shrink-0"
-    };
-
-    rsx! {
-        div { class: "w-full text-left px-3 py-1.5 text-xs text-zinc-500",
-            div { class: "flex items-center gap-2",
-                span { class: "text-[10px] text-zinc-600 flex-shrink-0", "\u{25CB}" }
-                div { class: "flex-1 min-w-0",
-                    div { class: "truncate text-zinc-400", "{label}" }
-                    div { class: "text-[9px] text-zinc-600 truncate", "{address}" }
-                    div { class: "flex items-center gap-2 text-[9px] text-zinc-600",
-                        span { class: "font-mono", "{driver}" }
-                        span { class: "text-zinc-700", "·" }
-                        span { class: "italic", "{origin_label}" }
-                    }
-                }
+                // Right side: Disconnect button or Connecting spinner
                 if is_connecting {
-                    span { class: "{button_class}",
+                    span {
+                        class: "text-[9px] text-yellow-400 px-1.5 py-0.5 rounded border border-yellow-700/50 bg-yellow-900/20 flex-shrink-0 flex items-center gap-1",
                         span { class: "inline-block w-2.5 h-2.5 border border-yellow-400 border-t-transparent rounded-full animate-spin" }
                         "Connecting…"
                     }
-                } else {
+                } else if is_connected {
                     button {
-                        class: "{button_class}",
+                        class: "text-[9px] text-zinc-600 hover:text-red-400 px-1.5 py-0.5 rounded hover:bg-red-900/20 transition-colors flex-shrink-0",
                         onclick: {
                             let state = state.clone();
                             let kd = kd.clone();
                             move |evt| {
                                 evt.stop_propagation();
-                                let registry = state.borrow().device_manager.registry().clone();
-                                let driver = kd.driver.clone();
-                                let candidate = kd.candidate.clone();
-                                let origin = kd.origin;
-                                let state_for_async = state.clone();
-                                let dk = device_key.clone();
-                                connecting_device.set(Some(dk));
-                                spawn(async move {
-                                    let result = registry.connect(&driver, &candidate).await;
-                                    match result {
-                                        Ok(device) => {
-                                            let label = format!("{}/{}", device.info().vendor, device.info().model);
-                                            let id = device.id().clone();
-                                            let handle = DeviceHandle::new(device);
-                                            let content = crate::logic_analyzer::init_content(handle.device());
-                                            let mut s = state_for_async.borrow_mut();
-                                            s.device_manager.store_connected(id.clone(), handle, label, &driver, origin);
-                                            let tab_id = s.active_tab;
-                                            s.assign_device_to_tab(tab_id, id.clone());
-                                            if let Some(tab) = s.tabs.get_mut(&tab_id) {
-                                                tab.content = Some(crate::tab_content::TabContent::LogicAnalyzer(content));
-                                            }
-                                        }
-                                        Err(e) => {
-                                            state_for_async.borrow_mut().device_manager.connect_error = Some(e.to_string());
-                                        }
-                                    }
-                                    connecting_device.set(None);
-                                    data_version += 1;
-                                });
+                                let did = state.borrow().device_manager.device_id_for_result(&kd);
+                                if let Some(ref did) = did {
+                                    state.borrow_mut().device_manager.disconnect(did);
+                                }
+                                data_version += 1;
                             }
                         },
-                        "Connect"
+                        "Disconnect"
                     }
                 }
             }
         }
     }
 }
+
+// ── Tab Bar ───────────────────────────────────────────────────────────────────
 
 // ── Tab Bar ───────────────────────────────────────────────────────────────────
 
@@ -528,7 +398,7 @@ fn TabBar(
     let state: AppStateRef = use_context();
 
     rsx! {
-        div { class: "flex items-center flex-1 overflow-x-auto px-1 gap-0.5",
+        div { class: "flex items-stretch flex-1 overflow-x-auto gap-0.5 h-full",
             for (id, label, is_active, is_running) in &tabs {
                 {
                     let id = *id;
@@ -538,9 +408,9 @@ fn TabBar(
                     rsx! {
                         div {
                             class: if is_active {
-                                "flex items-center gap-1 px-3 py-1 text-xs bg-zinc-800 text-zinc-200 rounded-t cursor-pointer border-t border-x border-zinc-700 h-full"
+                                "flex items-center gap-1 px-3 text-xs bg-zinc-800 text-zinc-200 cursor-pointer border-t border-x border-zinc-700 h-full"
                             } else {
-                                "flex items-center gap-1 px-3 py-1 text-xs text-zinc-500 hover:text-zinc-300 cursor-pointer rounded-t h-full"
+                                "flex items-center gap-1 px-3 text-xs text-zinc-500 hover:text-zinc-300 cursor-pointer h-full"
                             },
                             onclick: {
                                 let state = state.clone();
@@ -605,7 +475,7 @@ fn TabBar(
                 "\u{002B}"
             }
 
-            div { class: "flex-1 border-b border-zinc-800" }
+            div { class: "flex-1" }
         }
     }
 }

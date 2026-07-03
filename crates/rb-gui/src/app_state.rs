@@ -4,15 +4,32 @@
 //! executor for background acquisition futures. It is framework-agnostic and
 //! testable without a display.
 
+use std::cell::{RefCell, RefMut};
 use std::collections::HashMap;
+use std::rc::Rc;
 
-use rb_core::DeviceHandle;
+use rb_core::{DeviceHandle, DeviceOrigin};
 use rb_device::DeviceId;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::watch;
 
 use crate::device_manager::DeviceManager;
 use crate::tab_state::{TabId, TabSource, TabState};
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Acquires a mutable borrow on `AppState`, yielding briefly if the `RefCell`
+/// is currently borrowed by the Dioxus render cycle.
+async fn borrow_app_mut(app_ref: &Rc<RefCell<AppState>>) -> RefMut<'_, AppState> {
+    loop {
+        match app_ref.try_borrow_mut() {
+            Ok(s) => return s,
+            Err(_) => {
+                futures_timer::Delay::new(std::time::Duration::from_millis(1)).await;
+            }
+        }
+    }
+}
 
 // ── App state ─────────────────────────────────────────────────────────────────
 
@@ -130,6 +147,54 @@ impl AppState {
     /// Returns a mutable reference to the active tab.
     pub fn active_tab_state_mut(&mut self) -> Option<&mut TabState> {
         self.tabs.get_mut(&self.active_tab)
+    }
+
+    // ── Device connection ─────────────────────────────────────────────────────
+
+    /// Connects a device, first disconnecting any other connected device.
+    /// Returns the new device's ID, or an error string.
+    ///
+    /// Takes `&AppStateRef` (not `&mut self`) so the `RefCell` borrow is
+    /// released before the async `connect()` call — the UI can keep rendering.
+    /// Uses `try_borrow_mut` with a brief yield to avoid colliding with the
+    /// Dioxus render cycle.
+    pub async fn connect_single(
+        app_ref: &std::rc::Rc<std::cell::RefCell<AppState>>,
+        driver: &str,
+        candidate: &rb_transport::DeviceCandidate,
+        origin: DeviceOrigin,
+    ) -> Result<DeviceId, String> {
+        // Clone registry and disconnect any existing device.
+        let registry = {
+            let mut s = borrow_app_mut(app_ref).await;
+            let r = s.device_manager.registry_clone();
+            let connected: Vec<DeviceId> = s.device_manager.connected_device_ids();
+            for id in &connected {
+                s.device_manager.disconnect(id);
+            }
+            r
+        };
+
+        // Async connect — no borrow on AppState.
+        let device = registry
+            .connect(driver, candidate)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // Re-borrow for store + tab assignment.
+        let label = format!("{}/{}", device.info().vendor, device.info().model);
+        let id = device.id().clone();
+        let content = crate::logic_analyzer::init_content(device.as_ref());
+        let handle = DeviceHandle::new(device);
+        let mut s = borrow_app_mut(app_ref).await;
+        s.device_manager
+            .store_connected(id.clone(), handle, label, driver, origin);
+        let tab_id = s.active_tab;
+        s.assign_device_to_tab(tab_id, id.clone());
+        if let Some(tab) = s.tabs.get_mut(&tab_id) {
+            tab.content = Some(crate::tab_content::TabContent::LogicAnalyzer(content));
+        }
+        Ok(id)
     }
 
     // ── Device connection (delegates to DeviceManager) ────────────────────────
