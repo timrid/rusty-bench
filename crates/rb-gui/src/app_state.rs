@@ -8,6 +8,7 @@ use std::collections::HashMap;
 
 use rb_core::DeviceHandle;
 use rb_device::DeviceId;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::watch;
 
 use crate::device_manager::DeviceManager;
@@ -25,7 +26,8 @@ pub struct AppState {
     pub active_tab: TabId,
     next_tab_id: u64,
 
-    /// Controls whether background device scanning is active.
+    /// Controls whether background device scanning is active (desktop only).
+    #[cfg(not(target_arch = "wasm32"))]
     auto_scan_tx: watch::Sender<bool>,
 }
 
@@ -50,12 +52,24 @@ impl AppState {
         let mut tabs = HashMap::new();
         tabs.insert(first_id, tab);
 
-        Self {
-            device_manager,
-            tabs,
-            active_tab: first_id,
-            next_tab_id: 2,
-            auto_scan_tx: watch::channel(false).0,
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Self {
+                device_manager,
+                tabs,
+                active_tab: first_id,
+                next_tab_id: 2,
+                auto_scan_tx: watch::channel(false).0,
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Self {
+                device_manager,
+                tabs,
+                active_tab: first_id,
+                next_tab_id: 2,
+            }
         }
     }
 
@@ -172,13 +186,18 @@ impl AppState {
         }
     }
 
-    /// Enables or disables background device scanning.
+    /// Enables or disables background device scanning (desktop only).
     /// Call from any UI component — cheap no-op when the value hasn't changed.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn set_auto_scan(&self, active: bool) {
         let _ = self.auto_scan_tx.send_replace(active);
     }
+    /// No-op on WASM — auto-scan is not supported.
+    #[cfg(target_arch = "wasm32")]
+    pub fn set_auto_scan(&self, _active: bool) {}
 
-    /// Returns a receiver that tracks whether auto-scan is active.
+    /// Returns a receiver that tracks whether auto-scan is active (desktop only).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn auto_scan_receiver(&self) -> watch::Receiver<bool> {
         self.auto_scan_tx.subscribe()
     }

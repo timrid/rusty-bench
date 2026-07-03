@@ -248,21 +248,21 @@ fn DeviceDropdown(
                                             }
                                         },
                                         span { class: "text-[10px]", "\u{1F50C}" }
-                                        "Scan USB devices"
+                                        "Connect USB devices"
                                     }
                                     button {
                                         class: "w-full flex items-center gap-1.5 px-3 py-1.5 text-xs text-zinc-600 transition-colors",
                                         title: "Coming soon — WebSerial support",
                                         disabled: true,
                                         span { class: "text-[10px]", "\u{1F4E1}" }
-                                        "Scan serial devices"
+                                        "Connect serial devices"
                                     }
                                     button {
                                         class: "w-full flex items-center gap-1.5 px-3 py-1.5 text-xs text-zinc-600 transition-colors",
                                         title: "Coming soon — WebBluetooth support",
                                         disabled: true,
                                         span { class: "text-[10px]", "\u{1F4F6}" }
-                                        "Scan Bluetooth devices"
+                                        "Connect Bluetooth devices"
                                     }
                                 }
                             }
