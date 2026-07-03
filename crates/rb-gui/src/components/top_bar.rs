@@ -45,8 +45,9 @@ pub fn TopBar(data_version: Signal<u64>) -> Element {
     // Current device label for the active tab (shown in dropdown).
     let active_device_label = s
         .active_tab_state()
-        .map(|t| t.label.clone())
-        .filter(|l| l != "Untitled");
+        .and_then(|t| t.assigned_device_id())
+        .and_then(|did| s.device_manager.device_label(did))
+        .map(|s| s.to_string());
 
     // DeviceId of the active tab (for highlighting in dropdown).
     let active_device_id = s
@@ -59,7 +60,7 @@ pub fn TopBar(data_version: Signal<u64>) -> Element {
     drop(s);
 
     rsx! {
-        div { class: "h-8 bg-zinc-900 border-b border-zinc-800 flex items-center flex-shrink-0",
+        div { class: "h-8 bg-zinc-900 border-b border-zinc-800 flex items-stretch flex-shrink-0",
             // ── Device Dropdown ──────────────────────────────────────────
             DeviceDropdown {
                 known_devices,
@@ -70,8 +71,6 @@ pub fn TopBar(data_version: Signal<u64>) -> Element {
                 is_locked,
                 data_version,
             }
-
-            div { class: "w-px bg-zinc-800 h-full" }
 
             // ── Tab Bar ──────────────────────────────────────────────────
             TabBar {
@@ -137,7 +136,7 @@ fn DeviceDropdown(
         div { class: "relative",
             // Dropdown trigger — always clickable to open the menu
             button {
-                class: "flex items-center gap-1.5 h-full px-3 text-xs text-zinc-300 hover:bg-zinc-800 transition-colors w-[180px] flex-shrink-0",
+                class: "flex items-center gap-1.5 h-full px-3 text-xs text-zinc-300 bg-zinc-800 hover:bg-zinc-700 transition-colors w-[180px] flex-shrink-0 border-r border-zinc-700",
                 onclick: move |_| {
                     let was_closed = !open();
                     open.set(!open());
@@ -145,8 +144,8 @@ fn DeviceDropdown(
                         crate::app_state::AppState::trigger_scan(&state, data_version, false);
                     }
                 },
-                span { class: "truncate", "{display_text}" }
-                span { class: "text-zinc-500 text-[9px]", "\u{25BC}" }
+                span { class: "truncate flex-1 text-left", "{display_text}" }
+                span { class: "text-zinc-500 text-[9px] flex-shrink-0", "\u{25BC}" }
             }
 
             // Dropdown menu
@@ -386,8 +385,6 @@ fn DeviceRow(
 
 // ── Tab Bar ───────────────────────────────────────────────────────────────────
 
-// ── Tab Bar ───────────────────────────────────────────────────────────────────
-
 #[component]
 fn TabBar(
     tabs: Vec<(TabId, String, bool, bool)>,
@@ -398,7 +395,7 @@ fn TabBar(
     let state: AppStateRef = use_context();
 
     rsx! {
-        div { class: "flex items-stretch flex-1 overflow-x-auto gap-0.5 h-full",
+        div { class: "flex items-stretch flex-1 overflow-x-auto h-full",
             for (id, label, is_active, is_running) in &tabs {
                 {
                     let id = *id;
@@ -408,9 +405,9 @@ fn TabBar(
                     rsx! {
                         div {
                             class: if is_active {
-                                "flex items-center gap-1 px-3 text-xs bg-zinc-800 text-zinc-200 cursor-pointer border-t border-x border-zinc-700 h-full"
+                                "flex items-center gap-1 px-3 text-xs text-zinc-200 cursor-pointer border-b-2 border-b-white/60 h-full border-r border-r-transparent"
                             } else {
-                                "flex items-center gap-1 px-3 text-xs text-zinc-500 hover:text-zinc-300 cursor-pointer h-full"
+                                "flex items-center gap-1 px-3 text-xs text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/40 cursor-pointer h-full border-r border-zinc-700/50 border-b-2 border-b-transparent"
                             },
                             onclick: {
                                 let state = state.clone();
@@ -451,9 +448,9 @@ fn TabBar(
             // "+" New Tab button (disabled when device is locked)
             button {
                 class: if is_locked {
-                    "px-2 py-1 text-xs text-zinc-700 rounded flex-shrink-0 cursor-not-allowed"
+                    "px-2 text-xl font-bold text-zinc-700 flex-shrink-0 flex items-center justify-center cursor-not-allowed border-x border-zinc-700/50"
                 } else {
-                    "px-2 py-1 text-xs text-zinc-600 hover:text-zinc-300 hover:bg-zinc-800/50 rounded transition-colors flex-shrink-0"
+                    "px-2 text-xl font-bold text-zinc-600 hover:text-zinc-300 hover:bg-zinc-800/50 transition-colors flex-shrink-0 flex items-center justify-center border-x border-zinc-700/50"
                 },
                 disabled: is_locked,
                 title: if is_locked { "Stop acquisition to create a new tab" } else { "New tab" },
@@ -475,7 +472,7 @@ fn TabBar(
                 "\u{002B}"
             }
 
-            div { class: "flex-1" }
+            div { class: "flex-1 bg-zinc-800" }
         }
     }
 }

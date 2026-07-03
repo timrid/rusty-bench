@@ -42,6 +42,7 @@ pub struct AppState {
     /// The currently active (visible) tab.
     pub active_tab: TabId,
     next_tab_id: u64,
+    next_session_num: u64,
 
     /// Controls whether background device scanning is active (desktop only).
     #[cfg(not(target_arch = "wasm32"))]
@@ -61,9 +62,6 @@ impl AppState {
         if let Some(did) = device_ids.into_iter().next() {
             tab.source = TabSource::Device(did.clone());
             tab.content = Some(crate::logic_analyzer::default_content());
-            if let Some(label) = device_manager.device_label(&did) {
-                tab.label = label.to_string();
-            }
         }
 
         let mut tabs = HashMap::new();
@@ -77,6 +75,7 @@ impl AppState {
                 active_tab: first_id,
                 next_tab_id: 2,
                 auto_scan_tx: watch::channel(false).0,
+                next_session_num: 2,
             }
         }
         #[cfg(target_arch = "wasm32")]
@@ -86,6 +85,7 @@ impl AppState {
                 tabs,
                 active_tab: first_id,
                 next_tab_id: 2,
+                next_session_num: 2,
             }
         }
     }
@@ -97,9 +97,12 @@ impl AppState {
     // ── Tab management ────────────────────────────────────────────────────────
 
     /// Creates a new empty tab and makes it the active tab.
-    pub fn create_tab(&mut self, label: impl Into<String>) -> TabId {
+    /// The `_label` parameter is ignored — tabs are named "Session N" automatically.
+    pub fn create_tab(&mut self, _label: impl Into<String>) -> TabId {
         let id = TabId(self.next_tab_id);
         self.next_tab_id += 1;
+        let label = format!("Session {}", self.next_session_num);
+        self.next_session_num += 1;
         let tab = TabState::new(id, label);
         self.tabs.insert(id, tab);
         self.active_tab = id;
@@ -133,9 +136,6 @@ impl AppState {
     pub fn assign_device_to_tab(&mut self, tab_id: TabId, device_id: DeviceId) {
         if let Some(tab) = self.tabs.get_mut(&tab_id) {
             tab.source = TabSource::Device(device_id.clone());
-            if let Some(label) = self.device_manager.device_label(&device_id) {
-                tab.label = label.to_string();
-            }
         }
     }
 
