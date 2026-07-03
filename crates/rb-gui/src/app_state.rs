@@ -8,9 +8,9 @@ use std::collections::HashMap;
 
 use rb_core::DeviceHandle;
 use rb_device::DeviceId;
+use tokio::sync::watch;
 
 use crate::device_manager::DeviceManager;
-use crate::tab_content::TabContent;
 use crate::tab_state::{TabId, TabSource, TabState};
 
 // ── App state ─────────────────────────────────────────────────────────────────
@@ -24,6 +24,9 @@ pub struct AppState {
     /// The currently active (visible) tab.
     pub active_tab: TabId,
     next_tab_id: u64,
+
+    /// Controls whether background device scanning is active.
+    auto_scan_tx: watch::Sender<bool>,
 }
 
 impl AppState {
@@ -52,6 +55,7 @@ impl AppState {
             tabs,
             active_tab: first_id,
             next_tab_id: 2,
+            auto_scan_tx: watch::channel(false).0,
         }
     }
 
@@ -150,6 +154,33 @@ impl AppState {
             }
             data_version += 1;
         });
+    }
+
+    // ── Device polling ───────────────────────────────────────────────────────
+
+    /// Runs one device scan cycle and applies the results.
+    pub async fn scan_devices(&mut self) {
+        let registry = self.device_manager.registry_clone();
+        match registry.scan_all().await {
+            Ok(results) => {
+                self.device_manager.apply_scan_results(results);
+                self.device_manager.scan_error = None;
+            }
+            Err(e) => {
+                self.device_manager.scan_error = Some(e.to_string());
+            }
+        }
+    }
+
+    /// Enables or disables background device scanning.
+    /// Call from any UI component — cheap no-op when the value hasn't changed.
+    pub fn set_auto_scan(&self, active: bool) {
+        let _ = self.auto_scan_tx.send_replace(active);
+    }
+
+    /// Returns a receiver that tracks whether auto-scan is active.
+    pub fn auto_scan_receiver(&self) -> watch::Receiver<bool> {
+        self.auto_scan_tx.subscribe()
     }
 
     // ── Queries ───────────────────────────────────────────────────────────────

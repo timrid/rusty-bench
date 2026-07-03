@@ -132,6 +132,12 @@ fn DeviceDropdown(
     // Track which device is currently being connected (key = "driver-address").
     let connecting_device = use_signal(|| Option::<String>::None);
 
+    // ── Desktop: auto-refresh while dropdown is open ────────────────────
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        state.borrow().set_auto_scan(open());
+    }
+
     rsx! {
         div { class: "relative",
             // Dropdown trigger — always clickable to open the menu
@@ -212,25 +218,12 @@ fn DeviceDropdown(
                         }
                     }
 
-                    // ── Footer Actions (platform-specific) ─────────────────
+                    // ── Footer Actions ────────────────────────────────
                     {
                         #[cfg(not(target_arch = "wasm32"))]
                         {{
                             rsx! {
                                 div { class: "border-t border-zinc-700 flex",
-                                    button {
-                                        class: "flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700 transition-colors",
-                                        onclick: {
-                                            let state = state.clone();
-                                            move |_| {
-                                                crate::app_state::AppState::trigger_scan(&state, data_version, false);
-                                                data_version += 1;
-                                            }
-                                        },
-                                        span { class: "text-[10px]", "\u{27F3}" }
-                                        "Refresh"
-                                    }
-                                    div { class: "w-px bg-zinc-700" }
                                     button {
                                         class: "flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs text-zinc-500 hover:text-zinc-300 hover:bg-zinc-700 transition-colors cursor-not-allowed",
                                         title: "Coming soon — manually add IP/network devices",

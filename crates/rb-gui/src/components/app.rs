@@ -20,8 +20,31 @@ pub type AppStateRef = Rc<RefCell<AppState>>;
 pub fn App() -> Element {
     let _state: AppStateRef = use_context_provider(|| Rc::new(RefCell::new(AppState::new())));
     // data_version is bumped by async drain tasks in control.rs, not by polling
-    let data_version = use_signal(|| 0u64);
+    let mut data_version = use_signal(|| 0u64);
     let _version = data_version();
+
+    // ── Desktop: background device polling ───────────────────────────────
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let state = _state.clone();
+        let mut spawned = use_signal(|| false);
+        if !spawned() {
+            spawned.set(true);
+            let mut rx = state.borrow().auto_scan_receiver();
+            spawn(async move {
+                loop {
+                    if !*rx.borrow() {
+                        let _ = rx.changed().await;
+                    }
+                    while *rx.borrow() {
+                        futures_timer::Delay::new(std::time::Duration::from_millis(200)).await;
+                        state.borrow_mut().scan_devices().await;
+                        data_version += 1;
+                    }
+                }
+            });
+        }
+    }
 
     rsx! {
         document::Stylesheet { href: TAILWIND_CSS }

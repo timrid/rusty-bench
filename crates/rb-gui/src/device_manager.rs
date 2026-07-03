@@ -66,6 +66,13 @@ impl DeviceManager {
     /// Replaces scan-discovered (not connected, not manual) entries with new
     /// scan results. Connected and manual devices are left untouched.
     pub fn apply_scan_results(&mut self, results: Vec<KnownDevice>) {
+        // Snapshot the current set of device keys before processing results.
+        let prev_keys: Vec<(String, DeviceCandidate)> = self
+            .devices
+            .iter()
+            .map(|s| (s.known.driver.clone(), s.known.candidate.clone()))
+            .collect();
+
         // Retain: connected devices AND manual devices.
         self.devices.retain(|slot| {
             slot.state.is_some() || slot.known.origin == DeviceOrigin::Manual
@@ -83,6 +90,39 @@ impl DeviceManager {
                     state: None,
                 });
             }
+        }
+
+        // Compute difference vs. previous state and log only real changes.
+        let new_keys: Vec<(String, DeviceCandidate)> = self
+            .devices
+            .iter()
+            .map(|s| (s.known.driver.clone(), s.known.candidate.clone()))
+            .collect();
+
+        let added: Vec<_> = new_keys
+            .iter()
+            .filter(|k| !prev_keys.contains(k))
+            .collect();
+        let removed: Vec<_> = prev_keys
+            .iter()
+            .filter(|k| !new_keys.contains(k))
+            .collect();
+
+        for (driver, candidate) in &added {
+            log::info!(
+                "new device found: {} {} (driver: {})",
+                candidate.info.vendor,
+                candidate.info.model,
+                driver,
+            );
+        }
+        for (driver, candidate) in &removed {
+            log::info!(
+                "device removed: {} {} (driver: {})",
+                candidate.info.vendor,
+                candidate.info.model,
+                driver,
+            );
         }
     }
 
