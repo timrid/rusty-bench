@@ -115,8 +115,6 @@ pub fn WaveformCanvas(
     let is_running = matches!(acq_state, AcquisitionState::Running);
 
     // ── Dynamic canvas width (replaces hardcoded 800.0) ────────────────
-    // Default 764 = 800 – LABEL_W (36). Updated async on mount via
-    // get_client_rect (works cross-platform: wasm32 + desktop webview).
     let canvas_width_px = use_signal(|| 764.0f64);
 
     // Signal-ized sample_count so the drawing effect always sees the
@@ -244,14 +242,10 @@ pub fn WaveformCanvas(
             // ── Rows container ────────────────────────────────────────────
             div {
                 id: "rows-{short_id}",
-                class: "flex-1 overflow-y-auto relative",
+                class: "flex-1 overflow-hidden overflow-y-auto relative",
                 onmounted: {
-                    let canvas_width_px = canvas_width_px;
+                    let mut cw = canvas_width_px;
                     move |data| {
-                        let mut cw = canvas_width_px;
-                        // get_client_rect is async; spawn a task to read the
-                        // actual width once the DOM has settled. Works on both
-                        // wasm32 and desktop webview.
                         spawn(async move {
                             if let Ok(rect) = data.get_client_rect().await {
                                 let w = rect.width();
@@ -260,6 +254,15 @@ pub fn WaveformCanvas(
                                 }
                             }
                         });
+                    }
+                },
+                onresize: move |evt: Event<dioxus::html::ResizeData>| {
+                    if let Ok(size) = evt.data().get_content_box_size() {
+                        let w = size.width;
+                        if w > 0.0 {
+                            let mut cw = canvas_width_px;
+                            cw.set((w - LABEL_W).max(100.0));
+                        }
                     }
                 },
                 onwheel: move |evt| {
@@ -413,7 +416,6 @@ pub fn WaveformCanvas(
                                     id: "{signal_id}",
                                     class: "flex-1 pointer-events-none",
                                     style: "height: {sig_h}px; margin-top: {MEASUREMENT_ZONE_H}px; margin-bottom: {MEASUREMENT_ZONE_H}px",
-                                    width: "100%",
                                     height: "{sig_h}",
                                 }
                                 // Divider handle (events handled by parent onmousedown/onmousemove)
