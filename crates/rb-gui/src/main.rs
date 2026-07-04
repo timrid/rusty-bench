@@ -7,6 +7,9 @@ fn main() {
     )
     .init();
 
+    // Set storage directory for persistent settings (desktop only).
+    dioxus_sdk_storage::set_dir!();
+
     use dioxus::desktop::{Config, WindowBuilder};
     dioxus::LaunchBuilder::new()
         .with_cfg(

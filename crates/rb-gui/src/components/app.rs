@@ -8,9 +8,11 @@ use std::rc::Rc;
 use dioxus::prelude::*;
 
 use crate::app_state::{AppState, Theme};
+use crate::settings::use_settings;
 
 use super::device_view::DeviceView;
 use super::dialog::Dialog;
+use super::settings_dialog::SettingsDialog;
 use super::top_bar::TopBar;
 
 static TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
@@ -22,8 +24,20 @@ pub fn App() -> Element {
     let data_version = use_signal(|| 0u64);
     let _version = data_version();
 
-    // ── Theme ───────────────────────────────────────────────────────────
-    let theme: Signal<Theme> = use_context_provider(|| Signal::new(Theme::System));
+    // ── Persistent settings (shared via context) ────────────────────────
+    let settings = use_settings();
+    let _settings_ctx = use_context_provider(|| settings);
+
+    // ── Theme (synced from persistent settings) ─────────────────────────
+    let mut theme: Signal<Theme> = use_context_provider(|| {
+        let initial = settings().theme;
+        Signal::new(initial)
+    });
+    // Sync theme signal ← settings on every render
+    let settings_theme = settings().theme;
+    if theme() != settings_theme {
+        theme.set(settings_theme);
+    }
     let _theme = theme();
 
     // ── Desktop: event-driven device discovery via hotplug ──────────────
@@ -82,6 +96,7 @@ pub fn App() -> Element {
 
             // Modal dialogs (rendered on top of everything)
             Dialog { data_version }
+            SettingsDialog {}
         }
     }
 }

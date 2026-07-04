@@ -16,13 +16,13 @@ pub mod components;
 pub mod device_manager;
 pub mod firmware;
 pub mod logic_analyzer;
+pub mod settings;
 pub mod tab_content;
 pub mod tab_state;
 pub(crate) mod app_state;
 pub(crate) mod title_bar;
 
 pub use app_state::AppState;
-pub(crate) use app_state::Theme;
 pub use logic_analyzer::acquisition::{AcquisitionConfig, DeviceAcquisition};
 pub use logic_analyzer::view::WaveformView;
 pub use tab_content::{LogicAnalyzerContent, TabContent};

@@ -18,7 +18,7 @@ use crate::tab_state::{TabId, TabSource, TabState};
 // ── Theme ─────────────────────────────────────────────────────────────────────
 
 /// User-selectable color theme.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Theme {
     /// Follow the operating system preference.
     System,
@@ -55,7 +55,7 @@ impl Theme {
         match self {
             Self::System => "\u{25D0}", // ◐ half circle = auto
             Self::Light => "\u{25CB}",  // ○ empty circle = light
-            Self::Dark => "\u{25CF}",   // ● filled circle = dark
+            Self::Dark => "\u{2B24}",   // ⬤ large filled circle = dark
         }
     }
 }

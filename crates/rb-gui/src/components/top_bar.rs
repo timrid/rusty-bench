@@ -10,6 +10,7 @@ use rb_device::DeviceId;
 
 use crate::tab_state::TabId;
 use crate::app_state::Theme;
+use crate::settings::AppSettings;
 
 use super::app::AppStateRef;
 
@@ -61,7 +62,8 @@ pub fn TopBar(data_version: Signal<u64>) -> Element {
     drop(s);
 
     // ── Theme toggle ────────────────────────────────────────────────────
-    let mut theme: Signal<Theme> = use_context();
+    let theme: Signal<Theme> = use_context();
+    let mut settings: Signal<AppSettings> = use_context();
 
     rsx! {
         div { class: "h-8 bg-gray-100 border-b border-gray-200 dark:bg-zinc-900 dark:border-zinc-800 flex items-stretch flex-shrink-0",
@@ -90,7 +92,10 @@ pub fn TopBar(data_version: Signal<u64>) -> Element {
             button {
                 class: "text-gray-500 hover:text-gray-800 hover:bg-gray-300 dark:text-zinc-500 dark:hover:text-zinc-100 dark:hover:bg-zinc-700 px-3 h-full flex items-center transition-colors",
                 title: theme().label(),
-                onclick: move |_| theme.set(theme().next()),
+                onclick: move |_| {
+                    let next = theme().next();
+                    settings.write().theme = next;
+                },
                 "{theme().icon()}"
             }
 
@@ -100,6 +105,7 @@ pub fn TopBar(data_version: Signal<u64>) -> Element {
             button {
                 class: "text-gray-500 hover:text-gray-800 hover:bg-gray-300 dark:text-zinc-500 dark:hover:text-zinc-100 dark:hover:bg-zinc-700 px-3 h-full flex items-center transition-colors",
                 title: "Settings",
+                onclick: move |_| super::settings_dialog::open_settings(),
                 "\u{2699}"
             }
         }

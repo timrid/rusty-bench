@@ -21,6 +21,8 @@ rb-transport.workspace = true
 rb-canvas.workspace = true
 async-trait.workspace = true
 dioxus = { workspace = true, features = ["html"] }
+dioxus-sdk-storage.workspace = true
+serde.workspace = true
 futures.workspace = true
 log.workspace = true
 nusb = { workspace = true, optional = true }

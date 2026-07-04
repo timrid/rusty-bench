@@ -53,6 +53,7 @@ nusb = { path = "crates/nusb", features = ["tokio"] }
 dioxus = { version = "0.7", features = ["html"] }
 dioxus-desktop = "0.7"
 dioxus-web = "0.7"
+dioxus-sdk-storage = "0.7"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = [
