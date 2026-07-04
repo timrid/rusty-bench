@@ -30,17 +30,17 @@ pub fn ChannelConfig(
     let has_digital = !digital_channels.is_empty();
 
     rsx! {
-        div { class: "w-36 flex-shrink-0 border-r border-zinc-800 bg-zinc-900/50 flex flex-col h-full overflow-y-auto select-none",
+        div { class: "w-36 flex-shrink-0 border-r border-gray-200 bg-gray-50/50 dark:border-zinc-800 dark:bg-zinc-900/50 flex flex-col h-full overflow-y-auto select-none",
 
             // Sample rate
             div { class: "px-2 pt-2 pb-0.5",
-                span { class: "text-[9px] font-bold text-zinc-500 uppercase tracking-wider", "Rate" }
+                span { class: "text-[9px] font-bold text-gray-400 dark:text-zinc-500 uppercase tracking-wider", "Rate" }
             }
             div { class: "px-2 pb-1.5",
                 if supported.is_empty() {
                     input {
                         r#type: "text",
-                        class: "w-full px-1.5 py-0.5 bg-zinc-800 border border-zinc-700 rounded text-xs text-zinc-300 font-mono",
+                        class: "w-full px-1.5 py-0.5 bg-gray-100 border border-gray-300 dark:bg-zinc-800 dark:border-zinc-700 rounded text-xs text-gray-700 dark:text-zinc-300 font-mono",
                         value: "{fmt_rate(sample_rate_hz)}",
                         oninput: {
                             let mut config = config;
@@ -55,7 +55,7 @@ pub fn ChannelConfig(
                     }
                 } else {
                     select {
-                        class: "w-full px-1 py-0.5 bg-zinc-800 border border-zinc-700 rounded text-xs text-zinc-300 font-mono",
+                        class: "w-full px-1 py-0.5 bg-gray-100 border border-gray-300 dark:bg-zinc-800 dark:border-zinc-700 rounded text-xs text-gray-700 dark:text-zinc-300 font-mono",
                         onchange: {
                             let mut config = config;
                             let on_sample_rate_change = on_sample_rate_change;
@@ -77,12 +77,12 @@ pub fn ChannelConfig(
                 }
             }
 
-            div { class: "border-t border-zinc-800 mx-2" }
+            div { class: "border-t border-gray-200 dark:border-zinc-800 mx-2" }
 
             // Analog channel section
             if has_analog {
                 div { class: "px-2 pt-2 pb-0.5",
-                    span { class: "text-[9px] font-bold text-zinc-500 uppercase tracking-wider", "Analog" }
+                    span { class: "text-[9px] font-bold text-gray-400 dark:text-zinc-500 uppercase tracking-wider", "Analog" }
                 }
                 for (i, name) in analog_channels.iter().map(|ch| &ch.name).enumerate() {
                     {
@@ -93,9 +93,9 @@ pub fn ChannelConfig(
                         rsx! {
                             div {
                                 class: if is_enabled {
-                                    "flex items-center gap-1.5 px-2 py-1 text-xs text-zinc-300 cursor-pointer hover:bg-zinc-800/30 rounded mx-1"
+                                    "flex items-center gap-1.5 px-2 py-1 text-xs text-gray-700 hover:bg-gray-100 dark:text-zinc-300 dark:hover:bg-zinc-800/30 cursor-pointer rounded mx-1"
                                 } else {
-                                    "flex items-center gap-1.5 px-2 py-1 text-xs text-zinc-600 cursor-pointer hover:bg-zinc-800/30 rounded mx-1 line-through"
+                                    "flex items-center gap-1.5 px-2 py-1 text-xs text-gray-400 hover:bg-gray-100 dark:text-zinc-600 dark:hover:bg-zinc-800/30 cursor-pointer rounded mx-1 line-through"
                                 },
                                 oncontextmenu: move |evt| {
                                     evt.prevent_default();
@@ -126,10 +126,10 @@ pub fn ChannelConfig(
             // Digital channel section
             if has_digital {
                 if has_analog {
-                    div { class: "border-t border-zinc-800 mx-2 my-1" }
+                    div { class: "border-t border-gray-200 dark:border-zinc-800 mx-2 my-1" }
                 }
                 div { class: "px-2 pt-1 pb-0.5",
-                    span { class: "text-[9px] font-bold text-zinc-500 uppercase tracking-wider", "Digital" }
+                    span { class: "text-[9px] font-bold text-gray-400 dark:text-zinc-500 uppercase tracking-wider", "Digital" }
                 }
                 for (i, name) in digital_channels.iter().map(|ch| &ch.name).enumerate() {
                     {
@@ -140,9 +140,9 @@ pub fn ChannelConfig(
                         rsx! {
                             div {
                                 class: if is_enabled {
-                                    "flex items-center gap-1.5 px-2 py-1 text-xs text-zinc-300 cursor-pointer hover:bg-zinc-800/30 rounded mx-1"
+                                    "flex items-center gap-1.5 px-2 py-1 text-xs text-gray-700 hover:bg-gray-100 dark:text-zinc-300 dark:hover:bg-zinc-800/30 cursor-pointer rounded mx-1"
                                 } else {
-                                    "flex items-center gap-1.5 px-2 py-1 text-xs text-zinc-600 cursor-pointer hover:bg-zinc-800/30 rounded mx-1 line-through"
+                                    "flex items-center gap-1.5 px-2 py-1 text-xs text-gray-400 hover:bg-gray-100 dark:text-zinc-600 dark:hover:bg-zinc-800/30 cursor-pointer rounded mx-1 line-through"
                                 },
                                 oncontextmenu: move |evt| {
                                     evt.prevent_default();
@@ -172,8 +172,8 @@ pub fn ChannelConfig(
             div { class: "flex-1" }
 
             if sc > 0 {
-                div { class: "border-t border-zinc-800 px-2 py-1.5",
-                    p { class: "text-[10px] text-zinc-600", "{sc} samples" }
+                div { class: "border-t border-gray-200 dark:border-zinc-800 px-2 py-1.5",
+                    p { class: "text-[10px] text-gray-400 dark:text-zinc-600", "{sc} samples" }
                 }
             }
         }

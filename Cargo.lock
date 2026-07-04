@@ -4660,6 +4660,7 @@ dependencies = [
  "getrandom 0.3.4",
  "log",
  "nusb",
+ "raw-window-handle 0.6.2",
  "rb-canvas",
  "rb-core",
  "rb-decode",

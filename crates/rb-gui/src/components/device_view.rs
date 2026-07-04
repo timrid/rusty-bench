@@ -36,8 +36,8 @@ pub fn DeviceView(data_version: Signal<u64>) -> Element {
             div { class: "flex-1 flex flex-col items-center justify-center",
                 div { class: "text-center space-y-3",
                     div { class: "text-5xl mb-2", "\u{1F50C}" }
-                    h2 { class: "text-lg font-bold text-zinc-400", "No Device" }
-                    p { class: "text-xs text-zinc-600 max-w-sm",
+                    h2 { class: "text-lg font-bold text-gray-500 dark:text-zinc-400", "No Device" }
+                    p { class: "text-xs text-gray-400 dark:text-zinc-600 max-w-sm",
                         "Connect a device from the dropdown above to get started."
                     }
                     if let Some(ref err) = connect_error {

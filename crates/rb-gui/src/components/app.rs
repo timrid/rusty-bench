@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use dioxus::prelude::*;
 
-use crate::app_state::AppState;
+use crate::app_state::{AppState, Theme};
 
 use super::device_view::DeviceView;
 use super::dialog::Dialog;
@@ -19,8 +19,12 @@ pub type AppStateRef = Rc<RefCell<AppState>>;
 #[component]
 pub fn App() -> Element {
     let _state: AppStateRef = use_context_provider(|| Rc::new(RefCell::new(AppState::new())));
-    let mut data_version = use_signal(|| 0u64);
+    let data_version = use_signal(|| 0u64);
     let _version = data_version();
+
+    // ── Theme ───────────────────────────────────────────────────────────
+    let theme: Signal<Theme> = use_context_provider(|| Signal::new(Theme::System));
+    let _theme = theme();
 
     // ── Desktop: event-driven device discovery via hotplug ──────────────
     let mut spawned_hotplug = use_signal(|| false);
@@ -29,10 +33,44 @@ pub fn App() -> Element {
         AppState::spawn_usb_hotplug_watch(&_state, data_version);
     }
 
+    // Apply/remove the `dark` class on <html> whenever the theme changes.
+    use_effect(move || {
+        let t = theme();
+        let state = _state.clone();
+
+        // ── Native title bar (Windows) ──────────────────────────────────
+        #[cfg(target_os = "windows")]
+        match t {
+            Theme::Dark => crate::title_bar::set_title_bar_theme(true),
+            Theme::Light | Theme::System => crate::title_bar::set_title_bar_theme(false),
+        }
+        #[cfg(not(target_os = "windows"))]
+        let _ = t;
+
+        let eval = document::eval(
+            match t {
+                Theme::System => {
+                    r#"const m=window.matchMedia('(prefers-color-scheme:dark)');
+                       document.documentElement.classList.toggle('dark',m.matches);
+                       m.onchange=e=>document.documentElement.classList.toggle('dark',e.matches);"#
+                }
+                Theme::Light => r#"document.documentElement.classList.remove('dark')"#,
+                Theme::Dark => r#"document.documentElement.classList.add('dark')"#,
+            }
+        );
+        state.borrow_mut().theme = t;
+        spawn(async move { let _ = eval.await; });
+    });
+
     rsx! {
         document::Stylesheet { href: TAILWIND_CSS }
 
-        div { class: "flex flex-col h-screen bg-zinc-950 text-zinc-300 text-sm",
+        div {
+            class: if theme() == Theme::Dark {
+                "flex flex-col h-screen bg-white text-gray-800 dark:bg-zinc-950 dark:text-zinc-300 text-sm dark"
+            } else {
+                "flex flex-col h-screen bg-white text-gray-800 dark:bg-zinc-950 dark:text-zinc-300 text-sm"
+            },
             // Top bar: device dropdown + tab bar + settings
             TopBar { data_version }
 
@@ -74,8 +112,8 @@ fn StatusBar(data_version: Signal<u64>) -> Element {
     };
 
     rsx! {
-        div { class: "h-6 bg-zinc-900 border-t border-zinc-800 flex items-center px-4 flex-shrink-0",
-            span { class: "text-[11px] text-zinc-500 select-none", "{status_text}" }
+        div { class: "h-6 bg-gray-100 border-t border-gray-200 dark:bg-zinc-900 dark:border-t dark:border-zinc-800 flex items-center px-4 flex-shrink-0",
+            span { class: "text-[11px] text-gray-500 dark:text-zinc-500 select-none", "{status_text}" }
             div { class: "flex-1" }
             span { class: "text-[11px] text-green-600 font-medium select-none", "RustyBench v0.3.0" }
         }

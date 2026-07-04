@@ -32,13 +32,31 @@ const ANALOG_COLORS_RGBA: [RgbaColor; 8] = [
 ];
 
 const DIGITAL_COLOR_RGBA: RgbaColor = RgbaColor { r: 0x58, g: 0xa6, b: 0xff, a: 255 };
-const BG_COLOR_RGBA: RgbaColor = RgbaColor { r: 0x0d, g: 0x11, b: 0x17, a: 255 };
-const GRID_COLOR_RGBA: RgbaColor = RgbaColor { r: 0x1a, g: 0x1a, b: 0x2e, a: 255 };
-const ZERO_LINE_COLOR_RGBA: RgbaColor = RgbaColor { r: 0x30, g: 0x36, b: 0x3d, a: 255 };
-const DECODER_BG_RGBA: RgbaColor = RgbaColor { r: 0x16, g: 0x1b, b: 0x22, a: 255 };
-const DECODER_TEXT_RGBA: RgbaColor = RgbaColor { r: 0xc9, g: 0xd1, b: 0xd9, a: 255 };
 
-const CURSOR_COLOR: &str = "#f0f6fc";
+/// Theme-aware canvas colors.
+struct CanvasColors {
+    bg: RgbaColor,
+    grid: RgbaColor,
+    zero_line: RgbaColor,
+    decoder_bg: RgbaColor,
+    decoder_text: RgbaColor,
+}
+
+const DARK_COLORS: CanvasColors = CanvasColors {
+    bg: RgbaColor { r: 0x0d, g: 0x11, b: 0x17, a: 255 },
+    grid: RgbaColor { r: 0x1a, g: 0x1a, b: 0x2e, a: 255 },
+    zero_line: RgbaColor { r: 0x30, g: 0x36, b: 0x3d, a: 255 },
+    decoder_bg: RgbaColor { r: 0x16, g: 0x1b, b: 0x22, a: 255 },
+    decoder_text: RgbaColor { r: 0xc9, g: 0xd1, b: 0xd9, a: 255 },
+};
+
+const LIGHT_COLORS: CanvasColors = CanvasColors {
+    bg: RgbaColor { r: 0xff, g: 0xff, b: 0xff, a: 255 },
+    grid: RgbaColor { r: 0xe5, g: 0xe7, b: 0xeb, a: 255 },
+    zero_line: RgbaColor { r: 0xd1, g: 0xd5, b: 0xdb, a: 255 },
+    decoder_bg: RgbaColor { r: 0xf3, g: 0xf4, b: 0xf6, a: 255 },
+    decoder_text: RgbaColor { r: 0x37, g: 0x41, b: 0x51, a: 255 },
+};
 
 // ── Formatting helpers ───────────────────────────────────────────────────────
 
@@ -81,6 +99,7 @@ pub fn WaveformCanvas(
 ) -> Element {
     let _version = data_version();
     let state: AppStateRef = use_context();
+    let theme: Signal<crate::app_state::Theme> = use_context();
 
     // ── Gather data ───────────────────────────────────────────────────────
     let (acq_state, analog, digital, sample_count) = {
@@ -137,6 +156,15 @@ pub fn WaveformCanvas(
         use_effect(move || {
             let _ver = data_version();
             let sc = sample_count_sig();
+            let theme = theme();
+            let colors = match theme {
+                crate::app_state::Theme::Dark => &DARK_COLORS,
+                _ => {
+                    // For System: use the `dark` class state on <html>.
+                    // For Light: always LIGHT_COLORS.
+                    &LIGHT_COLORS
+                }
+            };
             let (analog, digital) = {
                 let Ok(s) = state.try_borrow() else { return; };
                 if let Some(acq) = control::acq_for_tab(&s, tid) {
@@ -152,7 +180,7 @@ pub fn WaveformCanvas(
             let rows_snap = v.rows.clone();
             let annotations_snap = v.annotations.clone();
             drop(v);
-            draw_all_canvases(&short_id, &analog, &digital, &rows_snap, &annotations_snap, rs, re, rl, canvas_width_px());
+            draw_all_canvases(&short_id, &analog, &digital, &rows_snap, &annotations_snap, rs, re, rl, canvas_width_px(), colors);
         });
     }
 
@@ -181,17 +209,17 @@ pub fn WaveformCanvas(
                     let name = analog.get(ci)
                         .map(|t| t.channel().name.clone())
                         .unwrap_or_default();
-                    rsx! { span { class: "text-[9px] text-zinc-300 truncate", "{name}" } }
+                    rsx! { span { class: "text-[9px] text-gray-700 dark:text-zinc-300 truncate", "{name}" } }
                 }
                 RowKind::Digital => {
                     let name = digital.as_ref()
                         .and_then(|dt| dt.channels().get(ci))
                         .map(|c| c.name.clone())
                         .unwrap_or_else(|| format!("D{}", ci));
-                    rsx! { span { class: "text-[9px] text-zinc-400 truncate", "{name}" } }
+                    rsx! { span { class: "text-[9px] text-gray-500 dark:text-zinc-400 truncate", "{name}" } }
                 }
                 RowKind::Decoder => {
-                    rsx! { span { class: "text-[9px] text-zinc-500 truncate", "DEC" } }
+                    rsx! { span { class: "text-[9px] text-gray-400 dark:text-zinc-500 truncate", "DEC" } }
                 }
             };
             (idx, signal_id, label_el, row_h, sig_h)
@@ -202,7 +230,7 @@ pub fn WaveformCanvas(
     //  Render
     // ═══════════════════════════════════════════════════════════════════════
     rsx! {
-        div { class: "flex flex-col h-full bg-[#0d1117]",
+        div { class: "flex flex-col h-full bg-white dark:bg-[#0d1117]",
             // ── Time ruler ────────────────────────────────────────────
             TimeRuler { tick_elements }
 
@@ -365,7 +393,7 @@ pub fn WaveformCanvas(
                                 style: "height: {effective_row_h}px",
                                 // Label
                                 div {
-                                    class: "flex-shrink-0 bg-[#0a0e14] border-r border-[#1a1a2e] flex items-center px-1 select-none",
+                                    class: "flex-shrink-0 bg-gray-100 border-r border-gray-200 dark:bg-[#0a0e14] dark:border-r dark:border-[#1a1a2e] flex items-center px-1 select-none",
                                     style: "width: {LABEL_W}px",
                                     oncontextmenu: {
                                         let mut view = view;
@@ -390,7 +418,7 @@ pub fn WaveformCanvas(
                                 }
                                 // Divider handle (events handled by parent onmousedown/onmousemove)
                                 div {
-                                    class: "absolute left-0 right-0 cursor-ns-resize bg-[#21262d] hover:bg-zinc-500/40",
+                                    class: "absolute left-0 right-0 cursor-ns-resize bg-gray-200 hover:bg-gray-400/40 dark:bg-[#21262d] dark:hover:bg-zinc-500/40",
                                     style: "height: 1px; bottom: 0",
                                 }
                             }
@@ -416,8 +444,9 @@ pub fn WaveformCanvas(
                              cursor-pointer hover:bg-lime-500/30 transition-colors"
                         } else {
                             "px-3 py-1 rounded text-[11px] font-medium \
-                             bg-zinc-700/30 text-zinc-400 border border-zinc-600/50 \
-                             cursor-pointer hover:bg-zinc-600/30 transition-colors"
+                             bg-gray-200 text-gray-500 border border-gray-300 \
+                             dark:bg-zinc-700/30 dark:text-zinc-400 dark:border-zinc-600/50 \
+                             cursor-pointer hover:bg-gray-300 dark:hover:bg-zinc-600/30 transition-colors"
                         };
                         rsx! {
                             div { class: "{btn_class}",
@@ -472,23 +501,23 @@ fn compute_ticks(
 fn TimeRuler(tick_elements: Vec<(f64, String, Vec<f64>)>) -> Element {
     rsx! {
         div {
-            class: "w-full flex-shrink-0 relative bg-[#0a0e14] border-b border-[#30363d] select-none",
+            class: "w-full flex-shrink-0 relative bg-gray-100 border-b border-gray-200 dark:bg-[#0a0e14] dark:border-b dark:border-[#30363d] select-none",
             style: "height: {TIME_RULER_H}px",
             for (pct, label, minor_pcts) in &tick_elements {
                 // Major tick
                 div {
-                    class: "absolute top-1/2 bottom-0 border-l border-[#30363d]",
+                    class: "absolute top-1/2 bottom-0 border-l border-gray-300 dark:border-[#30363d]",
                     style: "left: calc({LABEL_W}px + {pct:.2}% * (100% - {LABEL_W}px) / 100%)"
                 }
                 span {
-                    class: "absolute text-[9px] text-[#8b949e]",
+                    class: "absolute text-[9px] text-gray-400 dark:text-[#8b949e]",
                     style: "left: calc({LABEL_W}px + {pct:.2}% * (100% - {LABEL_W}px) / 100% + 2px); top: 0",
                     "{label}"
                 }
                 // Minor ticks
                 for mpct in minor_pcts {
                     div {
-                        class: "absolute top-[70%] bottom-0 border-l border-[#30363d] opacity-50",
+                        class: "absolute top-[70%] bottom-0 border-l border-gray-300 dark:border-[#30363d] opacity-50",
                         style: "left: calc({LABEL_W}px + {mpct:.2}% * (100% - {LABEL_W}px) / 100%)"
                     }
                 }
@@ -502,7 +531,7 @@ fn TimeRuler(tick_elements: Vec<(f64, String, Vec<f64>)>) -> Element {
 fn MarkerBar(markers: Vec<TimeMarker>, range_start: usize, range_len: f64) -> Element {
     rsx! {
         div {
-            class: "relative flex-shrink-0 border-b border-[#1a1a2e]",
+            class: "relative flex-shrink-0 border-b border-gray-200 dark:border-[#1a1a2e]",
             style: "height: {MARKER_BAR_H}px",
             for m in &markers {
                 {
@@ -540,12 +569,11 @@ fn CursorLine(cursor_px: Signal<Option<f64>>, cursor_label: Signal<String>) -> E
                 class: "pointer-events-none absolute top-0 bottom-0 z-20",
                 style: "left: {px}px",
                 div {
-                    class: "absolute top-0 bottom-0 border-l border-dashed",
-                    style: "border-color: {CURSOR_COLOR}; opacity: 0.7"
+                    class: "absolute top-0 bottom-0 border-l border-dashed border-[#111827] dark:border-[#f0f6fc] opacity-70"
                 }
                 div {
-                    class: "absolute text-[9px] whitespace-nowrap px-1 rounded",
-                    style: "top: 0; left: 4px; color: {CURSOR_COLOR}; background: #0d1117aa",
+                    class: "absolute text-[9px] whitespace-nowrap px-1 rounded bg-gray-100/70 dark:bg-[#0d1117aa] text-[#111827] dark:text-[#f0f6fc]",
+                    style: "top: 0; left: 4px",
                     "{label}"
                 }
             }
@@ -567,6 +595,7 @@ fn draw_all_canvases(
     range_end: usize,
     range_len: f64,
     signal_width: f64,
+    colors: &CanvasColors,
 ) {
     let mut all_js = String::new();
 
@@ -579,7 +608,7 @@ fn draw_all_canvases(
                 if let Some(trace) = analog.get(row.channel_index) {
                     let color = &ANALOG_COLORS_RGBA[row.channel_index % ANALOG_COLORS_RGBA.len()];
                     build_analog_signal(&mut renderer, trace, range_start, range_end, range_len,
-                                        row, color, signal_width);
+                                        row, color, signal_width, colors);
                 }
             }
             RowKind::Digital => {
@@ -587,12 +616,12 @@ fn draw_all_canvases(
                     if let Some(ch) = dt.channels().get(row.channel_index) {
                         build_digital_signal(&mut renderer, dt, ch.bit as usize,
                                              range_start, range_end, range_len,
-                                             row, signal_width);
+                                             row, signal_width, colors);
                     }
                 }
             }
             RowKind::Decoder => {
-                build_decoder_signal(&mut renderer, annotations, range_start, range_end, range_len, row);
+                build_decoder_signal(&mut renderer, annotations, range_start, range_end, range_len, row, colors);
             }
         };
         let row_js = renderer.finish(&cid, row.signal_height_px);
@@ -644,17 +673,17 @@ fn build_analog_signal(
     canvas: &mut dyn Canvas, trace: &AnalogTrace,
     range_start: usize, range_end: usize, range_len: f64,
     row: &crate::logic_analyzer::view::RowDescriptor, color: &RgbaColor,
-    signal_width: f64,
+    signal_width: f64, colors: &CanvasColors,
 ) {
     let sig_h = row.signal_height_px;
     let samples_per_px = range_len / signal_width.max(1.0);
 
     if samples_per_px < 1.0 {
         build_analog_per_sample(canvas, trace, range_start, range_end,
-                                range_len, sig_h, signal_width, color, samples_per_px);
+                                range_len, sig_h, signal_width, color, samples_per_px, colors);
     } else {
         build_analog_envelope(canvas, trace, range_start, range_end, range_len,
-                              sig_h, color, signal_width);
+                              sig_h, color, signal_width, colors);
     }
 }
 
@@ -663,6 +692,7 @@ fn build_analog_per_sample(
     canvas: &mut dyn Canvas, trace: &AnalogTrace,
     range_start: usize, range_end: usize, range_len: f64,
     sig_h: f64, signal_width: f64, color: &RgbaColor, samples_per_px: f64,
+    colors: &CanvasColors,
 ) {
     let store = trace.store();
     let raw = store.raw();
@@ -686,11 +716,11 @@ fn build_analog_per_sample(
     let show_dots = samples_per_px < 0.1;
 
     // ── Background ─────────────────────────────────────────────────────
-    canvas.set_fill_style(&BG_COLOR_RGBA);
+    canvas.set_fill_style(&colors.bg);
     canvas.clear();
 
     // ── Grid ───────────────────────────────────────────────────────────
-    canvas.set_stroke_style(&GRID_COLOR_RGBA);
+    canvas.set_stroke_style(&colors.grid);
     canvas.set_line_width(0.5);
     canvas.clear_line_dash();
     for i in 0..=5 {
@@ -701,7 +731,7 @@ fn build_analog_per_sample(
     // ── Zero line ──────────────────────────────────────────────────────
     if p_lo < 0.0 && p_hi > 0.0 {
         let zy = sig_h - ((0.0 - p_lo) / p_span * sig_h);
-        canvas.set_stroke_style(&ZERO_LINE_COLOR_RGBA);
+        canvas.set_stroke_style(&colors.zero_line);
         canvas.set_line_width(1.0);
         canvas.set_line_dash(&[4.0, 4.0]);
         canvas.stroke_line(0.0, zy, signal_width, zy);
@@ -744,6 +774,7 @@ fn build_analog_envelope(
     canvas: &mut dyn Canvas, trace: &AnalogTrace,
     range_start: usize, range_end: usize, range_len: f64,
     sig_h: f64, color: &RgbaColor, signal_width: f64,
+    colors: &CanvasColors,
 ) {
     let pixel_count = signal_width.ceil() as usize;
     let range = range_start..range_end;
@@ -759,7 +790,7 @@ fn build_analog_envelope(
         .filter(|b| b.min != 0 || b.max != 0)
         .fold((i32::MAX, i32::MIN), |(lo, hi), b| (lo.min(b.min), hi.max(b.max)));
     if raw_lo == i32::MAX {
-        canvas.set_fill_style(&BG_COLOR_RGBA);
+        canvas.set_fill_style(&colors.bg);
         canvas.clear();
         return;
     }
@@ -771,11 +802,11 @@ fn build_analog_envelope(
     let p_span = (p_hi - p_lo).max(1e-12);
 
     // ── Background ─────────────────────────────────────────────────────
-    canvas.set_fill_style(&BG_COLOR_RGBA);
+    canvas.set_fill_style(&colors.bg);
     canvas.clear();
 
     // ── Grid ───────────────────────────────────────────────────────────
-    canvas.set_stroke_style(&GRID_COLOR_RGBA);
+    canvas.set_stroke_style(&colors.grid);
     canvas.set_line_width(0.5);
     canvas.clear_line_dash();
     for i in 0..=5 {
@@ -786,7 +817,7 @@ fn build_analog_envelope(
     // ── Zero line ──────────────────────────────────────────────────────
     if p_lo < 0.0 && p_hi > 0.0 {
         let zy = sig_h - ((0.0 - p_lo) / p_span * sig_h);
-        canvas.set_stroke_style(&ZERO_LINE_COLOR_RGBA);
+        canvas.set_stroke_style(&colors.zero_line);
         canvas.set_line_width(1.0);
         canvas.set_line_dash(&[4.0, 4.0]);
         canvas.stroke_line(0.0, zy, signal_width, zy);
@@ -855,6 +886,7 @@ fn build_digital_signal(
     range_start: usize, range_end: usize, range_len: f64,
     row: &crate::logic_analyzer::view::RowDescriptor,
     signal_width: f64,
+    colors: &CanvasColors,
 ) {
     let sig_h = row.signal_height_px;
     let mip = dt.transitions();
@@ -871,11 +903,11 @@ fn build_digital_signal(
     let dense = edge_count > num_pixels;
 
     // Background
-    canvas.set_fill_style(&BG_COLOR_RGBA);
+    canvas.set_fill_style(&colors.bg);
     canvas.clear();
 
     // Mid line
-    canvas.set_stroke_style(&GRID_COLOR_RGBA);
+    canvas.set_stroke_style(&colors.grid);
     canvas.set_line_width(0.5);
     canvas.clear_line_dash();
     canvas.stroke_line(0.0, mid_y, signal_width, mid_y);
@@ -926,9 +958,10 @@ fn build_decoder_signal(
     canvas: &mut dyn Canvas, annotations: &[rb_decode::Annotation],
     range_start: usize, range_end: usize, range_len: f64,
     row: &crate::logic_analyzer::view::RowDescriptor,
+    colors: &CanvasColors,
 ) {
     let sig_h = row.signal_height_px;
-    canvas.set_fill_style(&DECODER_BG_RGBA);
+    canvas.set_fill_style(&colors.decoder_bg);
     canvas.clear();
 
     let data_color = RgbaColor { r: 0x1f, g: 0x3a, b: 0x6b, a: 255 };
@@ -951,7 +984,7 @@ fn build_decoder_signal(
         canvas.set_fill_style(color);
         canvas.fill_rect(x0, 1.0, ww, sig_h - 2.0);
         if ww > 0.03 {
-            canvas.set_fill_style(&DECODER_TEXT_RGBA);
+            canvas.set_fill_style(&colors.decoder_text);
             canvas.fill_text(&ann.label, x0 + 2.0, sig_h * 0.5 + 3.0);
         }
     }
@@ -1008,7 +1041,7 @@ mod tests {
     fn assert_grid_line_at(canvas: &PixelCanvas, y: u32, min_len: u32) {
         let mut run = 0u32;
         for x in 0..canvas.width() {
-            if canvas.pixel(x, y) == GRID_COLOR_RGBA {
+            if canvas.pixel(x, y) == DARK_COLORS.grid {
                 run += 1;
             } else {
                 run = 0;
@@ -1056,7 +1089,7 @@ mod tests {
         let color = ANALOG_COLORS_RGBA[0];
         let mut canvas = PixelCanvas::new(400, 80);
 
-        build_analog_signal(&mut canvas, &trace, 0, 50, 50.0, &row, &color, 400.0);
+        build_analog_signal(&mut canvas, &trace, 0, 50, 50.0, &row, &color, 400.0, &DARK_COLORS);
 
         // Top grid line at y=0 is safe from signal overlap (margin keeps
         // signal away from edges).
@@ -1099,7 +1132,7 @@ mod tests {
         let mut canvas = PixelCanvas::new(200, 80);
 
         // samples_per_px = 10/200 = 0.05 → per-sample with dots
-        build_analog_signal(&mut canvas, &trace, 0, 10, 10.0, &row, &color, 200.0);
+        build_analog_signal(&mut canvas, &trace, 0, 10, 10.0, &row, &color, 200.0, &DARK_COLORS);
 
         // Dots are filled circles of radius 2.5. Each circle has ~20 pixels.
         let signal_px = count_pixels(&canvas, color);
@@ -1121,7 +1154,7 @@ mod tests {
         let color = ANALOG_COLORS_RGBA[0];
         let mut canvas = PixelCanvas::new(200, 80);
 
-        build_analog_signal(&mut canvas, &trace, 0, 0, 1.0, &row, &color, 200.0);
+        build_analog_signal(&mut canvas, &trace, 0, 0, 1.0, &row, &color, 200.0, &DARK_COLORS);
 
         let signal_px = count_pixels(&canvas, color);
         assert_eq!(signal_px, 0);
@@ -1148,10 +1181,10 @@ mod tests {
         let color = ANALOG_COLORS_RGBA[0];
         let mut canvas = PixelCanvas::new(200, 80);
 
-        build_analog_signal(&mut canvas, &trace, 0, 20, 20.0, &row, &color, 200.0);
+        build_analog_signal(&mut canvas, &trace, 0, 20, 20.0, &row, &color, 200.0, &DARK_COLORS);
 
         // Zero line is dashed ZERO_LINE_COLOR on a background of BG_COLOR.
-        assert!(any_pixel_is(&canvas, ZERO_LINE_COLOR_RGBA),
+        assert!(any_pixel_is(&canvas, DARK_COLORS.zero_line),
             "dashed zero line should be visible");
 
         save_canvas_png(&canvas, "analog_per_sample_zero_line.png");
@@ -1181,13 +1214,13 @@ mod tests {
         let color = ANALOG_COLORS_RGBA[0];
         let mut canvas = PixelCanvas::new(800, 80);
 
-        build_analog_signal(&mut canvas, &trace, 0, 1000, 1000.0, &row, &color, 800.0);
+        build_analog_signal(&mut canvas, &trace, 0, 1000, 1000.0, &row, &color, 800.0, &DARK_COLORS);
 
         // Top grid line at y=0 — safe from signal overlap.
         assert_grid_line_at(&canvas, 0, 400);
 
         // Envelope mode uses globalAlpha=0.8 → blended pixels.
-        let bg_count = count_pixels(&canvas, BG_COLOR_RGBA);
+        let bg_count = count_pixels(&canvas, DARK_COLORS.bg);
         assert!(bg_count < canvas.width() as usize * canvas.height() as usize,
             "envelope should draw over background, but all pixels are BG");
 
@@ -1197,7 +1230,7 @@ mod tests {
         for y in 0..canvas.height() {
             for x in 0..canvas.width() {
                 let p = canvas.pixel(x, y);
-                if p != BG_COLOR_RGBA && p != GRID_COLOR_RGBA && p != RgbaColor::TRANSPARENT {
+                if p != DARK_COLORS.bg && p != DARK_COLORS.grid && p != RgbaColor::TRANSPARENT {
                     min_y = min_y.min(y);
                     max_y = max_y.max(y);
                 }
@@ -1207,7 +1240,7 @@ mod tests {
         assert!(span > 30, "envelope should span >30 px vertically, got {span}");
 
         // Zero line present (data crosses zero).
-        assert!(any_pixel_is(&canvas, ZERO_LINE_COLOR_RGBA),
+        assert!(any_pixel_is(&canvas, DARK_COLORS.zero_line),
             "zero line should appear for AC signal");
 
         save_canvas_png(&canvas, "analog_envelope_sine.png");
@@ -1223,7 +1256,7 @@ mod tests {
         let color = ANALOG_COLORS_RGBA[0];
         let mut canvas = PixelCanvas::new(800, 80);
 
-        build_analog_signal(&mut canvas, &trace, 0, 0, 1.0, &row, &color, 800.0);
+        build_analog_signal(&mut canvas, &trace, 0, 0, 1.0, &row, &color, 800.0, &DARK_COLORS);
 
         assert_eq!(canvas.pixel(400, 40), RgbaColor::TRANSPARENT);
 
@@ -1247,7 +1280,7 @@ mod tests {
         let row = make_digital_row(40.0, 0);
         let mut canvas = PixelCanvas::new(400, 40);
 
-        build_digital_signal(&mut canvas, &trace, 0, 0, 10, 10.0, &row, 400.0);
+        build_digital_signal(&mut canvas, &trace, 0, 0, 10, 10.0, &row, 400.0, &DARK_COLORS);
 
         // Signal pixels present.
         let sig = count_pixels(&canvas, DIGITAL_COLOR_RGBA);
@@ -1285,10 +1318,10 @@ mod tests {
         let mut canvas = PixelCanvas::new(20, 40);
 
         // edge_count=49, num_pixels=20 → dense mode
-        build_digital_signal(&mut canvas, &trace, 0, 0, 50, 50.0, &row, 20.0);
+        build_digital_signal(&mut canvas, &trace, 0, 0, 50, 50.0, &row, 20.0, &DARK_COLORS);
 
         // Background present.
-        assert!(count_pixels(&canvas, BG_COLOR_RGBA) > 0);
+        assert!(count_pixels(&canvas, DARK_COLORS.bg) > 0);
 
         // Signal pixels present.
         let sig = count_pixels(&canvas, DIGITAL_COLOR_RGBA);
@@ -1322,7 +1355,7 @@ mod tests {
         let mut canvas = PixelCanvas::new(600, 80);
 
         build_analog_signal(&mut canvas, &trace, 0, total, total as f64,
-                            &row, &color, 600.0);
+                            &row, &color, 600.0, &DARK_COLORS);
 
         // Top grid line safe from signal.
         assert_grid_line_at(&canvas, 0, 300);
@@ -1333,7 +1366,7 @@ mod tests {
         for y in 0..canvas.height() {
             for x in 0..canvas.width() {
                 let p = canvas.pixel(x, y);
-                if p != BG_COLOR_RGBA && p != GRID_COLOR_RGBA && p != RgbaColor::TRANSPARENT {
+                if p != DARK_COLORS.bg && p != DARK_COLORS.grid && p != RgbaColor::TRANSPARENT {
                     min_y = min_y.min(y);
                     max_y = max_y.max(y);
                 }
@@ -1360,3 +1393,4 @@ mod tests {
     }
 
 }
+

@@ -33,7 +33,7 @@ pub fn CanvasToolbar(
     let is_running = matches!(acq_state, AcquisitionState::Running);
 
     rsx! {
-        div { class: "flex items-center gap-2 px-3 py-1.5 border-b border-zinc-800 bg-zinc-900/80 flex-shrink-0",
+        div { class: "flex items-center gap-2 px-3 py-1.5 border-b border-gray-200 bg-gray-50/80 dark:border-zinc-800 dark:bg-zinc-900/80 flex-shrink-0",
             // Run / Stop
             if is_running {
                 button {
@@ -67,11 +67,11 @@ pub fn CanvasToolbar(
                 }
             }
 
-            span { class: "text-zinc-700", "|" }
+            span { class: "text-gray-300 dark:text-zinc-700", "|" }
 
             // Marker A button
             button {
-                class: "px-2 py-0.5 bg-zinc-800 hover:bg-zinc-700 text-amber-400 rounded text-xs font-medium transition-colors",
+                class: "px-2 py-0.5 bg-gray-200 hover:bg-gray-300 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-amber-600 dark:text-amber-400 rounded text-xs font-medium transition-colors",
                 title: "Add Marker A at cursor position",
                 onclick: {
                     let mut view = view;
@@ -87,7 +87,7 @@ pub fn CanvasToolbar(
 
             // Marker B button
             button {
-                class: "px-2 py-0.5 bg-zinc-800 hover:bg-zinc-700 text-amber-400 rounded text-xs font-medium transition-colors",
+                class: "px-2 py-0.5 bg-gray-200 hover:bg-gray-300 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-amber-600 dark:text-amber-400 rounded text-xs font-medium transition-colors",
                 title: "Add Marker B at cursor position",
                 onclick: {
                     let mut view = view;
@@ -103,7 +103,7 @@ pub fn CanvasToolbar(
 
             // Create Pair button
             button {
-                class: "px-2 py-0.5 bg-zinc-800 hover:bg-zinc-700 text-emerald-400 rounded text-xs font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed",
+                class: "px-2 py-0.5 bg-gray-200 hover:bg-gray-300 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-emerald-600 dark:text-emerald-400 rounded text-xs font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed",
                 title: "Create Marker Pair from last two markers",
                 disabled: {
                     let v = view.read();
@@ -124,11 +124,11 @@ pub fn CanvasToolbar(
                 "\u{2194} Pair"
             }
 
-            span { class: "text-zinc-700", "|" }
+            span { class: "text-gray-300 dark:text-zinc-700", "|" }
 
             // Clear all markers
             button {
-                class: "px-2 py-0.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-400 rounded text-xs transition-colors",
+                class: "px-2 py-0.5 bg-gray-200 hover:bg-gray-300 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-gray-500 dark:text-zinc-400 rounded text-xs transition-colors",
                 title: "Clear all markers and pairs",
                 onclick: {
                     let mut view = view;
@@ -145,7 +145,7 @@ pub fn CanvasToolbar(
 
             // Sample count
             if sample_count > 0 {
-                span { class: "text-[10px] text-zinc-600 font-mono",
+                span { class: "text-[10px] text-gray-400 dark:text-zinc-600 font-mono",
                     "{sample_count} samples"
                 }
             }

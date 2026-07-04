@@ -6,7 +6,15 @@ fn main() {
         env_logger::Env::default().default_filter_or("debug,nusb=info"),
     )
     .init();
-    dioxus::launch(rb_gui::components::app::App);
+
+    use dioxus::desktop::{Config, WindowBuilder};
+    dioxus::LaunchBuilder::new()
+        .with_cfg(
+            Config::new()
+                .with_menu(None)
+                .with_window(WindowBuilder::new().with_always_on_top(false).with_title("Rusty Bench")),
+        )
+        .launch(rb_gui::components::app::App);
 }
 
 #[cfg(target_arch = "wasm32")]

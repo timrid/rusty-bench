@@ -1,8 +1,25 @@
 @import "tailwindcss";
 @source "./src/**/*.rs";
 
-/* RustyBench dark theme overrides */
+/* ── Class-based dark mode (toggled via .dark on <html>) ────────────── */
+@variant dark (&:where(.dark, .dark *));
+
+/* ── System color-scheme ────────────────────────────────────────────── */
+:root {
+  color-scheme: light;
+}
+.dark {
+  color-scheme: dark;
+}
+
+/* ── Light mode (default) ───────────────────────────────────────────── */
 body {
+  background: #ffffff;
+  color: #1f2937; /* gray-800 */
+}
+
+/* ── Dark mode overrides ────────────────────────────────────────────── */
+.dark body {
   background: #0e0e10;
   color: #d4d4d8;
 }

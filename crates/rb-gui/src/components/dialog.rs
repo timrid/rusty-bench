@@ -61,15 +61,15 @@ pub fn Dialog(data_version: Signal<u64>) -> Element {
 
             // Modal card
             div {
-                class: "bg-zinc-800 border border-zinc-700 rounded-lg shadow-xl w-96 p-5",
+                class: "bg-white border border-gray-200 dark:bg-zinc-800 dark:border-zinc-700 rounded-lg shadow-xl w-96 p-5",
                 onclick: move |evt| evt.stop_propagation(),
 
-                h2 { class: "text-sm font-semibold text-zinc-100 mb-2", "{title}" }
-                p { class: "text-xs text-zinc-400 leading-relaxed mb-5", "{message}" }
+                h2 { class: "text-sm font-semibold text-gray-800 dark:text-zinc-100 mb-2", "{title}" }
+                p { class: "text-xs text-gray-500 dark:text-zinc-400 leading-relaxed mb-5", "{message}" }
 
                 div { class: "flex justify-end gap-2",
                     button {
-                        class: "px-3 py-1.5 text-xs text-zinc-400 hover:text-zinc-200 bg-zinc-700 hover:bg-zinc-600 rounded transition-colors",
+                        class: "px-3 py-1.5 text-xs text-gray-500 hover:text-gray-700 bg-gray-100 hover:bg-gray-200 dark:text-zinc-400 dark:hover:text-zinc-200 dark:bg-zinc-700 dark:hover:bg-zinc-600 rounded transition-colors",
                         onclick: move |_| {
                             *DIALOG.write() = None;
                         },

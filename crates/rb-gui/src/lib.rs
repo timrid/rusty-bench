@@ -10,7 +10,7 @@
 //! 2. [`logic_analyzer::view::WaveformView`] owns pan/zoom and decoder state per device.
 //! 3. [`components`] is the Dioxus component tree that renders the state.
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 pub mod components;
 pub mod device_manager;
@@ -19,8 +19,10 @@ pub mod logic_analyzer;
 pub mod tab_content;
 pub mod tab_state;
 pub(crate) mod app_state;
+pub(crate) mod title_bar;
 
 pub use app_state::AppState;
+pub(crate) use app_state::Theme;
 pub use logic_analyzer::acquisition::{AcquisitionConfig, DeviceAcquisition};
 pub use logic_analyzer::view::WaveformView;
 pub use tab_content::{LogicAnalyzerContent, TabContent};

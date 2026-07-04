@@ -15,6 +15,51 @@ use rb_device::DeviceId;
 use crate::device_manager::DeviceManager;
 use crate::tab_state::{TabId, TabSource, TabState};
 
+// ── Theme ─────────────────────────────────────────────────────────────────────
+
+/// User-selectable color theme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Theme {
+    /// Follow the operating system preference.
+    System,
+    /// Light mode.
+    Light,
+    /// Dark mode.
+    Dark,
+}
+
+impl Theme {
+    /// Returns the next theme in the cycle: System → Light → Dark → System.
+    #[must_use]
+    pub fn next(self) -> Self {
+        match self {
+            Self::System => Self::Light,
+            Self::Light => Self::Dark,
+            Self::Dark => Self::System,
+        }
+    }
+
+    /// Human-readable label for the toggle button tooltip.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::System => "Theme: System",
+            Self::Light => "Theme: Light",
+            Self::Dark => "Theme: Dark",
+        }
+    }
+
+    /// Icon character for the toggle button (monochrome, no emoji).
+    #[must_use]
+    pub fn icon(self) -> &'static str {
+        match self {
+            Self::System => "\u{25D0}", // ◐ half circle = auto
+            Self::Light => "\u{25CB}",  // ○ empty circle = light
+            Self::Dark => "\u{25CF}",   // ● filled circle = dark
+        }
+    }
+}
+
 // ── App state ─────────────────────────────────────────────────────────────────
 
 pub struct AppState {
@@ -27,6 +72,8 @@ pub struct AppState {
     pub active_tab: TabId,
     next_tab_id: u64,
     next_session_num: u64,
+    /// Current theme preference.
+    pub theme: Theme,
 }
 
 impl AppState {
@@ -53,6 +100,7 @@ impl AppState {
             active_tab: first_id,
             next_tab_id: 2,
             next_session_num: 2,
+            theme: Theme::System,
         }
     }
 

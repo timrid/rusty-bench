@@ -9,6 +9,7 @@ use rb_core::KnownDevice;
 use rb_device::DeviceId;
 
 use crate::tab_state::TabId;
+use crate::app_state::Theme;
 
 use super::app::AppStateRef;
 
@@ -59,8 +60,11 @@ pub fn TopBar(data_version: Signal<u64>) -> Element {
 
     drop(s);
 
+    // ── Theme toggle ────────────────────────────────────────────────────
+    let mut theme: Signal<Theme> = use_context();
+
     rsx! {
-        div { class: "h-8 bg-zinc-900 border-b border-zinc-800 flex items-stretch flex-shrink-0",
+        div { class: "h-8 bg-gray-100 border-b border-gray-200 dark:bg-zinc-900 dark:border-zinc-800 flex items-stretch flex-shrink-0",
             // ── Device Dropdown ──────────────────────────────────────────
             DeviceDropdown {
                 known_devices,
@@ -80,11 +84,21 @@ pub fn TopBar(data_version: Signal<u64>) -> Element {
                 data_version,
             }
 
-            div { class: "w-px bg-zinc-800 h-full" }
+            div { class: "w-px bg-gray-300 dark:bg-zinc-700 h-full" }
+
+            // ── Theme Toggle ─────────────────────────────────────────────
+            button {
+                class: "text-gray-500 hover:text-gray-800 hover:bg-gray-300 dark:text-zinc-500 dark:hover:text-zinc-100 dark:hover:bg-zinc-700 px-3 h-full flex items-center transition-colors",
+                title: theme().label(),
+                onclick: move |_| theme.set(theme().next()),
+                "{theme().icon()}"
+            }
+
+            div { class: "w-px bg-gray-300 dark:bg-zinc-700 h-full" }
 
             // ── Settings Button ─────────────────────────────────────────
             button {
-                class: "text-zinc-500 hover:text-zinc-200 px-3 h-full flex items-center transition-colors",
+                class: "text-gray-500 hover:text-gray-800 hover:bg-gray-300 dark:text-zinc-500 dark:hover:text-zinc-100 dark:hover:bg-zinc-700 px-3 h-full flex items-center transition-colors",
                 title: "Settings",
                 "\u{2699}"
             }
@@ -130,7 +144,7 @@ fn DeviceDropdown(
         div { class: "relative",
             // Dropdown trigger — always clickable to open the menu
             button {
-                class: "flex items-center gap-1.5 h-full px-3 text-xs text-zinc-300 bg-zinc-800 hover:bg-zinc-700 transition-colors w-[180px] flex-shrink-0 border-r border-zinc-700",
+                class: "flex items-center gap-1.5 h-full px-3 text-xs text-gray-700 bg-white hover:bg-gray-100 dark:text-zinc-300 dark:bg-zinc-800 dark:hover:bg-zinc-700 transition-colors w-[180px] flex-shrink-0 border-r border-gray-200 dark:border-zinc-700",
                 onclick: move |_| {
                     let was_closed = !open();
                     open.set(!open());
@@ -139,7 +153,7 @@ fn DeviceDropdown(
                     }
                 },
                 span { class: "truncate flex-1 text-left", "{display_text}" }
-                span { class: "text-zinc-500 text-[9px] flex-shrink-0", "\u{25BC}" }
+                span { class: "text-gray-400 dark:text-zinc-500 text-[9px] flex-shrink-0", "\u{25BC}" }
             }
 
             // Dropdown menu
@@ -149,13 +163,13 @@ fn DeviceDropdown(
                     onclick: move |_| open.set(false),
                 }
 
-                div { class: "absolute top-full left-0 mt-0.5 w-80 bg-zinc-800 border border-zinc-700 rounded shadow-xl z-20 max-h-[70vh] overflow-y-auto",
+                div { class: "absolute top-full left-0 mt-0.5 w-80 bg-white border border-gray-200 dark:bg-zinc-800 dark:border-zinc-700 rounded shadow-xl z-20 max-h-[70vh] overflow-y-auto",
                     // Error messages
                     if let Some(ref err) = scan_error {
-                        div { class: "px-3 py-1 text-[10px] text-red-400 border-b border-zinc-700", "{err}" }
+                        div { class: "px-3 py-1 text-[10px] text-red-500 border-b border-gray-200 dark:border-zinc-700", "{err}" }
                     }
                     if let Some(ref err) = connect_error {
-                        div { class: "px-3 py-1 text-[10px] text-red-400 border-b border-zinc-700", "{err}" }
+                        div { class: "px-3 py-1 text-[10px] text-red-500 border-b border-gray-200 dark:border-zinc-700", "{err}" }
                     }
 
                     // ── Device list (single flat list) ──────────────────
@@ -174,7 +188,7 @@ fn DeviceDropdown(
                             }
                         }
                     } else {
-                        div { class: "px-3 py-2 text-xs text-zinc-600 italic",
+                        div { class: "px-3 py-2 text-xs text-gray-400 dark:text-zinc-600 italic",
                             "No devices found."
                         }
                     }
@@ -184,9 +198,9 @@ fn DeviceDropdown(
                         #[cfg(not(target_arch = "wasm32"))]
                         {{
                             rsx! {
-                                div { class: "border-t border-zinc-700 flex",
+                                div { class: "border-t border-gray-200 dark:border-zinc-700 flex",
                                     button {
-                                        class: "flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs text-zinc-500 hover:text-zinc-300 hover:bg-zinc-700 transition-colors cursor-not-allowed",
+                                        class: "flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs text-gray-400 hover:text-gray-600 hover:bg-gray-100 dark:text-zinc-500 dark:hover:text-zinc-300 dark:hover:bg-zinc-700 transition-colors cursor-not-allowed",
                                         title: "Coming soon — manually add IP/network devices",
                                         disabled: true,
                                         span { class: "text-[10px]", "+" }
@@ -198,9 +212,9 @@ fn DeviceDropdown(
                         #[cfg(target_arch = "wasm32")]
                         {{
                             rsx! {
-                                div { class: "border-t border-zinc-700",
+                                div { class: "border-t border-gray-200 dark:border-zinc-700",
                                     button {
-                                        class: "w-full flex items-center gap-1.5 px-3 py-1.5 text-xs text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700 transition-colors",
+                                        class: "w-full flex items-center gap-1.5 px-3 py-1.5 text-xs text-gray-500 hover:text-gray-700 hover:bg-gray-100 dark:text-zinc-400 dark:hover:text-zinc-200 dark:hover:bg-zinc-700 transition-colors",
                                         onclick: {
                                             let state = state.clone();
                                             move |_| {
@@ -212,14 +226,14 @@ fn DeviceDropdown(
                                         "Connect USB devices"
                                     }
                                     button {
-                                        class: "w-full flex items-center gap-1.5 px-3 py-1.5 text-xs text-zinc-600 transition-colors",
+                                        class: "w-full flex items-center gap-1.5 px-3 py-1.5 text-xs text-gray-400 dark:text-zinc-600 transition-colors",
                                         title: "Coming soon — WebSerial support",
                                         disabled: true,
                                         span { class: "text-[10px]", "\u{1F4E1}" }
                                         "Connect serial devices"
                                     }
                                     button {
-                                        class: "w-full flex items-center gap-1.5 px-3 py-1.5 text-xs text-zinc-600 transition-colors",
+                                        class: "w-full flex items-center gap-1.5 px-3 py-1.5 text-xs text-gray-400 dark:text-zinc-600 transition-colors",
                                         title: "Coming soon — WebBluetooth support",
                                         disabled: true,
                                         span { class: "text-[10px]", "\u{1F4F6}" }
@@ -273,13 +287,13 @@ fn DeviceRow(
     };
 
     let row_class = if is_active {
-        "w-full text-left px-3 py-1.5 text-xs text-zinc-200 bg-zinc-700/30 border-l-2 border-l-blue-500"
+        "w-full text-left px-3 py-1.5 text-xs text-gray-800 bg-blue-50 dark:text-zinc-200 dark:bg-zinc-700/30 border-l-2 border-l-blue-500"
     } else if is_connected {
-        "w-full text-left px-3 py-1.5 text-xs text-zinc-200 border-l-2 border-l-green-500"
+        "w-full text-left px-3 py-1.5 text-xs text-gray-800 dark:text-zinc-200 border-l-2 border-l-green-500"
     } else if is_locked {
-        "w-full text-left px-3 py-1.5 text-xs text-zinc-500"
+        "w-full text-left px-3 py-1.5 text-xs text-gray-400 dark:text-zinc-500"
     } else {
-        "w-full text-left px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-700 transition-colors"
+        "w-full text-left px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-100 dark:text-zinc-300 dark:hover:bg-zinc-700 transition-colors"
     };
 
     let label = if !model.is_empty() {
@@ -333,16 +347,16 @@ fn DeviceRow(
                     } else if is_connected {
                         span { class: "text-green-400", "\u{26A1}" }
                     } else {
-                        span { class: "text-zinc-600", "\u{25CB}" }
+                        span { class: "text-gray-300 dark:text-zinc-600", "\u{25CB}" }
                     }
                 }
                 div { class: "flex-1 min-w-0",
-                    div { class: "truncate text-zinc-200", "{label}" }
-                    div { class: "text-[9px] text-zinc-500 truncate", "{sub}" }
-                    div { class: "text-[9px] text-zinc-600 font-mono", "{driver}" }
+                    div { class: "truncate text-gray-800 dark:text-zinc-200", "{label}" }
+                    div { class: "text-[9px] text-gray-400 dark:text-zinc-500 truncate", "{sub}" }
+                    div { class: "text-[9px] text-gray-400 dark:text-zinc-600 font-mono", "{driver}" }
                     for (key, value) in &additional_info {
-                        div { class: "text-[9px] text-zinc-500",
-                            span { class: "text-zinc-600", "{key}: " }
+                        div { class: "text-[9px] text-gray-400 dark:text-zinc-500",
+                            span { class: "text-gray-400 dark:text-zinc-600", "{key}: " }
                             "{value}"
                         }
                     }
@@ -356,7 +370,7 @@ fn DeviceRow(
                     }
                 } else if is_connected {
                     button {
-                        class: "text-[9px] text-zinc-600 hover:text-red-400 px-1.5 py-0.5 rounded hover:bg-red-900/20 transition-colors flex-shrink-0",
+                        class: "text-[9px] text-gray-400 hover:text-red-500 dark:text-zinc-600 dark:hover:text-red-400 px-1.5 py-0.5 rounded hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors flex-shrink-0",
                         onclick: {
                             let state = state.clone();
                             let kd = kd.clone();
@@ -389,7 +403,7 @@ fn TabBar(
     let state: AppStateRef = use_context();
 
     rsx! {
-        div { class: "flex items-stretch flex-1 overflow-x-auto h-full",
+        div { class: "flex items-stretch flex-1 overflow-x-auto h-full bg-gray-100 dark:bg-zinc-900",
             for (id, label, is_active, is_running) in &tabs {
                 {
                     let id = *id;
@@ -399,9 +413,9 @@ fn TabBar(
                     rsx! {
                         div {
                             class: if is_active {
-                                "flex items-center gap-1 px-3 text-xs text-zinc-200 cursor-pointer border-b-2 border-b-white/60 h-full border-r border-r-transparent"
+                                "flex items-center gap-1 px-3 text-xs text-gray-800 dark:text-zinc-200 cursor-pointer border-b-2 border-b-blue-500 dark:border-b-white/60 h-full border-r border-r-transparent bg-gray-100 dark:bg-zinc-900"
                             } else {
-                                "flex items-center gap-1 px-3 text-xs text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/40 cursor-pointer h-full border-r border-zinc-700/50 border-b-2 border-b-transparent"
+                                "flex items-center gap-1 px-3 text-xs text-gray-400 hover:text-gray-600 hover:bg-gray-200 dark:text-zinc-500 dark:hover:text-zinc-300 dark:hover:bg-zinc-800/40 cursor-pointer h-full border-r border-gray-200 dark:border-zinc-700/50 border-b-2 border-b-transparent bg-gray-100 dark:bg-zinc-900"
                             },
                             onclick: {
                                 let state = state.clone();
@@ -421,7 +435,7 @@ fn TabBar(
                             // Close button — hidden while device is locked
                             if !is_locked {
                                 button {
-                                    class: "ml-1 text-zinc-600 hover:text-red-400 rounded hover:bg-zinc-700/50 transition-colors flex-shrink-0",
+                                    class: "ml-1 text-gray-400 hover:text-red-500 dark:text-zinc-600 dark:hover:text-red-400 rounded hover:bg-gray-200 dark:hover:bg-zinc-700/50 transition-colors flex-shrink-0",
                                     title: "Close tab",
                                     onclick: {
                                         let state = state.clone();
@@ -442,9 +456,9 @@ fn TabBar(
             // "+" New Tab button (disabled when device is locked)
             button {
                 class: if is_locked {
-                    "px-2 text-xl font-bold text-zinc-700 flex-shrink-0 flex items-center justify-center cursor-not-allowed border-x border-zinc-700/50"
+                    "px-2 text-xl font-bold text-gray-300 dark:text-zinc-700 flex-shrink-0 flex items-center justify-center cursor-not-allowed border-x border-gray-200 dark:border-zinc-700/50 bg-gray-100 dark:bg-zinc-900"
                 } else {
-                    "px-2 text-xl font-bold text-zinc-600 hover:text-zinc-300 hover:bg-zinc-800/50 transition-colors flex-shrink-0 flex items-center justify-center border-x border-zinc-700/50"
+                    "px-2 text-xl font-bold text-gray-400 hover:text-gray-600 hover:bg-gray-200 dark:text-zinc-600 dark:hover:text-zinc-300 dark:hover:bg-zinc-800/50 transition-colors flex-shrink-0 flex items-center justify-center border-x border-gray-200 dark:border-zinc-700/50 bg-gray-100 dark:bg-zinc-900"
                 },
                 disabled: is_locked,
                 title: if is_locked { "Stop acquisition to create a new tab" } else { "New tab" },
@@ -466,7 +480,7 @@ fn TabBar(
                 "\u{002B}"
             }
 
-            div { class: "flex-1 bg-zinc-800" }
+            div { class: "flex-1 bg-gray-100 dark:bg-zinc-900" }
         }
     }
 }
