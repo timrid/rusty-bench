@@ -1088,37 +1088,35 @@ async fn connect_usb(
     {
         // Quick check: is fx2lafw already running?
         let mut needs_upload = true;
-        if let Ok(dev_info) =
-            find_usb_device(target_vid, target_pid, target_serial).await
+        if let Ok(device) =
+            open_device_with_retry(target_vid, target_pid, target_serial).await
         {
-            if let Ok(device) = dev_info.open().await {
-                if let Ok(interface) = device.detach_and_claim_interface(0).await
-                {
-                    let mut transport: Box<dyn UsbTransport> = Box::new(
-                        rb_transport::nusb::NusbTransport::new(
-                            interface, 0x00, 0x00,
+            if let Ok(interface) = device.detach_and_claim_interface(0).await
+            {
+                let mut transport: Box<dyn UsbTransport> = Box::new(
+                    rb_transport::nusb::NusbTransport::new(
+                        interface, 0x00, 0x00,
+                    )
+                    .map_err(|e| {
+                        DriverError::Transport(
+                            rb_transport::TransportError::Io(e.to_string()),
                         )
-                        .map_err(|e| {
-                            DriverError::Transport(
-                                rb_transport::TransportError::Io(e.to_string()),
-                            )
-                        })?,
-                    );
-                    // Try the fx2lafw-specific vendor request.
-                    // Any error means the device is not running fx2lafw.
-                    if let Ok((major, _minor)) =
-                        get_fw_version(&mut *transport).await
-                    {
-                        if major == REQUIRED_FW_MAJOR {
-                            log::debug!(
-                                "fx2lafw: {:04X}:{:04X} already running fx2lafw v{major}",
-                                target_vid, target_pid
-                            );
-                            needs_upload = false;
-                        }
+                    })?,
+                );
+                // Try the fx2lafw-specific vendor request.
+                // Any error means the device is not running fx2lafw.
+                if let Ok((major, _minor)) =
+                    get_fw_version(&mut *transport).await
+                {
+                    if major == REQUIRED_FW_MAJOR {
+                        log::debug!(
+                            "fx2lafw: {:04X}:{:04X} already running fx2lafw v{major}",
+                            target_vid, target_pid
+                        );
+                        needs_upload = false;
                     }
-                    drop(transport);
                 }
+                drop(transport);
             }
         }
 
@@ -1232,6 +1230,36 @@ async fn connect_usb(
     open_and_connect(candidate, target_vid, target_pid, target_serial).await
 }
 
+/// Retry `open()` with exponential backoff to handle Windows race conditions
+/// where the WinUSB device path is not yet ready after re-enumeration.
+#[cfg(feature = "fx2lafw")]
+async fn open_device_with_retry(
+    vid: u16,
+    pid: u16,
+    serial: &str,
+) -> DriverResult<nusb::Device> {
+    const RETRY_DELAYS_MS: [u64; 3] = [100, 200, 400];
+    for &delay_ms in &RETRY_DELAYS_MS {
+        let dev_info = find_usb_device(vid, pid, serial).await?;
+        match dev_info.open().await {
+            Ok(device) => return Ok(device),
+            Err(e) => {
+                log::debug!(
+                    "fx2lafw: open {:04X}:{:04X} failed (retry in {delay_ms}ms): {e}",
+                    vid, pid
+                );
+                futures_timer::Delay::new(std::time::Duration::from_millis(delay_ms)).await;
+            }
+        }
+    }
+    // Final attempt — propagate the error.
+    let dev_info = find_usb_device(vid, pid, serial).await?;
+    dev_info
+        .open()
+        .await
+        .map_err(|e| DriverError::Transport(rb_transport::TransportError::Io(e.to_string())))
+}
+
 /// Open a USB device by VID/PID/serial and wrap it in an [`Fx2lafwDevice`].
 #[cfg(feature = "fx2lafw")]
 async fn open_and_connect(
@@ -1240,11 +1268,7 @@ async fn open_and_connect(
     pid: u16,
     serial: &str,
 ) -> DriverResult<Box<dyn Device>> {
-    let dev_info = find_usb_device(vid, pid, serial).await?;
-    let device = dev_info
-        .open()
-        .await
-        .map_err(|e| DriverError::Transport(rb_transport::TransportError::Io(e.to_string())))?;
+    let device = open_device_with_retry(vid, pid, serial).await?;
 
     // Claim interface 0 (the only interface fx2lafw exposes).
     let interface = device
