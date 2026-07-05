@@ -1,15 +1,17 @@
-//! Logic Analyzer tab content: data types, acquisition, waveform view,
+//! Logic Analyzer tab content: data types, acquisition, waveform state,
 //! UI components, and acquisition orchestration.
 
 pub mod acquisition;
 pub mod components;
 pub mod control;
-pub mod view;
+pub mod decoder;
+pub mod waveform_state;
 
 use rb_core::AcquisitionState;
 
 use acquisition::{AcquisitionConfig, DeviceAcquisition};
-use view::WaveformView;
+use decoder::DecoderConfig;
+use waveform_state::WaveformState;
 
 /// All state specific to a Logic Analyzer tab.
 pub struct LogicAnalyzerContent {
@@ -18,8 +20,10 @@ pub struct LogicAnalyzerContent {
     pub acquisition_config: AcquisitionConfig,
     /// Active acquisition, if running or stopped.
     pub acquisition: Option<DeviceAcquisition>,
-    /// Per-tab waveform pan/zoom/marker state.
-    pub view: WaveformView,
+    /// Per-tab waveform pan/zoom, row layout, and marker state.
+    pub waveform_state: WaveformState,
+    /// Protocol decoder configuration and annotations.
+    pub decoder_config: DecoderConfig,
     /// Bumped every time this content is replaced (device switch, etc.).
     /// Used by the UI to detect that signals need reloading from tab state.
     pub content_version: u64,
@@ -51,7 +55,8 @@ impl Default for LogicAnalyzerContent {
         Self {
             acquisition_config: AcquisitionConfig::default(),
             acquisition: None,
-            view: WaveformView::default(),
+            waveform_state: WaveformState::default(),
+            decoder_config: DecoderConfig::default(),
             content_version: 0,
         }
     }
@@ -67,7 +72,6 @@ pub fn default_content() -> crate::tab_content::TabContent {
 /// Creates a [`LogicAnalyzerContent`] from a connected device's capabilities.
 /// Increments `content_version` so the UI can detect the replacement.
 pub fn init_content(device: &dyn rb_device::Device) -> LogicAnalyzerContent {
-    // Use a thread-local counter so each call gets a unique version.
     static NEXT_VERSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     LogicAnalyzerContent {
         acquisition_config: AcquisitionConfig::from_device(device),

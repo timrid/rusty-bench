@@ -5,9 +5,10 @@
 //! [`dioxus-web`]).
 //!
 //! # Architecture
-//! 1. [`state::AppState`] owns all device lifecycle, acquisition spawning,
+//! 1. [`app_state::AppState`] owns all device lifecycle, acquisition spawning,
 //!    and executor management — framework-agnostic, testable without a display.
-//! 2. [`logic_analyzer::view::WaveformView`] owns pan/zoom and decoder state per device.
+//! 2. [`logic_analyzer::waveform_state::WaveformState`] owns pan/zoom,
+//!    row layout, and marker state per device.
 //! 3. [`components`] is the Dioxus component tree that renders the state.
 
 #![deny(unsafe_code)]
@@ -24,6 +25,7 @@ pub(crate) mod title_bar;
 
 pub use app_state::AppState;
 pub use logic_analyzer::acquisition::{AcquisitionConfig, DeviceAcquisition};
-pub use logic_analyzer::view::WaveformView;
+pub use logic_analyzer::decoder::DecoderConfig;
+pub use logic_analyzer::waveform_state::WaveformState;
 pub use tab_content::{LogicAnalyzerContent, TabContent};
 pub use tab_state::{TabId, TabSource, TabState};

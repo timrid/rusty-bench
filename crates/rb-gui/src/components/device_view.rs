@@ -13,8 +13,9 @@ use dioxus::prelude::*;
 
 use super::app::AppStateRef;
 use crate::logic_analyzer::components::{
-    AcquisitionSetup, CanvasToolbar, DecoderSetup, WaveformCanvas,
+    AcquisitionSetup, CanvasToolbar, DecoderSetup, WaveformData, WaveformView,
 };
+use crate::logic_analyzer::control;
 
 /// The main content view for the active session.
 #[component]
@@ -59,44 +60,75 @@ pub fn DeviceView(data_version: Signal<u64>) -> Element {
     };
 
     // Device connected — show full view.
-    // Per-tab view state from the active tab.
-    let (view, config, version) = {
+    let theme: Signal<crate::app_state::Theme> = use_context();
+
+    // Compute WaveformData from AppState for the active tab (synchronous, same as before refactoring).
+    let mut waveform_data = use_signal(WaveformData::empty);
+    {
+        let Ok(s) = state.try_borrow() else { return prev_frame(); };
+        let wd = if let Some(acq) = control::acq_for_tab(&s, active_tab) {
+            WaveformData {
+                acq_state: acq.state().clone(),
+                analog: acq.analog_traces().to_vec(),
+                digital: acq.digital_trace().cloned(),
+                sample_count: acq.sample_count(),
+            }
+        } else if let Some(h) = s.handle_for_tab(active_tab) {
+            WaveformData {
+                acq_state: h.state().clone(),
+                analog: h.analog_traces().to_vec(),
+                digital: h.digital_trace().cloned(),
+                sample_count: h.sample_count(),
+            }
+        } else {
+            WaveformData::empty()
+        };
+        waveform_data.set(wd);
+    }
+
+    // Per-tab waveform state, decoder config, and acquisition config from the active tab.
+    let (wf_state, decoder_cfg, acq_config, version) = {
         let Ok(s) = state.try_borrow() else { return prev_frame(); };
         let tab = s.active_tab_state();
         let la = tab.map(|t| t.logic_analyzer());
-        let view = la.map(|l| l.view.clone()).unwrap_or_default();
-        let config = la.map(|l| l.acquisition_config.clone()).unwrap_or_default();
-        let version = la.map(|l| l.content_version).unwrap_or(0);
-        (view, config, version)
+        let ws = la.map(|l| l.waveform_state.clone()).unwrap_or_default();
+        let dc = la.map(|l| l.decoder_config.clone()).unwrap_or_default();
+        let ac = la.map(|l| l.acquisition_config.clone()).unwrap_or_default();
+        let ver = la.map(|l| l.content_version).unwrap_or(0);
+        (ws, dc, ac, ver)
     };
-    let mut view_signal = use_signal(move || view);
-    let mut config_signal = use_signal(move || config);
+    let mut wf_state_signal = use_signal(move || wf_state);
+    let mut decoder_config_signal = use_signal(move || decoder_cfg);
+    let mut config_signal = use_signal(move || acq_config);
     let mut seen_version = use_signal(move || version);
     let mut sample_count_signal = use_signal(|| 0u64);
     let cursor_sample_pos = use_signal(|| None::<u64>);
 
-    // Persist view and config state across tab switches.
+    // Persist waveform state, decoder config, and acquisition config across tab switches.
     let mut prev_tab = use_signal(|| active_tab);
     if prev_tab() != active_tab {
-        // Save current view and config to the old tab.
+        // Save current state to the old tab.
         {
             let Ok(mut s) = state.try_borrow_mut() else { return prev_frame(); };
             if let Some(old) = s.tabs.get_mut(&prev_tab()) {
-                old.logic_analyzer_mut().view = view_signal.read().clone();
+                old.logic_analyzer_mut().waveform_state = wf_state_signal.read().clone();
+                old.logic_analyzer_mut().decoder_config = decoder_config_signal.read().clone();
                 old.logic_analyzer_mut().acquisition_config = config_signal.read().clone();
             }
         }
-        // Load the new tab's saved view and config.
-        let (new_view, new_config, new_version) = {
+        // Load the new tab's saved state.
+        let (new_ws, new_dc, new_ac, new_version) = {
             let Ok(s) = state.try_borrow() else { return prev_frame(); };
             let la = s.tabs.get(&active_tab).map(|t| t.logic_analyzer());
-            let v = la.map(|l| l.view.clone()).unwrap_or_default();
-            let c = la.map(|l| l.acquisition_config.clone()).unwrap_or_default();
+            let ws = la.map(|l| l.waveform_state.clone()).unwrap_or_default();
+            let dc = la.map(|l| l.decoder_config.clone()).unwrap_or_default();
+            let ac = la.map(|l| l.acquisition_config.clone()).unwrap_or_default();
             let ver = la.map(|l| l.content_version).unwrap_or(0);
-            (v, c, ver)
+            (ws, dc, ac, ver)
         };
-        view_signal.set(new_view);
-        config_signal.set(new_config);
+        wf_state_signal.set(new_ws);
+        decoder_config_signal.set(new_dc);
+        config_signal.set(new_ac);
         seen_version.set(new_version);
         prev_tab.set(active_tab);
     } else {
@@ -106,12 +138,14 @@ pub fn DeviceView(data_version: Signal<u64>) -> Element {
             let current_version = active.logic_analyzer().content_version;
             if current_version != seen_version() {
                 // Content was replaced (device switch) — load fresh state.
-                view_signal.set(active.logic_analyzer().view.clone());
+                wf_state_signal.set(active.logic_analyzer().waveform_state.clone());
+                decoder_config_signal.set(active.logic_analyzer().decoder_config.clone());
                 config_signal.set(active.logic_analyzer().acquisition_config.clone());
                 seen_version.set(current_version);
             } else {
                 // Content unchanged — persist UI edits back to tab state.
-                active.logic_analyzer_mut().view = view_signal.read().clone();
+                active.logic_analyzer_mut().waveform_state = wf_state_signal.read().clone();
+                active.logic_analyzer_mut().decoder_config = decoder_config_signal.read().clone();
                 active.logic_analyzer_mut().acquisition_config = config_signal.read().clone();
             }
         }
@@ -133,16 +167,16 @@ pub fn DeviceView(data_version: Signal<u64>) -> Element {
             // Canvas toolbar
             CanvasToolbar {
                 tab_id: active_tab,
-                view: view_signal,
+                wf_state: wf_state_signal,
                 cursor_sample_pos,
                 data_version,
             }
 
-            // Three-panel area: Signal List | Canvas | Decoder Config
+            // Three-panel area: Signal List | Waveform Display | Decoder Config
             div { class: "flex-1 flex overflow-hidden",
                 AcquisitionSetup {
                     config: config_signal,
-                    view: view_signal,
+                    wf_state: wf_state_signal,
                     sample_count: sample_count_signal,
                     on_sample_rate_change: Callback::new(move |hz| {
                         let Ok(mut s) = state.try_borrow_mut() else { return; };
@@ -154,15 +188,18 @@ pub fn DeviceView(data_version: Signal<u64>) -> Element {
                     }),
                 }
                 div { class: "flex-1 overflow-hidden",
-                    WaveformCanvas {
+                    WaveformView {
                         tab_id: active_tab,
                         data_version,
-                        view: view_signal,
+                        wf_state: wf_state_signal,
+                        decoder_config: decoder_config_signal,
                         cursor_sample_pos,
+                        waveform_data,
+                        theme,
                     }
                 }
                 div { class: "w-48 flex-shrink-0 border-l border-zinc-800 bg-zinc-900/50 overflow-y-auto p-2",
-                    DecoderSetup { view: view_signal }
+                    DecoderSetup { decoder_config: decoder_config_signal }
                 }
             }
         }

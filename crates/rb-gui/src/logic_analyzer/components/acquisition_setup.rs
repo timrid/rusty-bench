@@ -1,18 +1,19 @@
 //! Acquisition-setup panel: shows device channels with enable toggles and
-//! sample-rate input. Lives left of the waveform canvas.
+//! sample-rate input. Lives left of the waveform display.
 //!
 //! Receives its data as props (Signals) — no global state lookup.
 
 use dioxus::prelude::*;
 
 use crate::logic_analyzer::acquisition::AcquisitionConfig;
-use crate::logic_analyzer::view::{RowKind, WaveformView};
+use crate::logic_analyzer::waveform_state::row_layout::RowKind;
+use crate::logic_analyzer::waveform_state::WaveformState;
 
 /// Left panel showing channel labels, enable toggles, and sample rate.
 #[component]
 pub fn AcquisitionSetup(
     mut config: Signal<AcquisitionConfig>,
-    mut view: Signal<WaveformView>,
+    mut wf_state: Signal<WaveformState>,
     sample_count: Signal<u64>,
     on_sample_rate_change: Callback<f64>,
 ) -> Element {
@@ -87,7 +88,7 @@ pub fn AcquisitionSetup(
                 for (i, name) in analog_channels.iter().map(|ch| &ch.name).enumerate() {
                     {
                         let is_enabled = analog_enabled.get(i).copied().unwrap_or(true);
-                        let mut view = view;
+                        let mut wf_state = wf_state;
                         let mut config = config;
                         let i = i;
                         rsx! {
@@ -101,12 +102,7 @@ pub fn AcquisitionSetup(
                                     evt.prevent_default();
                                     evt.stop_propagation();
                                     // Toggle display visibility.
-                                    let mut v = view.write();
-                                    if let Some(row) = v.rows.iter_mut()
-                                        .find(|r| matches!(r.kind, RowKind::Analog) && r.channel_index == i)
-                                    {
-                                        row.visible = !row.visible;
-                                    }
+                                    wf_state.write().row_layout.toggle_row_visible_by_kind(RowKind::Analog, i);
                                     // Toggle acquisition config.
                                     if let Some(en) = config.write().analog_enabled.get_mut(i) {
                                         *en = !*en;
@@ -134,7 +130,7 @@ pub fn AcquisitionSetup(
                 for (i, name) in digital_channels.iter().map(|ch| &ch.name).enumerate() {
                     {
                         let is_enabled = digital_enabled.get(i).copied().unwrap_or(true);
-                        let mut view = view;
+                        let mut wf_state = wf_state;
                         let mut config = config;
                         let i = i;
                         rsx! {
@@ -147,12 +143,7 @@ pub fn AcquisitionSetup(
                                 oncontextmenu: move |evt| {
                                     evt.prevent_default();
                                     evt.stop_propagation();
-                                    let mut v = view.write();
-                                    if let Some(row) = v.rows.iter_mut()
-                                        .find(|r| matches!(r.kind, RowKind::Digital) && r.channel_index == i)
-                                    {
-                                        row.visible = !row.visible;
-                                    }
+                                    wf_state.write().row_layout.toggle_row_visible_by_kind(RowKind::Digital, i);
                                     if let Some(en) = config.write().digital_enabled.get_mut(i) {
                                         *en = !*en;
                                     }
