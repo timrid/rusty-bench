@@ -1,0 +1,20 @@
+[project]
+name = "rusty-bench-tests"
+version = "0.1.0"
+description = "E2E tests for rusty-bench using pytest-playwright"
+requires-python = ">=3.10"
+dependencies = [
+    "pytest>=8.0",
+    "pytest-playwright>=0.7",
+    "playwright>=1.52",
+    "pytest-base-url>=2.0",
+    "requests>=2.28",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests_gui"]
+addopts = [
+    "--strict-markers",
+    "--base-url=http://127.0.0.1:9990",
+    "--headed",
+]

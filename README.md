@@ -56,36 +56,35 @@ cargo test -p rb-gui -- waveform --nocapture
 ## End-to-End Tests
 
 The GUI has a [Playwright](https://playwright.dev/)-based E2E test suite that runs
-against the web target (`dx serve --platform web`).
+against the web target (`dx serve --platform web`). Tests are written in Python with
+[pytest-playwright](https://playwright.dev/python/) and managed by [uv](https://docs.astral.sh/uv/).
 
 ### Prerequisites
 
-- **Node.js** ≥ 18 and **npm**
+- **uv** ([install](https://docs.astral.sh/uv/getting-started/installation/))
 - Install Playwright browsers (one-time):
   ```sh
-  cd crates/rb-gui
-  npx playwright install chromium
+  uv run playwright install chromium
   ```
 
 ### Running the tests
 
 ```sh
-# Install JS dependencies (one-time)
-cd crates/rb-gui
-npm install
-
 # Run all E2E tests (starts dx serve automatically)
-npm run test:e2e
+uv run pytest
 
-# Run with Playwright UI (watch mode)
-npm run test:e2e:ui
+# Run with visible browser
+uv run pytest --headed
+
+# Run a specific test
+uv run pytest -k "test_theme_toggle"
 
 # Show the HTML report after a run
-npx playwright show-report
+uv run playwright show-report
 ```
 
 The first run builds the WASM artifact, which takes several minutes. Subsequent
-runs reuse the dev server (`reuseExistingServer` in CI mode).
+runs reuse an already-running dev server.
 
 ### CI mode
 
@@ -97,8 +96,11 @@ long-lived server:
 dx run --force-sequential --web --addr 127.0.0.1 --port 9990 --release
 
 # Run tests against it (in another terminal)
-cd crates/rb-gui && npx playwright test
+uv run pytest
 ```
+
+Set `CI=1` to force the test suite to start its own `dx serve` instance instead
+of reusing an existing one.
 
 
 

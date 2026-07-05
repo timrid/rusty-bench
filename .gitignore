@@ -11,7 +11,14 @@ crates/rb-gui/assets/tailwind.css
 # Trunk web build output
 dist/
 
+# Python
+.venv/
+__pycache__/
+.pytest_cache/
+uv.lock
+
 # Playwright
 test-results/
 playwright-report/
 playwright/.cache/
+.playwright-cli/
