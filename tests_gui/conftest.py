@@ -25,7 +25,7 @@ def _is_server_ready(url: str, timeout: int = 600) -> bool:
     return False
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="session", autouse=True)
 def web_server():
     """Start the Dioxus dev-server once per test session."""
     base_url = "http://127.0.0.1:9990"
