@@ -1,7 +1,7 @@
 //! Tests for the `decode` subcommand.
 
-#[test]
-fn decode_stub_returns_info_message() {
+#[tokio::test]
+async fn decode_stub_returns_info_message() {
     let mut out = Vec::new();
     rb_cli::run_decode(
         std::path::Path::new("test.rbc"),

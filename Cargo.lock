@@ -4665,6 +4665,7 @@ dependencies = [
  "rb-model",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

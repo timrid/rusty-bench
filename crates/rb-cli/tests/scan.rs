@@ -1,7 +1,7 @@
 //! Tests for the `scan` subcommand.
 
-#[test]
-fn scan_finds_demo_device() {
+#[tokio::test]
+async fn scan_finds_demo_device() {
     let mut out = Vec::new();
     rb_cli::run_scan(&mut out, false).unwrap();
     let s = String::from_utf8(out).unwrap();
@@ -12,8 +12,8 @@ fn scan_finds_demo_device() {
     assert!(s.contains("Demo Device"), "missing model");
 }
 
-#[test]
-fn scan_json_output_is_valid() {
+#[tokio::test]
+async fn scan_json_output_is_valid() {
     let mut out = Vec::new();
     rb_cli::run_scan(&mut out, true).unwrap();
     let s = String::from_utf8(out).unwrap();

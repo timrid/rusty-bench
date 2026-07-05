@@ -1,7 +1,7 @@
 //! Tests for the `info` subcommand.
 
-#[test]
-fn info_prints_capabilities() {
+#[tokio::test]
+async fn info_prints_capabilities() {
     let mut out = Vec::new();
     rb_cli::run_info("demo:0", &mut out, false).unwrap();
     let s = String::from_utf8(out).unwrap();
@@ -14,8 +14,8 @@ fn info_prints_capabilities() {
     assert!(s.contains("1000000"), "missing sample rate");
 }
 
-#[test]
-fn info_json_includes_all_capabilities() {
+#[tokio::test]
+async fn info_json_includes_all_capabilities() {
     let mut out = Vec::new();
     rb_cli::run_info("demo:0", &mut out, true).unwrap();
     let s = String::from_utf8(out).unwrap();
