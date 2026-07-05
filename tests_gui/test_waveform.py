@@ -221,3 +221,241 @@ def test_row_height_never_below_minimum(page: Page) -> None:
     assert new_box["height"] >= 10.0, (
         f"Row height below minimum: {new_box['height']:.1f} px (expected ≥ 10)"
     )
+
+
+# ---------------------------------------------------------------------------
+# Row Reorder helpers
+# ---------------------------------------------------------------------------
+
+def get_row_labels(page: Page):
+    """Return all visible row label elements (draggable rows)."""
+    return (
+        page.locator('[id^="labels-tab-"]').first.locator("div.cursor-grab").all()
+    )
+
+
+def get_amber_indicator(page: Page):
+    """Return the amber insertion line, if visible.
+
+    Can appear as:
+    - A ``div.z-20.pointer-events-none`` with ``background: #f59e0b``
+    - A divider with class ``bg-amber-400``
+    """
+    labels = page.locator('[id^="labels-tab-"]').first
+
+    top_edge = labels.locator("div.z-20.pointer-events-none")
+    if top_edge.count() > 0:
+        return top_edge.first
+
+    divider = labels.locator("div.bg-amber-400")
+    if divider.count() > 0:
+        return divider.first
+
+    return None
+
+
+def get_row_label_texts(page: Page) -> list[str]:
+    """Return the visible text of each row label in top-to-bottom order."""
+    labels = get_row_labels(page)
+    return [
+        (lbl.inner_text() or "").strip() for lbl in labels
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Row Reorder Tests
+# ---------------------------------------------------------------------------
+
+def test_reorder_drag_shows_insert_indicator(page: Page) -> None:
+    """Dragging a row label shows an amber insertion line."""
+    ensure_waveform_visible(page)
+
+    labels = get_row_labels(page)
+    assert len(labels) >= 2, (
+        "Need at least 2 rows to test reorder, "
+        f"got {len(labels)}"
+    )
+
+    first_label = labels[0]
+    first_box = first_label.bounding_box()
+    assert first_box is not None
+
+    start_x = first_box["x"] + first_box["width"] / 2
+    start_y = first_box["y"] + first_box["height"] / 2
+
+    # Start dragging the first label downward
+    page.mouse.move(start_x, start_y)
+    page.mouse.down()
+    page.mouse.move(start_x, start_y + 60, steps=5)
+    page.wait_for_timeout(200)
+
+    # The amber indicator should appear
+    indicator = get_amber_indicator(page)
+    assert indicator is not None, (
+        "Expected amber insertion indicator to be visible during drag"
+    )
+
+    # Clean up: release the drag
+    page.mouse.up()
+    page.wait_for_timeout(200)
+
+
+def test_reorder_drop_moves_row(page: Page) -> None:
+    """Dropping a dragged label reorders the rows in the label panel."""
+    ensure_waveform_visible(page)
+
+    labels = get_row_labels(page)
+    assert len(labels) >= 2, (
+        "Need at least 2 rows to test reorder, "
+        f"got {len(labels)}"
+    )
+
+    # Record the initial order
+    initial_texts = get_row_label_texts(page)
+    assert len(initial_texts) >= 2
+
+    # Drag the first label down past the second
+    first_label = labels[0]
+    second_label = labels[1]
+
+    first_box = first_label.bounding_box()
+    second_box = second_label.bounding_box()
+    assert first_box is not None
+    assert second_box is not None
+
+    start_x = first_box["x"] + first_box["width"] / 2
+    start_y = first_box["y"] + first_box["height"] / 2
+    target_y = second_box["y"] + second_box["height"] + 10  # below second row
+
+    page.mouse.move(start_x, start_y)
+    page.mouse.down()
+    page.mouse.move(start_x, target_y, steps=10)
+    page.mouse.up()
+    page.wait_for_timeout(300)
+
+    # The first and second labels should have swapped
+    new_texts = get_row_label_texts(page)
+    assert len(new_texts) >= 2
+
+    assert new_texts[0] == initial_texts[1], (
+        f"Expected second row '{initial_texts[1]}' to become first, "
+        f"but first is '{new_texts[0]}'. Full order: {new_texts}"
+    )
+    assert new_texts[1] == initial_texts[0], (
+        f"Expected first row '{initial_texts[0]}' to become second, "
+        f"but second is '{new_texts[1]}'. Full order: {new_texts}"
+    )
+
+
+def test_reorder_indicator_disappears_after_mouseup(page: Page) -> None:
+    """The amber insertion line is removed after the drag completes."""
+    ensure_waveform_visible(page)
+
+    labels = get_row_labels(page)
+    assert len(labels) >= 2
+
+    first_label = labels[0]
+    first_box = first_label.bounding_box()
+    assert first_box is not None
+
+    start_x = first_box["x"] + first_box["width"] / 2
+    start_y = first_box["y"] + first_box["height"] / 2
+
+    # Drag down to trigger the indicator
+    page.mouse.move(start_x, start_y)
+    page.mouse.down()
+    page.mouse.move(start_x, start_y + 80, steps=5)
+    page.wait_for_timeout(200)
+
+    # Indicator should be present during drag
+    indicator = get_amber_indicator(page)
+    assert indicator is not None, "Expected indicator during drag"
+
+    # Release the mouse
+    page.mouse.up()
+    page.wait_for_timeout(300)
+
+    # Indicator should be gone
+    indicator = get_amber_indicator(page)
+    assert indicator is None, (
+        "Amber insertion indicator should be removed after mouse up"
+    )
+
+
+def test_reorder_label_not_permanently_grayed(page: Page) -> None:
+    """After drag completes (even outside label panel), no label stays
+    permanently grayed out (opacity-50)."""
+    ensure_waveform_visible(page)
+
+    labels = get_row_labels(page)
+    assert len(labels) >= 2
+
+    first_label = labels[0]
+    first_box = first_label.bounding_box()
+    assert first_box is not None
+
+    start_x = first_box["x"] + first_box["width"] / 2
+    start_y = first_box["y"] + first_box["height"] / 2
+
+    # Drag to the right (into the canvas area) and release there
+    page.mouse.move(start_x, start_y)
+    page.mouse.down()
+    # Move horizontally into the canvas area
+    page.mouse.move(start_x + 200, start_y + 200, steps=10)
+    page.mouse.up()
+    page.wait_for_timeout(300)
+
+    # All visible labels should NOT have opacity-50
+    for i, lbl in enumerate(get_row_labels(page)):
+        classes = lbl.get_attribute("class") or ""
+        assert "opacity-50" not in classes, (
+            f"Label {i} still has opacity-50 after drag completed. "
+            f"Classes: {classes}"
+        )
+
+
+def test_reorder_insert_at_top(page: Page) -> None:
+    """Dragging the last row to the very top shows the top-edge indicator
+    and reorders correctly."""
+    ensure_waveform_visible(page)
+
+    labels = get_row_labels(page)
+    assert len(labels) >= 2
+
+    initial_texts = get_row_label_texts(page)
+    last_label = labels[-1]
+    first_label = labels[0]
+
+    last_box = last_label.bounding_box()
+    first_box = first_label.bounding_box()
+    assert last_box is not None
+    assert first_box is not None
+
+    start_x = last_box["x"] + last_box["width"] / 2
+    start_y = last_box["y"] + last_box["height"] / 2
+    # Target above the first label
+    target_y = first_box["y"] - 5
+
+    page.mouse.move(start_x, start_y)
+    page.mouse.down()
+    page.mouse.move(start_x, target_y, steps=10)
+    page.wait_for_timeout(200)
+
+    # Top-edge indicator should be visible
+    top_edge = (
+        page.locator('[id^="labels-tab-"]')
+        .first.locator("div.z-20.pointer-events-none")
+    )
+    assert top_edge.count() > 0, (
+        "Expected top-edge amber indicator when dragging above first row"
+    )
+
+    page.mouse.up()
+    page.wait_for_timeout(300)
+
+    new_texts = get_row_label_texts(page)
+    # Last row should now be first
+    assert new_texts[0] == initial_texts[-1], (
+        f"Expected last row '{initial_texts[-1]}' to move to top. "
+        f"Order: {new_texts}"
+    )

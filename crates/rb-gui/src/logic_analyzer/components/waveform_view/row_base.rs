@@ -227,9 +227,10 @@ impl RowReorderState {
     }
 
     /// Cancel on mouse-leave without committing.
-    pub fn cancel(&mut self) {
+    pub fn cancel(&mut self, mut data_version: Signal<u64>) {
         self.drag_row.set(None);
         self.insert_at.set(None);
+        data_version += 1;
     }
 
     /// Whether any reorder is currently in progress.

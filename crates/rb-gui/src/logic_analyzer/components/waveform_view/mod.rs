@@ -296,6 +296,8 @@ pub fn WaveformView(
                     let dragging_divider = dragging_divider;
                     let mut wf_state = wf_state;
                     let mut data_version = data_version;
+                    let mut reorder = reorder;
+                    let scroll_y = scroll_y;
                     move |evt| {
                         if dragging_divider() {
                             let dx = evt.data().coordinates().page().x - divider_start_x();
@@ -303,16 +305,33 @@ pub fn WaveformView(
                             label_width.set(new_w);
                             wf_state.write().row_layout.set_label_width(new_w);
                             data_version += 1;
+                        } else if reorder.is_active() {
+                            let coords = evt.data().coordinates();
+                            // element().y is relative to the body div; add scroll offset
+                            // to get the position relative to the row area.
+                            let adjusted_y = coords.element().y + scroll_y();
+                            reorder.handle_mousemove(adjusted_y, 0.0, wf_state);
                         }
                     }
                 },
                 onmouseup: {
                     let mut dragging_divider = dragging_divider;
-                    move |_| { dragging_divider.set(false); }
+                    let mut reorder = reorder;
+                    let wf_state = wf_state;
+                    let data_version = data_version;
+                    move |_| {
+                        dragging_divider.set(false);
+                        reorder.commit(wf_state, data_version);
+                    }
                 },
                 onmouseleave: {
                     let mut dragging_divider = dragging_divider;
-                    move |_| { dragging_divider.set(false); }
+                    let mut reorder = reorder;
+                    let data_version = data_version;
+                    move |_| {
+                        dragging_divider.set(false);
+                        reorder.cancel(data_version);
+                    }
                 },
 
                 // ── LEFT PANEL: labels ───────────────────────────────
@@ -332,38 +351,28 @@ pub fn WaveformView(
                     },
                     onmousemove: {
                         let mut resize = resize;
-                        let mut reorder = reorder;
-                        let scroll_y = scroll_y;
                         let wf_state = wf_state;
                         let data_version = data_version;
                         move |evt| {
                             if resize.is_active() {
                                 resize.handle_mousemove(evt.data().coordinates().page().y, wf_state, data_version);
-                            } else if reorder.is_active() {
-                                let el_y = evt.data().coordinates().element().y;
-                                let adjusted_y = el_y + scroll_y();
-                                reorder.handle_mousemove(adjusted_y, 0.0, wf_state);
                             }
                         }
                     },
                     onmouseup: {
                         let mut resize = resize;
-                        let mut reorder = reorder;
                         let wf_state = wf_state;
                         let data_version = data_version;
                         move |_| {
                             resize.commit(wf_state, data_version);
-                            reorder.commit(wf_state, data_version);
                         }
                     },
                     onmouseleave: {
                         let mut resize = resize;
-                        let mut reorder = reorder;
                         let wf_state = wf_state;
                         let data_version = data_version;
                         move |_| {
                             resize.cancel(wf_state, data_version);
-                            reorder.cancel();
                         }
                     },
 
