@@ -157,13 +157,19 @@ pub fn WaveformView(
     let mut sample_count_sig = use_signal(|| sample_count);
     sample_count_sig.set(sample_count);
 
-    // ── Update state ─────────────────────────────────────────────────────
-    {
-        let mut ws = wf_state.write();
-        ws.viewport.clamp_view(sample_count, is_running);
-        let dcc = digital.as_ref().map(|dt| dt.channels().len()).unwrap_or(0);
-        ws.row_layout.rebuild_rows(analog.len(), dcc);
-        // Feed decoder
+    // ── Update state (only when underlying data actually changes) ────────
+    // Guarded by a layout version to avoid re-triggering parent re-renders
+    // on every render, which causes an infinite loop on the web platform.
+    let mut last_layout_ver = use_signal(|| (0usize, 0usize, 0usize));
+    let dcc = digital.as_ref().map(|dt| dt.channels().len()).unwrap_or(0);
+    let layout_ver = (analog.len(), dcc, sample_count);
+    if last_layout_ver() != layout_ver {
+        last_layout_ver.set(layout_ver);
+        {
+            let mut ws = wf_state.write();
+            ws.viewport.clamp_view(sample_count, is_running);
+            ws.row_layout.rebuild_rows(analog.len(), dcc);
+        }
         if let Some(ref dt) = digital {
             decoder_config.write().feed(dt);
         }
