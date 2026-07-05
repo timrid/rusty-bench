@@ -13,8 +13,9 @@
 use std::ops::Range;
 
 use rb_core::DeviceHandle;
-use rb_decode::{Annotation, Decoder, I2cConfig, I2cDecoder, SpiConfig, SpiDecoder, UartConfig, UartDecoder};
 use rb_model::DigitalTrace;
+
+use crate::logic_analyzer::components::decoder_config::DecoderState;
 
 // ── Row kinds and constants ───────────────────────────────────────────────────
 
@@ -50,9 +51,10 @@ pub const MARKER_BAR_H: f64 = 20.0;
 /// Fixed width of the label area on the left side of each Row.
 pub const LABEL_W: f64 = 36.0;
 
-/// Returns the total Row height (signal area + 2× measurement zones + divider).
+/// Returns the Row height (signal area + 2× measurement zones).
+/// The divider between rows is rendered as a separate element.
 pub fn row_total_height(signal_h: f64) -> f64 {
-    signal_h + 2.0 * MEASUREMENT_ZONE_H + DIVIDER_H
+    signal_h + 2.0 * MEASUREMENT_ZONE_H
 }
 
 // ── Row descriptor ────────────────────────────────────────────────────────────
@@ -82,7 +84,7 @@ impl RowDescriptor {
             return 0.0;
         }
         match self.kind {
-            RowKind::Decoder => self.signal_height_px + DIVIDER_H,
+            RowKind::Decoder => self.signal_height_px,
             _ => row_total_height(self.signal_height_px),
         }
     }
@@ -171,6 +173,8 @@ pub struct WaveformView {
     pub rows: Vec<RowDescriptor>,
     /// Whether the row list needs to be rebuilt from device channels.
     pub rows_dirty: bool,
+    /// Width of the left label panel in pixels (default [`LABEL_W`]).
+    pub label_width: f64,
 
     // ── Markers ───────────────────────────────────────────────────────────────
     pub markers: Vec<TimeMarker>,
@@ -186,27 +190,7 @@ pub struct WaveformView {
     pub scroll_y: f64,
 
     // ── Decoder state ─────────────────────────────────────────────────────────
-    pub decoder_kind: DecoderKind,
-    /// Rebuilt on demand; not Clone so we reconstruct from config.
-    #[allow(clippy::type_complexity)]
-    decoder: Option<Box<dyn Decoder>>,
-    pub annotations: Vec<Annotation>,
-    /// How many digital-store words have been fed to the decoder so far.
-    decoded_up_to: usize,
-    /// When `true`, the decoder is rebuilt and all annotations are cleared on
-    /// the next update (triggered by kind or config changes).
-    pub decoder_dirty: bool,
-
-    // ── Per-decoder config ────────────────────────────────────────────────────
-    pub uart_baud: u32,
-    pub uart_rx_bit: u8,
-    pub i2c_scl_bit: u8,
-    pub i2c_sda_bit: u8,
-    pub spi_mode: u8,
-    pub spi_clk_bit: u8,
-    pub spi_mosi_bit: u8,
-    pub spi_miso_bit: u8,
-    pub spi_cs_bit: u8,
+    pub decoder: DecoderState,
 }
 
 // Manual Clone because `Box<dyn Decoder>` isn't Clone.
@@ -218,26 +202,14 @@ impl Clone for WaveformView {
             auto_scroll: self.auto_scroll,
             rows: self.rows.clone(),
             rows_dirty: true,
+            label_width: self.label_width,
             markers: self.markers.clone(),
             marker_pairs: self.marker_pairs.clone(),
             next_marker_id: self.next_marker_id,
             next_pair_id: self.next_pair_id,
             cursor: self.cursor.clone(),
             scroll_y: self.scroll_y,
-            decoder_kind: self.decoder_kind,
-            decoder: None, // rebuilt on demand
-            annotations: self.annotations.clone(),
-            decoded_up_to: 0,
-            decoder_dirty: true, // force rebuild
-            uart_baud: self.uart_baud,
-            uart_rx_bit: self.uart_rx_bit,
-            i2c_scl_bit: self.i2c_scl_bit,
-            i2c_sda_bit: self.i2c_sda_bit,
-            spi_mode: self.spi_mode,
-            spi_clk_bit: self.spi_clk_bit,
-            spi_mosi_bit: self.spi_mosi_bit,
-            spi_miso_bit: self.spi_miso_bit,
-            spi_cs_bit: self.spi_cs_bit,
+            decoder: self.decoder.clone(),
         }
     }
 }
@@ -250,26 +222,14 @@ impl Default for WaveformView {
             auto_scroll: true,
             rows: Vec::new(),
             rows_dirty: true,
+            label_width: LABEL_W,
             markers: Vec::new(),
             marker_pairs: Vec::new(),
             next_marker_id: 0,
             next_pair_id: 0,
             cursor: None,
             scroll_y: 0.0,
-            decoder_kind: DecoderKind::None,
-            decoder: None,
-            annotations: Vec::new(),
-            decoded_up_to: 0,
-            decoder_dirty: false,
-            uart_baud: 115_200,
-            uart_rx_bit: 0,
-            i2c_scl_bit: 0,
-            i2c_sda_bit: 1,
-            spi_mode: 0,
-            spi_clk_bit: 0,
-            spi_mosi_bit: 1,
-            spi_miso_bit: 2,
-            spi_cs_bit: 3,
+            decoder: DecoderState::default(),
         }
     }
 }
@@ -335,6 +295,11 @@ impl WaveformView {
         }
     }
 
+    /// Set the width of the left label panel in pixels.
+    pub fn set_label_width(&mut self, new_width_px: f64) {
+        self.label_width = new_width_px.clamp(20.0, 200.0);
+    }
+
     /// Toggle visibility of a Row.
     pub fn toggle_row_visible(&mut self, row_index: usize) {
         if let Some(row) = self.rows.get_mut(row_index) {
@@ -342,35 +307,77 @@ impl WaveformView {
         }
     }
 
-    /// Compute the total height of all visible Rows in pixels.
+    /// Move a row from `from` index to `to` index.
+    /// `to` is the 0-based position in the array BEFORE removal.
+    /// After removal, elements at indices > `from` shift left, so when
+    /// `to > from` we insert at `to - 1`.
+    /// Marks rows as dirty so the next `rebuild_rows` call re-indexes channels.
+    pub fn move_row(&mut self, from: usize, to: usize) {
+        if from < self.rows.len() && to <= self.rows.len() && from != to {
+            let row = self.rows.remove(from);
+            let insert_pos = if to > from { to - 1 } else { to };
+            self.rows.insert(insert_pos, row);
+            self.rows_dirty = true;
+        }
+    }
+
+    /// Compute the total height of all visible Rows plus dividers between them.
     pub fn total_rows_height(&self) -> f64 {
-        self.rows.iter().map(|r| r.total_height()).sum()
+        let visible_count = self.rows.iter().filter(|r| r.visible).count();
+        if visible_count == 0 {
+            return 0.0;
+        }
+        let row_sum: f64 = self.rows.iter().filter(|r| r.visible).map(|r| r.total_height()).sum();
+        row_sum + (visible_count - 1) as f64 * DIVIDER_H
     }
 
     /// Find the Row index at a given vertical pixel offset (relative to top of
     /// the row area, below Time Ruler + Marker Bar).
+    /// Dividers between rows are treated as belonging to the row **below**
+    /// (i.e. a click on the divider after row i returns i + 1).
     pub fn row_at_y(&self, y_px: f64) -> Option<usize> {
         let mut offset = 0.0;
         for (i, row) in self.rows.iter().enumerate() {
+            if !row.visible {
+                continue;
+            }
             let h = row.total_height();
             if h <= 0.0 {
                 continue;
             }
+            // Row body.
             if y_px >= offset && y_px < offset + h {
                 return Some(i);
             }
             offset += h;
+            // Divider zone (except after the last visible row).
+            let has_next_visible = self.rows[i + 1..].iter().any(|r| r.visible);
+            if has_next_visible {
+                if y_px >= offset && y_px < offset + DIVIDER_H {
+                    return Some(i + 1);
+                }
+                offset += DIVIDER_H;
+            }
         }
         None
     }
 
-    /// Get the Y offset of a Row's top edge (relative to top of row area).
+    /// Get the Y offset of a Row's top edge (relative to top of row area),
+    /// accounting for dividers between visible rows.
     pub fn row_y_offset(&self, row_index: usize) -> f64 {
-        self.rows
-            .iter()
-            .take(row_index)
-            .map(|r| r.total_height())
-            .sum()
+        let mut offset = 0.0;
+        for (i, row) in self.rows.iter().enumerate().take(row_index) {
+            if !row.visible {
+                continue;
+            }
+            offset += row.total_height();
+            // Add divider if there is another visible row after this one.
+            let has_next_visible = self.rows[i + 1..].iter().any(|r| r.visible);
+            if has_next_visible {
+                offset += DIVIDER_H;
+            }
+        }
+        offset
     }
 
     /// Returns `true` if the Row at `row_index` is visible and has the
@@ -475,51 +482,11 @@ impl WaveformView {
         self.scroll_y = (self.scroll_y + delta_px).clamp(0.0, max_scroll);
     }
 
-    // ── Decoder ───────────────────────────────────────────────────────────────
+    // ── Decoder (delegates to DecoderState) ────────────────────────────────────
 
-    /// Rebuilds the decoder from the current kind + config, clearing cached
-    /// annotations. Called when the user changes decoder kind or parameters.
-    pub fn rebuild_decoder(&mut self) {
-        self.decoder = match self.decoder_kind {
-            DecoderKind::None => None,
-            DecoderKind::Uart => Some(Box::new(UartDecoder::new(UartConfig {
-                rx_bit: self.uart_rx_bit,
-                baud_rate: self.uart_baud,
-                ..Default::default()
-            }))),
-            DecoderKind::I2c => Some(Box::new(I2cDecoder::new(I2cConfig {
-                scl_bit: self.i2c_scl_bit,
-                sda_bit: self.i2c_sda_bit,
-            }))),
-            DecoderKind::Spi => Some(Box::new(SpiDecoder::new(SpiConfig {
-                clk_bit: self.spi_clk_bit,
-                mosi_bit: self.spi_mosi_bit,
-                miso_bit: self.spi_miso_bit,
-                cs_bit: self.spi_cs_bit,
-                mode: self.spi_mode,
-                ..Default::default()
-            }))),
-        };
-        self.annotations.clear();
-        self.decoded_up_to = 0;
-        self.decoder_dirty = false;
-    }
-
-    /// Feed new digital samples to the decoder and return any new annotations.
-    /// Call this before reading `self.annotations`.
+    /// Feed new digital samples to the decoder.
     pub fn feed_decoder(&mut self, dt: &DigitalTrace) {
-        if self.decoder_dirty {
-            self.rebuild_decoder();
-        }
-        if let Some(dec) = &mut self.decoder {
-            let words = dt.store().words();
-            let rate = dt.timebase().sample_rate_hz();
-            if self.decoded_up_to < words.len() {
-                let new_anns = dec.feed(&words[self.decoded_up_to..], self.decoded_up_to, rate);
-                self.annotations.extend(new_anns);
-                self.decoded_up_to = words.len();
-            }
-        }
+        self.decoder.feed(dt);
     }
 
     /// Clamp the view window to valid bounds and advance if auto-scrolling.
@@ -573,11 +540,6 @@ impl WaveformView {
     /// Update decoder config based on handle's digital trace.
     /// Call after `clamp_view` to ensure decoder has latest data.
     pub fn update_decoder(&mut self, handle: &DeviceHandle) {
-        if self.decoder_dirty {
-            self.rebuild_decoder();
-        }
-        if let Some(dt) = handle.digital_trace() {
-            self.feed_decoder(dt);
-        }
+        self.decoder.update_from_handle(handle);
     }
 }

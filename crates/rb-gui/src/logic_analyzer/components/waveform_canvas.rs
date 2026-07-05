@@ -10,6 +10,9 @@ use rb_core::AcquisitionState;
 use rb_decode::AnnotationKind;
 use rb_model::AnalogTrace;
 
+use crate::logic_analyzer::components::interactions::{
+    use_canvas_pan, use_row_reorder, use_row_resize,
+};
 use crate::logic_analyzer::control;
 use crate::logic_analyzer::view::{
     RowKind, TimeMarker, WaveformView, DIVIDER_H, LABEL_W,
@@ -128,7 +131,7 @@ pub fn WaveformCanvas(
         v.clamp_view(sample_count, is_running);
         let dcc = digital.as_ref().map(|dt| dt.channels().len()).unwrap_or(0);
         v.rebuild_rows(analog.len(), dcc);
-        if let Some(ref dt) = digital { v.feed_decoder(dt); }
+        if let Some(ref dt) = digital { v.decoder.feed(dt); }
     }
     { let mut s = state.borrow_mut(); if let Some(tab) = s.tabs.get_mut(&tab_id) { tab.logic_analyzer_mut().view = view.read().clone(); } }
 
@@ -176,22 +179,27 @@ pub fn WaveformCanvas(
             let re = (v.view_start + v.view_samples).min(sc);
             let rl = (re - rs).max(1) as f64;
             let rows_snap = v.rows.clone();
-            let annotations_snap = v.annotations.clone();
+            let annotations_snap = v.decoder.annotations.clone();
             drop(v);
             draw_all_canvases(&short_id, &analog, &digital, &rows_snap, &annotations_snap, rs, re, rl, canvas_width_px(), colors);
         });
     }
 
-    let mut drag_active = use_signal(|| false);
-    // Sample position under the cursor at mousedown (grab point).
-    let mut grab_sample = use_signal(|| None::<u64>);
-    let mut divider_drag_row = use_signal(|| None::<usize>);
-    let mut divider_drag_start_y = use_signal(|| 0.0f64);
-    let mut divider_drag_start_h = use_signal(|| 0.0f64);
-    // Current live height during a divider drag (CSS only, not committed to view).
-    let mut divider_drag_live_h = use_signal(|| None::<f64>);
+    // ── Interaction hooks ────────────────────────────────────────────
+    let mut resize = use_row_resize();
+    let reorder = use_row_reorder();
+    let mut pan = use_canvas_pan();
+    // Scroll offset and container page-offset for coordinate mapping.
+    let scroll_y = use_signal(|| 0.0f64);
+    let container_top = use_signal(|| 0.0f64);
     let mut cursor_px = use_signal(|| None::<f64>);
-    let mut cursor_label = use_signal(|| String::new());
+    let cursor_label = use_signal(|| String::new());
+
+    // ── Label panel width (dynamic, draggable divider) ────────────────
+    let label_width = use_signal(|| view.read().label_width);
+    let dragging_divider = use_signal(|| false);
+    let divider_start_x = use_signal(|| 0.0f64);
+    let divider_start_width = use_signal(|| LABEL_W);
 
     // ── Pre-compute visible row data for rendering ────────────────────────
     let visible_rows: Vec<_> = rows.iter().enumerate()
@@ -229,230 +237,449 @@ pub fn WaveformCanvas(
     // ═══════════════════════════════════════════════════════════════════════
     rsx! {
         div { class: "flex flex-col h-full bg-white dark:bg-[#0d1117]",
-            // ── Time ruler ────────────────────────────────────────────
-            TimeRuler { tick_elements }
-
-            // ── Marker bar ────────────────────────────────────────────
-            MarkerBar {
-                markers: view.read().markers.clone(),
-                range_start,
-                range_len,
+            // ── Top header row: split into left spacer + divider + right content ──
+            div { class: "flex flex-shrink-0",
+                // Left spacer (matches label panel width)
+                div {
+                    class: "flex-shrink-0 bg-gray-100 dark:bg-[#0a0e14] border-b border-gray-200 dark:border-b dark:border-[#30363d]",
+                    style: "width: {label_width()}px; height: {TIME_RULER_H + MARKER_BAR_H}px"
+                }
+                // Vertical divider (header portion, 10px hit-area, 1px line)
+                div {
+                    class: "flex-shrink-0 w-[10px] cursor-col-resize relative group",
+                    style: "height: {TIME_RULER_H + MARKER_BAR_H}px",
+                    onmousedown: {
+                        let label_width = label_width;
+                        let mut divider_start_x = divider_start_x;
+                        let mut divider_start_width = divider_start_width;
+                        let mut dragging_divider = dragging_divider;
+                        move |evt| {
+                            evt.prevent_default();
+                            evt.stop_propagation();
+                            divider_start_x.set(evt.data().coordinates().page().x);
+                            divider_start_width.set(label_width());
+                            dragging_divider.set(true);
+                        }
+                    },
+                    div {
+                        class: "absolute left-1/2 -translate-x-1/2 top-0 bottom-0 w-px bg-gray-300 dark:bg-zinc-600 group-hover:bg-blue-500 transition-colors"
+                    }
+                }
+                // Right content
+                div { class: "flex-1 flex flex-col min-w-0",
+                    TimeRuler { tick_elements: tick_elements.clone() }
+                    MarkerBar {
+                        markers: view.read().markers.clone(),
+                        range_start,
+                        range_len,
+                    }
+                }
             }
 
-            // ── Rows container ────────────────────────────────────────────
+            // ── Body: left panel + vertical divider + right panel ────────────
             div {
-                id: "rows-{short_id}",
-                class: "flex-1 overflow-hidden overflow-y-auto relative",
-                onmounted: {
-                    let mut cw = canvas_width_px;
-                    move |data| {
-                        spawn(async move {
-                            if let Ok(rect) = data.get_client_rect().await {
-                                let w = rect.width();
-                                if w > 0.0 {
-                                    cw.set((w - LABEL_W).max(100.0));
+                class: "flex flex-1 min-h-0",
+                // Divider-drag mousemove lives on the wrapper
+                onmousemove: {
+                    let mut label_width = label_width;
+                    let divider_start_x = divider_start_x;
+                    let divider_start_width = divider_start_width;
+                    let dragging_divider = dragging_divider;
+                    let mut view = view;
+                    let mut data_version = data_version;
+                    move |evt| {
+                        if dragging_divider() {
+                            let dx = evt.data().coordinates().page().x - divider_start_x();
+                            let new_w = (divider_start_width() + dx).clamp(20.0, 200.0);
+                            label_width.set(new_w);
+                            view.write().set_label_width(new_w);
+                            data_version += 1;
+                        }
+                    }
+                },
+                onmouseup: {
+                    let mut dragging_divider = dragging_divider;
+                    move |_| { dragging_divider.set(false); }
+                },
+                onmouseleave: {
+                    let mut dragging_divider = dragging_divider;
+                    move |_| { dragging_divider.set(false); }
+                },
+
+                // ── LEFT PANEL: labels ───────────────────────────────────
+                div {
+                    id: "labels-{short_id}",
+                    class: "flex-shrink-0 overflow-hidden bg-gray-100 dark:bg-[#0a0e14] border-r border-gray-200 dark:border-r dark:border-[#1a1a2e]",
+                    style: "width: {label_width()}px",
+                    onmounted: {
+                        let mut ct = container_top;
+                        move |data| {
+                            spawn(async move {
+                                if let Ok(rect) = data.get_client_rect().await {
+                                    ct.set(rect.origin.y);
+                                }
+                            });
+                        }
+                    },
+                    onmousemove: {
+                        let mut resize = resize;
+                        let mut reorder = reorder;
+                        let _container_top = container_top;
+                        let scroll_y = scroll_y;
+                        let view = view;
+                        let data_version = data_version;
+                        move |evt| {
+                            if resize.is_active() {
+                                resize.handle_mousemove(evt.data().coordinates().page().y, view, data_version);
+                            } else if reorder.is_active() {
+                                let el_y = evt.data().coordinates().element().y;
+                                let adjusted_y = el_y + scroll_y();
+                                reorder.handle_mousemove(adjusted_y, 0.0, view);
+                            }
+                        }
+                    },
+                    onmouseup: {
+                        let mut resize = resize;
+                        let mut reorder = reorder;
+                        let view = view;
+                        let data_version = data_version;
+                        move |_| {
+                            resize.commit(view, data_version);
+                            reorder.commit(view, data_version);
+                        }
+                    },
+                    onmouseleave: {
+                        let mut resize = resize;
+                        let mut reorder = reorder;
+                        let view = view;
+                        let data_version = data_version;
+                        move |_| {
+                            resize.cancel(view, data_version);
+                            reorder.cancel();
+                        }
+                    },
+
+                    // ── Label rows + divider spacers ──────────────────
+                    {
+                        let target = reorder.target_pos();
+                        let num_visible = visible_rows.len();
+
+                        let row_items: Vec<_> = visible_rows.iter().enumerate().map(|(vi, (ri, _sid, lbl, rh, sh))| {
+                            let ri = *ri;
+                            let sh_val = resize.effective_sig_h(ri).unwrap_or(*sh);
+                            let eff_h = if resize.is_resizing(ri) {
+                                sh_val + 2.0 * MEASUREMENT_ZONE_H
+                            } else { *rh };
+                            let reordering = reorder.is_dragging(ri);
+                            let last = vi == num_visible - 1;
+                            let drop_here = target.map(|t| t == ri + 1).unwrap_or(false);
+                            (ri, lbl.clone(), sh_val, eff_h, reordering, last, drop_here)
+                        }).collect();
+
+                        // Extract last row's data before RSX consumes row_items
+                        let last_row_data: Option<(usize, f64)> = row_items.last()
+                            .map(|&(ri, _, sh_val, _, _, _, _)| (ri, sh_val));
+
+                        rsx! {
+                            if target == Some(0) {
+                                div {
+                                    class: "relative z-20 pointer-events-none flex-shrink-0",
+                                    style: "height: 2px; background: #f59e0b; box-shadow: 0 0 4px #f59e0b;"
                                 }
                             }
-                        });
-                    }
-                },
-                onresize: move |evt: Event<dioxus::html::ResizeData>| {
-                    if let Ok(size) = evt.data().get_content_box_size() {
-                        let w = size.width;
-                        if w > 0.0 {
-                            let mut cw = canvas_width_px;
-                            cw.set((w - LABEL_W).max(100.0));
-                        }
-                    }
-                },
-                onwheel: move |evt| {
-                    evt.prevent_default();
-                    let (dx, dy) = match evt.data().delta() {
-                        dioxus::html::geometry::WheelDelta::Pixels(v) => (v.x, v.y),
-                        dioxus::html::geometry::WheelDelta::Lines(v) => (v.x * 20.0, v.y * 20.0),
-                        dioxus::html::geometry::WheelDelta::Pages(v) => (v.x * 200.0, v.y * 200.0),
-                    };
-                    // Horizontal scroll (Shift+Wheel, touchpad) → pan
-                    if dx.abs() > 0.01 {
-                        // Positive dx (scroll right) → show newer data → increase view_start.
-                        // pan() with positive delta_px decreases view_start, so negate.
-                        view.write().pan(-dx as f32, canvas_width_px() as f32, sample_count);
-                    } else {
-                        let factor: f64 = if dy < 0.0 { 0.8 } else { 1.25 };
-                        view.write().zoom(factor, sample_count);
-                    }
-                    data_version += 1;
-                },
-                onmousedown: move |evt| {
-                    let coords = evt.data().coordinates();
-                    let py = coords.page().y;
-                    let el_y = coords.element().y;
-                    let el_x = coords.element().x;
-                    let v = view.read();
-                    if let Some(ri) = v.row_at_y(el_y) {
-                        let rt = v.row_y_offset(ri);
-                        let rh = v.rows[ri].total_height();
-                        if el_y >= rt + rh - DIVIDER_H && el_y < rt + rh {
-                            let sh = v.rows.get(ri).map(|r| r.signal_height_px).unwrap_or(22.0);
-                            drop(v);
-                            divider_drag_row.set(Some(ri));
-                            divider_drag_start_y.set(py);
-                            divider_drag_start_h.set(sh);
-                            return;
-                        }
-                    }
-                    // Grab: remember the sample under the cursor so it
-                    // follows the mouse 1:1 during drag.
-                    let gs = if el_x >= LABEL_W {
-                        let cw = canvas_width_px();
-                        if cw > 0.0 {
-                            let frac = ((el_x - LABEL_W) / cw).clamp(0.0, 1.0);
-                            Some(v.view_start as u64 + (frac * v.view_samples as f64) as u64)
-                        } else { None }
-                    } else { None };
-                    drop(v);
-                    grab_sample.set(gs);
-                    drag_active.set(true);
-                },
-                onmousemove: move |evt| {
-                    let coords = evt.data().coordinates();
-                    let py = coords.page().y;
-                    let cx = coords.element().x;
-                    if let Some(_ri) = divider_drag_row() {
-                        let dy = py - divider_drag_start_y();
-                        let new_h = (divider_drag_start_h() + dy).max(10.0);
-                        divider_drag_live_h.set(Some(new_h));
-                        return;
-                    }
-                    if drag_active() {
-                        if let Some(gs) = grab_sample() {
-                            let mut v = view.write();
-                            let cw = canvas_width_px();
-                            if cw > 0.0 && cx >= LABEL_W {
-                                let frac = ((cx - LABEL_W) / cw).clamp(0.0, 1.0);
-                                let offset = (frac * v.view_samples as f64) as u64;
-                                let new_vs = gs.saturating_sub(offset);
-                                let max_vs = sample_count.saturating_sub(v.view_samples);
-                                v.view_start = (new_vs as usize).min(max_vs);
-                            }
-                            v.auto_scroll = false;
-                        }
-                        data_version += 1;
-                    }
-                    let v = view.read();
-                    let rs = v.view_start;
-                    let re = (v.view_start + v.view_samples).min(sample_count);
-                    let rl = (re - rs).max(1) as f64;
-                    let cw = canvas_width_px();
-                    let sp = if cx >= LABEL_W {
-                        rs as u64 + (((cx - LABEL_W) / cw.max(1.0)).clamp(0.0, 1.0) * rl) as u64
-                    } else { rs as u64 };
-                    drop(v);
-                    cursor_sample_pos.set(Some(sp));
-                    cursor_px.set(Some(cx));
-                    cursor_label.set(fmt_time_ns((sp as f64 / 1_000_000.0) * 1e9));
-                },
-                onmouseup: move |_| {
-                    if let (Some(ri), Some(h)) = (divider_drag_row(), divider_drag_live_h()) {
-                        view.write().set_row_height(ri, h);
-                        data_version += 1;
-                    }
-                    drag_active.set(false);
-                    grab_sample.set(None);
-                    divider_drag_row.set(None);
-                    divider_drag_live_h.set(None);
-                },
-                onmouseleave: move |_| {
-                    // Commit any in-progress resize on leave
-                    if let (Some(ri), Some(h)) = (divider_drag_row(), divider_drag_live_h()) {
-                        view.write().set_row_height(ri, h);
-                        data_version += 1;
-                    }
-                    drag_active.set(false); grab_sample.set(None);
-                    divider_drag_row.set(None); divider_drag_live_h.set(None);
-                    cursor_sample_pos.set(None); cursor_px.set(None);
-                },
 
-                // ── Cursor overlay ────────────────────────────────────
-                CursorLine {
-                    cursor_px,
-                    cursor_label,
-                }
-
-                // ── Signal rows ───────────────────────────────────────
-                for (row_idx_c, signal_id, label_el, row_h, sig_h) in &visible_rows {
-                    {
-                        let row_idx_c = *row_idx_c;
-                        let row_h = *row_h;
-                        let sig_h = if divider_drag_row() == Some(row_idx_c) {
-                            divider_drag_live_h().unwrap_or(*sig_h)
-                        } else { *sig_h };
-                        let effective_row_h = if divider_drag_row() == Some(row_idx_c) {
-                            sig_h + 2.0 * MEASUREMENT_ZONE_H + DIVIDER_H
-                        } else { row_h };
-                        rsx! {
-                            div {
-                                class: "flex relative",
-                                style: "height: {effective_row_h}px",
-                                // Label
+                            for (ri, lbl, sh_val, eff_h, reordering, last, drop_here) in row_items {
+                                // Label cell
                                 div {
-                                    class: "flex-shrink-0 bg-gray-100 border-r border-gray-200 dark:bg-[#0a0e14] dark:border-r dark:border-[#1a1a2e] flex items-center px-1 select-none",
-                                    style: "width: {LABEL_W}px",
-                                    oncontextmenu: {
-                                        let mut view = view;
-                                        let ri = row_idx_c;
+                                    class: "flex items-center px-1 select-none cursor-grab active:cursor-grabbing flex-shrink-0",
+                                    class: if reordering { "opacity-50" },
+                                    style: "height: {eff_h}px",
+                                    onmousedown: {
+                                        let ri = ri;
+                                        let mut reorder = reorder;
                                         move |evt| {
                                             evt.prevent_default();
                                             evt.stop_propagation();
-                                            if let Some(r) = view.write().rows.get_mut(ri) {
-                                                r.visible = !r.visible;
-                                            }
+                                            reorder.begin(ri);
                                         }
                                     },
-                                    {label_el}
+                                    oncontextmenu: {
+                                        let mut view = view;
+                                        let ri = ri;
+                                        move |evt| {
+                                            evt.prevent_default();
+                                            evt.stop_propagation();
+                                            view.write().toggle_row_visible(ri);
+                                        }
+                                    },
+                                    {lbl}
                                 }
-                                // Canvas
-                                canvas {
-                                    id: "{signal_id}",
-                                    class: "flex-1 pointer-events-none",
-                                    style: "height: {sig_h}px; margin-top: {MEASUREMENT_ZONE_H}px; margin-bottom: {MEASUREMENT_ZONE_H}px",
-                                    height: "{sig_h}",
+
+                                // Divider spacer between labels
+                                if !last {
+                                    div {
+                                        class: "relative flex-shrink-0",
+                                        class: if drop_here { "z-20" },
+                                        style: "height: {DIVIDER_H}px",
+                                        div {
+                                            class: if drop_here { "absolute left-0 right-0 bg-amber-400" } else { "absolute left-0 right-0 bg-gray-300/60 dark:bg-zinc-600/40" },
+                                            style: if drop_here { "height: 2px; top: {DIVIDER_H / 2.0}px; box-shadow: 0 0 4px #f59e0b;" } else { "height: 1px; top: {DIVIDER_H / 2.0}px;" },
+                                        }
+                                        div {
+                                            class: "absolute left-0 right-0 cursor-ns-resize group",
+                                            style: "height: {DIVIDER_H}px; top: 0",
+                                            onmousedown: {
+                                                let ri = ri;
+                                                let sh_val = sh_val;
+                                                move |evt| {
+                                                    evt.stop_propagation();
+                                                    resize.begin(ri, sh_val, evt.data().coordinates().page().y);
+                                                }
+                                            },
+                                        }
+                                    }
                                 }
-                                // Divider handle (events handled by parent onmousedown/onmousemove)
+                            }
+
+                            if target == Some(view.read().rows.len()) {
                                 div {
-                                    class: "absolute left-0 right-0 cursor-ns-resize bg-gray-200 hover:bg-gray-400/40 dark:bg-[#21262d] dark:hover:bg-zinc-500/40",
-                                    style: "height: 1px; bottom: 0",
+                                    class: "relative z-20 pointer-events-none flex-shrink-0",
+                                    style: "height: 2px; background: #f59e0b; box-shadow: 0 0 4px #f59e0b;"
+                                }
+                            }
+
+                            // Trailing divider after the last row (resize handle)
+                            if let Some((last_ri, last_sh_val)) = last_row_data {
+                                div {
+                                    class: "relative flex-shrink-0",
+                                    style: "height: {DIVIDER_H}px",
+                                    div {
+                                        class: "absolute left-0 right-0 bg-gray-300/60 dark:bg-zinc-600/40",
+                                        style: "height: 1px; top: {DIVIDER_H / 2.0}px;",
+                                    }
+                                    div {
+                                        class: "absolute left-0 right-0 cursor-ns-resize group",
+                                        style: "height: {DIVIDER_H}px; top: 0",
+                                        onmousedown: {
+                                            let sh_val = last_sh_val;
+                                            move |evt| {
+                                                evt.stop_propagation();
+                                                resize.begin(last_ri, sh_val, evt.data().coordinates().page().y);
+                                            }
+                                        },
+                                    }
                                 }
                             }
                         }
                     }
                 }
 
-                // ── Live toggle ───────────────────────────────────────
+                // ── VERTICAL DIVIDER (10px hit-area, 1px line) ───────────
                 div {
-                    class: "absolute bottom-2 right-2 z-30 select-none",
-                    onmousedown: move |evt| {
-                        evt.stop_propagation();
+                    class: "flex-shrink-0 w-[10px] cursor-col-resize relative group",
+                    onmousedown: {
+                        let label_width = label_width;
+                        let mut divider_start_x = divider_start_x;
+                        let mut divider_start_width = divider_start_width;
+                        let mut dragging_divider = dragging_divider;
+                        move |evt| {
+                            evt.prevent_default();
+                            evt.stop_propagation();
+                            divider_start_x.set(evt.data().coordinates().page().x);
+                            divider_start_width.set(label_width());
+                            dragging_divider.set(true);
+                        }
+                    },
+                    div {
+                        class: "absolute left-1/2 -translate-x-1/2 top-0 bottom-0 w-px bg-gray-300 dark:bg-zinc-600 group-hover:bg-blue-500 transition-colors"
+                    }
+                }
+
+                // ── RIGHT PANEL: canvases ─────────────────────────────────
+                div {
+                    id: "rows-{short_id}",
+                    class: "flex-1 overflow-hidden overflow-y-auto relative min-w-0",
+                    onmounted: {
+                        let mut cw = canvas_width_px;
+                        move |data| {
+                            spawn(async move {
+                                if let Ok(rect) = data.get_client_rect().await {
+                                    let w = rect.width();
+                                    if w > 0.0 {
+                                        cw.set(w.max(100.0));
+                                    }
+                                }
+                            });
+                        }
+                    },
+                    onresize: move |evt: Event<dioxus::html::ResizeData>| {
+                        if let Ok(size) = evt.data().get_content_box_size() {
+                            let w = size.width;
+                            if w > 0.0 {
+                                let mut cw = canvas_width_px;
+                                cw.set(w.max(100.0));
+                            }
+                        }
+                    },
+                    onwheel: move |evt| {
                         evt.prevent_default();
-                        let mut v = view.write();
-                        v.auto_scroll = !v.auto_scroll;
+                        let (dx, dy) = match evt.data().delta() {
+                            dioxus::html::geometry::WheelDelta::Pixels(v) => (v.x, v.y),
+                            dioxus::html::geometry::WheelDelta::Lines(v) => (v.x * 20.0, v.y * 20.0),
+                            dioxus::html::geometry::WheelDelta::Pages(v) => (v.x * 200.0, v.y * 200.0),
+                        };
+                        if dx.abs() > 0.01 {
+                            view.write().pan(-dx as f32, canvas_width_px() as f32, sample_count);
+                        } else {
+                            let factor: f64 = if dy < 0.0 { 0.8 } else { 1.25 };
+                            view.write().zoom(factor, sample_count);
+                        }
                         data_version += 1;
                     },
+                    onscroll: {
+                        let short_id = short_id.clone();
+                        let mut scroll_y = scroll_y;
+                        move |_| {
+                            let id = short_id.clone();
+                            let sid2 = short_id.clone();
+                            spawn(async move {
+                                let js = format!(
+                                    "var r=document.getElementById('rows-{}');var l=document.getElementById('labels-{}');if(l)l.scrollTop=r.scrollTop;r.scrollTop",
+                                    id, sid2
+                                );
+                                let mut eval = dioxus::document::eval(&js);
+                                if let Ok(val) = eval.recv::<f64>().await {
+                                    scroll_y.set(val);
+                                }
+                            });
+                        }
+                    },
+                    onmousedown: move |evt| {
+                        evt.prevent_default();
+                        let coords = evt.data().coordinates();
+                        pan.begin(coords.element().x, canvas_width_px(), view);
+                    },
+                    onmousemove: {
+                        let mut resize = resize;
+                        let mut pan = pan;
+                        let view = view;
+                        let data_version = data_version;
+                        let canvas_width_px = canvas_width_px;
+                        let sample_count = sample_count;
+                        let mut cursor_sample_pos = cursor_sample_pos;
+                        let mut cursor_px = cursor_px;
+                        let mut cursor_label = cursor_label;
+                        move |evt| {
+                            let coords = evt.data().coordinates();
+                            let el_x = coords.element().x;
+
+                            if resize.is_active() {
+                                resize.handle_mousemove(coords.page().y, view, data_version);
+                            } else if pan.is_active() {
+                                pan.handle_mousemove(el_x, canvas_width_px(), view, sample_count, data_version);
+                            }
+
+                            // Cursor line (always update).
+                            let v = view.read();
+                            let rs = v.view_start;
+                            let re = (v.view_start + v.view_samples).min(sample_count);
+                            let rl = (re - rs).max(1) as f64;
+                            let cw = canvas_width_px();
+                            let sp = rs as u64 + ((el_x / cw.max(1.0)).clamp(0.0, 1.0) * rl) as u64;
+                            drop(v);
+                            cursor_sample_pos.set(Some(sp));
+                            cursor_px.set(Some(el_x));
+                            cursor_label.set(fmt_time_ns((sp as f64 / 1_000_000.0) * 1e9));
+                        }
+                    },
+                    onmouseup: move |evt| {
+                        evt.prevent_default();
+                        resize.commit(view, data_version);
+                        pan.end();
+                    },
+                    onmouseleave: move |_| {
+                        resize.cancel(view, data_version);
+                        pan.end();
+                        cursor_sample_pos.set(None);
+                        cursor_px.set(None);
+                    },
+
+                    // ── Cursor overlay ────────────────────────────────────
+                    CursorLine {
+                        cursor_px,
+                        cursor_label,
+                    }
+
+                    // ── Signal rows: canvases + dividers ─────────────────
                     {
-                        let live = view.read().auto_scroll;
-                        let btn_class = if live {
-                            "px-3 py-1 rounded text-[11px] font-medium \
-                             bg-lime-500/20 text-lime-400 border border-lime-500/50 \
-                             cursor-pointer hover:bg-lime-500/30 transition-colors"
-                        } else {
-                            "px-3 py-1 rounded text-[11px] font-medium \
-                             bg-gray-200 text-gray-500 border border-gray-300 \
-                             dark:bg-zinc-700/30 dark:text-zinc-400 dark:border-zinc-600/50 \
-                             cursor-pointer hover:bg-gray-300 dark:hover:bg-zinc-600/30 transition-colors"
-                        };
+                        let num_visible = visible_rows.len();
+                        let row_items: Vec<_> = visible_rows.iter().enumerate().map(|(vi, (ri, sid, _lbl, _rh, sh))| {
+                            let ri = *ri;
+                            let sh_val = resize.effective_sig_h(ri).unwrap_or(*sh);
+                            let last = vi == num_visible - 1;
+                            (ri, sid.clone(), sh_val, last)
+                        }).collect();
+
                         rsx! {
-                            div { class: "{btn_class}",
-                                if live { "\u{25CF} Live" } else { "\u{25CB} Live" }
+                            for (_ri, sid, sh_val, last) in row_items {
+                                canvas {
+                                    id: "{sid}",
+                                    class: "pointer-events-none min-w-0",
+                                    style: "width: 100%; height: {sh_val}px; margin-top: {MEASUREMENT_ZONE_H}px; margin-bottom: {MEASUREMENT_ZONE_H}px",
+                                    width: "100%",
+                                    height: "{sh_val}",
+                                }
+
+                                if !last {
+                                    div {
+                                        class: "relative flex-shrink-0",
+                                        style: "height: {DIVIDER_H}px",
+                                        div {
+                                            class: "absolute left-0 right-0 bg-gray-300/60 dark:bg-zinc-600/40",
+                                            style: "height: 1px; top: {DIVIDER_H / 2.0}px;",
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Trailing divider after the last row (visual only)
+                            div {
+                                class: "relative flex-shrink-0",
+                                style: "height: {DIVIDER_H}px",
+                                div {
+                                    class: "absolute left-0 right-0 bg-gray-300/60 dark:bg-zinc-600/40",
+                                    style: "height: 1px; top: {DIVIDER_H / 2.0}px;",
+                                }
+                            }
+                        }
+                    }
+
+                    // ── Live toggle ───────────────────────────────────────
+                    div {
+                        class: "absolute bottom-2 right-2 z-30 select-none",
+                        onmousedown: move |evt| {
+                            evt.stop_propagation();
+                            evt.prevent_default();
+                            let mut v = view.write();
+                            v.auto_scroll = !v.auto_scroll;
+                            data_version += 1;
+                        },
+                        {
+                            let live = view.read().auto_scroll;
+                            let btn_class = if live {
+                                "px-3 py-1 rounded text-[11px] font-medium \
+                                 bg-lime-500/20 text-lime-400 border border-lime-500/50 \
+                                 cursor-pointer hover:bg-lime-500/30 transition-colors"
+                            } else {
+                                "px-3 py-1 rounded text-[11px] font-medium \
+                                 bg-gray-200 text-gray-500 border border-gray-300 \
+                                 dark:bg-zinc-700/30 dark:text-zinc-400 dark:border-zinc-600/50 \
+                                 cursor-pointer hover:bg-gray-300 dark:hover:bg-zinc-600/30 transition-colors"
+                            };
+                            rsx! {
+                                div { class: "{btn_class}",
+                                    if live { "\u{25CF} Live" } else { "\u{25CB} Live" }
+                                }
                             }
                         }
                     }
@@ -509,18 +736,18 @@ fn TimeRuler(tick_elements: Vec<(f64, String, Vec<f64>)>) -> Element {
                 // Major tick
                 div {
                     class: "absolute top-1/2 bottom-0 border-l border-gray-300 dark:border-[#30363d]",
-                    style: "left: calc({LABEL_W}px + {pct:.2}% * (100% - {LABEL_W}px) / 100%)"
+                    style: "left: {pct:.2}%"
                 }
                 span {
                     class: "absolute text-[9px] text-gray-400 dark:text-[#8b949e]",
-                    style: "left: calc({LABEL_W}px + {pct:.2}% * (100% - {LABEL_W}px) / 100% + 2px); top: 0",
+                    style: "left: calc({pct:.2}% + 2px); top: 0",
                     "{label}"
                 }
                 // Minor ticks
                 for mpct in minor_pcts {
                     div {
                         class: "absolute top-[70%] bottom-0 border-l border-gray-300 dark:border-[#30363d] opacity-50",
-                        style: "left: calc({LABEL_W}px + {mpct:.2}% * (100% - {LABEL_W}px) / 100%)"
+                        style: "left: {mpct:.2}%"
                     }
                 }
             }
@@ -549,7 +776,7 @@ fn MarkerBar(markers: Vec<TimeMarker>, range_start: usize, range_len: f64) -> El
                     rsx! {
                         div {
                             class: "absolute top-0 bottom-0 flex items-center select-none",
-                            style: "left: calc({LABEL_W}px + {pct:.2}% * (100% - {LABEL_W}px) / 100%)",
+                            style: "left: {pct:.2}%",
                             span { class: "text-[9px] text-amber-400", "\u{25C6}" }
                             span { class: "text-[9px] text-amber-400 ml-0.5", "{lbl}" }
                         }

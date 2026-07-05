@@ -60,6 +60,8 @@ rb-canvas = { workspace = true, features = ["png-export"] }
 rb-drivers = { workspace = true, features = ["fx2lafw"] }
 async-trait.workspace = true
 tokio = { workspace = true, features = ["rt", "time"] }
+dioxus-ssr = "0.7"
+pretty_assertions = "1"
 
 [features]
 default = ["desktop", "fx2lafw"]

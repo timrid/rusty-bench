@@ -6,6 +6,7 @@
 pub mod canvas_toolbar;
 pub mod channel_config;
 pub mod decoder_config;
+pub mod interactions;
 pub mod waveform_canvas;
 
 pub use canvas_toolbar::CanvasToolbar;
