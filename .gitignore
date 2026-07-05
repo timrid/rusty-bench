@@ -10,3 +10,8 @@ crates/rb-gui/assets/tailwind.css
 
 # Trunk web build output
 dist/
+
+# Playwright
+test-results/
+playwright-report/
+playwright/.cache/

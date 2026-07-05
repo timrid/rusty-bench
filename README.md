@@ -53,6 +53,55 @@ cargo test -p rb-gui -- waveform
 cargo test -p rb-gui -- waveform --nocapture
 ```
 
+## End-to-End Tests
+
+The GUI has a [Playwright](https://playwright.dev/)-based E2E test suite that runs
+against the web target (`dx serve --platform web`).
+
+### Prerequisites
+
+- **Node.js** ≥ 18 and **npm**
+- Install Playwright browsers (one-time):
+  ```sh
+  cd crates/rb-gui
+  npx playwright install chromium
+  ```
+
+### Running the tests
+
+```sh
+# Install JS dependencies (one-time)
+cd crates/rb-gui
+npm install
+
+# Run all E2E tests (starts dx serve automatically)
+npm run test:e2e
+
+# Run with Playwright UI (watch mode)
+npm run test:e2e:ui
+
+# Show the HTML report after a run
+npx playwright show-report
+```
+
+The first run builds the WASM artifact, which takes several minutes. Subsequent
+runs reuse the dev server (`reuseExistingServer` in CI mode).
+
+### CI mode
+
+In CI, `dx serve` is replaced with a one-shot `dx run` to avoid keeping a
+long-lived server:
+
+```sh
+# Start the server in one-shot mode (builds + serves + exits when done)
+dx run --force-sequential --web --addr 127.0.0.1 --port 9990 --release
+
+# Run tests against it (in another terminal)
+cd crates/rb-gui && npx playwright test
+```
+
+
+
 ## License
 
 MIT — see [`LICENSE`](LICENSE). Drivers and decoders are written clean-room from open
