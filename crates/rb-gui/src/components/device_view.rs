@@ -13,7 +13,7 @@ use dioxus::prelude::*;
 
 use super::app::AppStateRef;
 use crate::logic_analyzer::components::{
-    CanvasToolbar, ChannelConfig, DecoderConfig, WaveformCanvas,
+    AcquisitionSetup, CanvasToolbar, DecoderSetup, WaveformCanvas,
 };
 
 /// The main content view for the active session.
@@ -140,7 +140,7 @@ pub fn DeviceView(data_version: Signal<u64>) -> Element {
 
             // Three-panel area: Signal List | Canvas | Decoder Config
             div { class: "flex-1 flex overflow-hidden",
-                ChannelConfig {
+                AcquisitionSetup {
                     config: config_signal,
                     view: view_signal,
                     sample_count: sample_count_signal,
@@ -162,7 +162,7 @@ pub fn DeviceView(data_version: Signal<u64>) -> Element {
                     }
                 }
                 div { class: "w-48 flex-shrink-0 border-l border-zinc-800 bg-zinc-900/50 overflow-y-auto p-2",
-                    DecoderConfig { view: view_signal }
+                    DecoderSetup { view: view_signal }
                 }
             }
         }

@@ -1,4 +1,4 @@
-//! Channel-config panel: shows device channels with enable toggles and
+//! Acquisition-setup panel: shows device channels with enable toggles and
 //! sample-rate input. Lives left of the waveform canvas.
 //!
 //! Receives its data as props (Signals) — no global state lookup.
@@ -10,7 +10,7 @@ use crate::logic_analyzer::view::{RowKind, WaveformView};
 
 /// Left panel showing channel labels, enable toggles, and sample rate.
 #[component]
-pub fn ChannelConfig(
+pub fn AcquisitionSetup(
     mut config: Signal<AcquisitionConfig>,
     mut view: Signal<WaveformView>,
     sample_count: Signal<u64>,

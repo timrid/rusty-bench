@@ -15,7 +15,7 @@ use std::ops::Range;
 use rb_core::DeviceHandle;
 use rb_model::DigitalTrace;
 
-use crate::logic_analyzer::components::decoder_config::DecoderState;
+use crate::logic_analyzer::components::decoder_setup::DecoderConfig;
 
 // ── Row kinds and constants ───────────────────────────────────────────────────
 
@@ -189,8 +189,8 @@ pub struct WaveformView {
     /// Vertical scroll offset of the row area (below headers) in pixels.
     pub scroll_y: f64,
 
-    // ── Decoder state ─────────────────────────────────────────────────────────
-    pub decoder: DecoderState,
+    // ── Decoder config ────────────────────────────────────────────────────────
+    pub decoder: DecoderConfig,
 }
 
 // Manual Clone because `Box<dyn Decoder>` isn't Clone.
@@ -229,7 +229,7 @@ impl Default for WaveformView {
             next_pair_id: 0,
             cursor: None,
             scroll_y: 0.0,
-            decoder: DecoderState::default(),
+            decoder: DecoderConfig::default(),
         }
     }
 }
@@ -482,7 +482,7 @@ impl WaveformView {
         self.scroll_y = (self.scroll_y + delta_px).clamp(0.0, max_scroll);
     }
 
-    // ── Decoder (delegates to DecoderState) ────────────────────────────────────
+    // ── Decoder (delegates to DecoderConfig) ───────────────────────────────────
 
     /// Feed new digital samples to the decoder.
     pub fn feed_decoder(&mut self, dt: &DigitalTrace) {

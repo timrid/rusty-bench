@@ -1,6 +1,6 @@
-//! Decoder configuration widget: dropdown + per-kind parameter inputs.
+//! Decoder setup widget: dropdown + per-kind parameter inputs.
 //!
-//! [`DecoderState`] owns all decoder-related state (kind, per-protocol
+//! [`DecoderConfig`] owns all decoder-related state (kind, per-protocol
 //! parameters, cached decoder instance, and annotations).  It is stored as a
 //! field on [`WaveformView`].
 
@@ -12,16 +12,16 @@ use rb_model::DigitalTrace;
 
 use crate::logic_analyzer::view::{DecoderKind, WaveformView};
 
-// ── Decoder state ────────────────────────────────────────────────────────────
+// ── Decoder config ────────────────────────────────────────────────────────────
 
-/// All mutable decoder state: protocol selection, per-protocol parameters,
-/// the (non-Clone) decoder instance, and its output annotations.
+/// Configuration for protocol decoding: protocol selection, per-protocol
+/// parameters, the (non-Clone) decoder instance, and its output annotations.
 ///
 /// Lives as `WaveformView::decoder`.
 ///
 /// Manual Clone impl because `Box<dyn Decoder>` isn't Clone — the decoder
 /// is rebuilt on demand after cloning.
-pub struct DecoderState {
+pub struct DecoderConfig {
     /// Which protocol decoder is selected.
     pub kind: DecoderKind,
     /// Rebuilt on demand; skipped by Clone (reconstructed from config).
@@ -47,7 +47,7 @@ pub struct DecoderState {
     pub spi_cs_bit: u8,
 }
 
-impl Default for DecoderState {
+impl Default for DecoderConfig {
     fn default() -> Self {
         Self {
             kind: DecoderKind::None,
@@ -69,7 +69,7 @@ impl Default for DecoderState {
 }
 
 // Manual Clone because `Box<dyn Decoder>` isn't Clone.
-impl Clone for DecoderState {
+impl Clone for DecoderConfig {
     fn clone(&self) -> Self {
         Self {
             kind: self.kind,
@@ -90,7 +90,7 @@ impl Clone for DecoderState {
     }
 }
 
-impl DecoderState {
+impl DecoderConfig {
     /// Rebuild the decoder from the current `kind` + parameters, clearing
     /// cached annotations.
     pub fn rebuild(&mut self) {
@@ -149,7 +149,7 @@ impl DecoderState {
 
 /// Decoder kind selector and per-decoder configuration controls.
 #[component]
-pub fn DecoderConfig(view: Signal<WaveformView>) -> Element {
+pub fn DecoderSetup(view: Signal<WaveformView>) -> Element {
     let v = view.read();
     let kind_label = v.decoder.kind.label().to_string();
     let uart_baud = v.decoder.uart_baud;
