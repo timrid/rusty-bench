@@ -165,7 +165,7 @@ impl RowResizeState {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  RowReorder – label drag reordering
+//  RowReorder – label drag reordering (drag-and-drop)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Manages the row-reorder interaction (dragging a row label).
@@ -173,6 +173,16 @@ impl RowResizeState {
 pub struct RowReorderState {
     drag_row: Signal<Option<usize>>,
     insert_at: Signal<Option<usize>>,
+    /// X offset within the label element where the click happened.
+    click_offset_x: Signal<f64>,
+    /// Y offset within the label element where the click happened.
+    click_offset_y: Signal<f64>,
+    /// Current page-X of the cursor (for positioning the floating label).
+    cursor_page_x: Signal<f64>,
+    /// Current page-Y of the cursor (for positioning the floating label).
+    cursor_page_y: Signal<f64>,
+    /// Total height of the dragged row (for gap visualization).
+    source_row_height: Signal<f64>,
 }
 
 /// Create the reorder-interaction state.  Call once at the top of the component.
@@ -180,31 +190,63 @@ pub fn use_row_reorder() -> RowReorderState {
     RowReorderState {
         drag_row: use_signal(|| None),
         insert_at: use_signal(|| None),
+        click_offset_x: use_signal(|| 0.0),
+        click_offset_y: use_signal(|| 0.0),
+        cursor_page_x: use_signal(|| 0.0),
+        cursor_page_y: use_signal(|| 0.0),
+        source_row_height: use_signal(|| 0.0),
     }
 }
 
 impl RowReorderState {
     /// Call from the label's `onmousedown`.  Begins a reorder drag.
-    pub fn begin(&mut self, row_idx: usize) {
+    ///
+    /// `row_idx` – which row is being dragged.
+    /// `click_element_x` / `click_element_y` – offset within the label where
+    ///   the click happened (makes the floating label "stick" to the cursor).
+    /// `page_x` / `page_y` – page-level cursor coordinates at the moment
+    ///   of the click (so the floating label appears at the cursor immediately,
+    ///   not at (0,0)).
+    /// `row_height` – total height of the row (for the target gap).
+    pub fn begin(
+        &mut self,
+        row_idx: usize,
+        click_element_x: f64,
+        click_element_y: f64,
+        page_x: f64,
+        page_y: f64,
+        row_height: f64,
+    ) {
         self.drag_row.set(Some(row_idx));
+        self.click_offset_x.set(click_element_x);
+        self.click_offset_y.set(click_element_y);
+        // Position the floating label at the cursor immediately.
+        self.cursor_page_x.set(page_x);
+        self.cursor_page_y.set(page_y);
+        self.source_row_height.set(row_height);
     }
 
     /// Call from the container's `onmousemove`.
+    ///
+    /// `page_x` / `page_y` — page-level cursor coordinates (for the
+    ///   floating label).  `unscrolled_y` — Y in the row layout's
+    ///   unscrolled coordinate space (for target computation).
     pub fn handle_mousemove(
         &mut self,
-        element_y: f64,
-        scroll_top: f64,
+        page_x: f64,
+        page_y: f64,
+        unscrolled_y: f64,
         wf_state: Signal<WaveformState>,
     ) {
         let Some(from_ri) = *self.drag_row.read() else { return; };
-        let adjusted_y = element_y + scroll_top;
+        self.cursor_page_x.set(page_x);
+        self.cursor_page_y.set(page_y);
+
+        // Compute target insertion position based on the UNSCROLLED row
+        // layout.  Targets are computed from row midpoints, excluding
+        // the dragged row, so the result is flicker-free.
         let v = wf_state.read();
-        let hovered = v.row_layout.row_at_y(adjusted_y).unwrap_or(from_ri);
-        let target = if hovered > from_ri {
-            hovered + 1
-        } else {
-            hovered
-        };
+        let target = v.row_layout.compute_reorder_target(unscrolled_y, from_ri);
         self.insert_at.set(Some(target));
     }
 
@@ -223,13 +265,23 @@ impl RowReorderState {
         }
         self.drag_row.set(None);
         self.insert_at.set(None);
+        self.click_offset_x.set(0.0);
+        self.click_offset_y.set(0.0);
+        self.cursor_page_x.set(0.0);
+        self.cursor_page_y.set(0.0);
+        self.source_row_height.set(0.0);
         data_version += 1;
     }
 
-    /// Cancel on mouse-leave without committing.
+    /// Cancel on mouse-leave / Escape without committing.
     pub fn cancel(&mut self, mut data_version: Signal<u64>) {
         self.drag_row.set(None);
         self.insert_at.set(None);
+        self.click_offset_x.set(0.0);
+        self.click_offset_y.set(0.0);
+        self.cursor_page_x.set(0.0);
+        self.cursor_page_y.set(0.0);
+        self.source_row_height.set(0.0);
         data_version += 1;
     }
 
@@ -243,9 +295,42 @@ impl RowReorderState {
         *self.drag_row.read() == Some(row_idx)
     }
 
+    /// The index of the row currently being dragged, if any.
+    pub fn dragged_row_index(&self) -> Option<usize> {
+        *self.drag_row.read()
+    }
+
     /// The current target insert position during a drag, for visual feedback.
     pub fn target_pos(&self) -> Option<usize> {
         *self.insert_at.read()
+    }
+
+    // ── Accessors for floating-label positioning ──────────────────────
+
+    /// X offset within the label where the click happened.
+    pub fn click_offset_x(&self) -> f64 {
+        *self.click_offset_x.read()
+    }
+
+    /// Y offset within the label where the click happened.
+    pub fn click_offset_y(&self) -> f64 {
+        *self.click_offset_y.read()
+    }
+
+    /// Current page-X of the cursor during a drag.
+    pub fn cursor_page_x(&self) -> f64 {
+        *self.cursor_page_x.read()
+    }
+
+    /// Current page-Y of the cursor during a drag.
+    pub fn cursor_page_y(&self) -> f64 {
+        *self.cursor_page_y.read()
+    }
+
+    /// Total height of the dragged row, for rendering the source gap
+    /// and the target insertion slot.
+    pub fn source_row_height(&self) -> f64 {
+        *self.source_row_height.read()
     }
 }
 

@@ -4,6 +4,8 @@ These tests connect the built-in **demo device**, run a short acquisition,
 and then exercise the waveform UI.  No physical hardware is required.
 """
 
+from __future__ import annotations
+
 from playwright.sync_api import Page, expect
 
 
@@ -228,30 +230,47 @@ def test_row_height_never_below_minimum(page: Page) -> None:
 # ---------------------------------------------------------------------------
 
 def get_row_labels(page: Page):
-    """Return all visible row label elements (draggable rows)."""
+    """Return all visible row label elements (draggable rows).
+
+    Note: during a drag, the source row gets ``invisible`` class but is
+    still in the DOM and preserves its space.
+    """
     return (
         page.locator('[id^="labels-tab-"]').first.locator("div.cursor-grab").all()
     )
 
 
 def get_amber_indicator(page: Page):
-    """Return the amber insertion line, if visible.
+    """Return the amber insertion indicator, if visible.
 
-    Can appear as:
-    - A ``div.z-20.pointer-events-none`` with ``background: #f59e0b``
-    - A divider with class ``bg-amber-400``
+    The target gap is rendered as an expanded divider (row-height) with
+    a dashed amber border.  Look for:
+    - A ``div`` inside the labels panel with class ``border-amber-400``
+    - A ``div.z-20.pointer-events-none`` (top/bottom edge)
     """
     labels = page.locator('[id^="labels-tab-"]').first
 
+    # Top/bottom edge indicator
     top_edge = labels.locator("div.z-20.pointer-events-none")
     if top_edge.count() > 0:
         return top_edge.first
 
-    divider = labels.locator("div.bg-amber-400")
-    if divider.count() > 0:
-        return divider.first
+    # Target gap: dashed border div with amber-400 class
+    target_gap = labels.locator("div.border-amber-400")
+    if target_gap.count() > 0:
+        return target_gap.first
 
     return None
+
+
+def get_floating_label(page: Page):
+    """Return the floating label clone (position:fixed) if visible.
+
+    The floating label is rendered outside the normal flow with
+    ``class="fixed z-50 pointer-events-none"`` and contains a border-amber-400
+    div.
+    """
+    return page.locator("div.fixed.z-50.pointer-events-none").first
 
 
 def get_row_label_texts(page: Page) -> list[str]:
@@ -263,11 +282,11 @@ def get_row_label_texts(page: Page) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Row Reorder Tests
+# Row Reorder Tests (Drag & Drop)
 # ---------------------------------------------------------------------------
 
-def test_reorder_drag_shows_insert_indicator(page: Page) -> None:
-    """Dragging a row label shows an amber insertion line."""
+def test_reorder_drag_shows_floating_label(page: Page) -> None:
+    """When a row label is dragged, a floating clone follows the cursor."""
     ensure_waveform_visible(page)
 
     labels = get_row_labels(page)
@@ -287,15 +306,54 @@ def test_reorder_drag_shows_insert_indicator(page: Page) -> None:
     page.mouse.move(start_x, start_y)
     page.mouse.down()
     page.mouse.move(start_x, start_y + 60, steps=5)
-    page.wait_for_timeout(200)
+    page.wait_for_timeout(300)
 
-    # The amber indicator should appear
-    indicator = get_amber_indicator(page)
-    assert indicator is not None, (
-        "Expected amber insertion indicator to be visible during drag"
+    # The floating label clone should be visible
+    floating = get_floating_label(page)
+    assert floating.count() > 0, (
+        "Expected floating label clone to be visible during drag"
+    )
+    expect(floating).to_be_visible()
+
+    # The source row should be invisible (space preserved)
+    source = labels[0]
+    classes = source.get_attribute("class") or ""
+    assert "invisible" in classes, (
+        f"Expected source row to be invisible during drag, got: {classes}"
     )
 
     # Clean up: release the drag
+    page.mouse.up()
+    page.wait_for_timeout(200)
+
+
+def test_reorder_drag_shows_target_gap(page: Page) -> None:
+    """When dragging a row between two others, an expanded target gap
+    appears with a dashed amber border."""
+    ensure_waveform_visible(page)
+
+    labels = get_row_labels(page)
+    assert len(labels) >= 2
+
+    first_label = labels[0]
+    first_box = first_label.bounding_box()
+    assert first_box is not None
+
+    start_x = first_box["x"] + first_box["width"] / 2
+    start_y = first_box["y"] + first_box["height"] / 2
+
+    # Drag downward to hover between row 1 and row 2
+    page.mouse.move(start_x, start_y)
+    page.mouse.down()
+    page.mouse.move(start_x, start_y + 80, steps=5)
+    page.wait_for_timeout(300)
+
+    # The amber indicator (target gap or line) should appear
+    indicator = get_amber_indicator(page)
+    assert indicator is not None, (
+        "Expected target gap / amber indicator to be visible during drag"
+    )
+
     page.mouse.up()
     page.wait_for_timeout(200)
 
@@ -347,8 +405,8 @@ def test_reorder_drop_moves_row(page: Page) -> None:
     )
 
 
-def test_reorder_indicator_disappears_after_mouseup(page: Page) -> None:
-    """The amber insertion line is removed after the drag completes."""
+def test_reorder_floating_label_disappears_after_mouseup(page: Page) -> None:
+    """The floating label and indicator are removed after the drag completes."""
     ensure_waveform_visible(page)
 
     labels = get_row_labels(page)
@@ -361,19 +419,28 @@ def test_reorder_indicator_disappears_after_mouseup(page: Page) -> None:
     start_x = first_box["x"] + first_box["width"] / 2
     start_y = first_box["y"] + first_box["height"] / 2
 
-    # Drag down to trigger the indicator
+    # Drag down to trigger the indicator and floating label
     page.mouse.move(start_x, start_y)
     page.mouse.down()
     page.mouse.move(start_x, start_y + 80, steps=5)
-    page.wait_for_timeout(200)
+    page.wait_for_timeout(300)
 
-    # Indicator should be present during drag
+    # Both should be present during drag
+    floating = get_floating_label(page)
+    assert floating.count() > 0, "Expected floating label during drag"
+
     indicator = get_amber_indicator(page)
     assert indicator is not None, "Expected indicator during drag"
 
     # Release the mouse
     page.mouse.up()
     page.wait_for_timeout(300)
+
+    # Floating label should be gone
+    floating = get_floating_label(page)
+    assert floating.count() == 0, (
+        "Floating label should be removed after mouse up"
+    )
 
     # Indicator should be gone
     indicator = get_amber_indicator(page)
@@ -382,9 +449,9 @@ def test_reorder_indicator_disappears_after_mouseup(page: Page) -> None:
     )
 
 
-def test_reorder_label_not_permanently_grayed(page: Page) -> None:
+def test_reorder_label_not_permanently_hidden(page: Page) -> None:
     """After drag completes (even outside label panel), no label stays
-    permanently grayed out (opacity-50)."""
+    permanently invisible."""
     ensure_waveform_visible(page)
 
     labels = get_row_labels(page)
@@ -405,13 +472,158 @@ def test_reorder_label_not_permanently_grayed(page: Page) -> None:
     page.mouse.up()
     page.wait_for_timeout(300)
 
-    # All visible labels should NOT have opacity-50
+    # All visible labels should NOT have invisible class
     for i, lbl in enumerate(get_row_labels(page)):
         classes = lbl.get_attribute("class") or ""
-        assert "opacity-50" not in classes, (
-            f"Label {i} still has opacity-50 after drag completed. "
+        assert "invisible" not in classes, (
+            f"Label {i} still invisible after drag completed. "
             f"Classes: {classes}"
         )
+
+
+def test_reorder_floating_label_tracks_x(page: Page) -> None:
+    """The floating label follows the cursor horizontally, not just vertically.
+
+    Clicks at an offset within the label should make the label stick to
+    the cursor at that exact point in both X and Y.
+    """
+    ensure_waveform_visible(page)
+
+    labels = get_row_labels(page)
+    assert len(labels) >= 2
+
+    first_label = labels[0]
+    first_box = first_label.bounding_box()
+    assert first_box is not None
+
+    # Click near the right edge of the label (offset ~80% of width)
+    click_x = first_box["x"] + first_box["width"] * 0.8
+    click_y = first_box["y"] + first_box["height"] / 2
+
+    page.mouse.move(click_x, click_y)
+    page.mouse.down()
+
+    # Move horizontally only, no vertical change
+    target_x = click_x + 50
+    page.mouse.move(target_x, click_y, steps=5)
+    page.wait_for_timeout(300)
+
+    # The floating label should have moved right by ~50px
+    floating = get_floating_label(page)
+    assert floating.count() > 0, "Expected floating label during drag"
+
+    floating_box = floating.bounding_box()
+    assert floating_box is not None
+
+    # The floating label's left edge should be near target_x - click_offset_x
+    # Since click_offset_x ≈ 80% of label width, the label should have moved
+    # to the right of its original position.
+    assert floating_box["x"] > first_box["x"] + 20, (
+        f"Floating label should have moved right. "
+        f"Original x={first_box['x']:.0f}, floating x={floating_box['x']:.0f}"
+    )
+
+    page.mouse.up()
+    page.wait_for_timeout(200)
+
+
+def test_reorder_floating_label_sticks_at_click_point(page: Page) -> None:
+    """When clicking near the bottom of a label, the cursor stays near the
+    bottom of the floating label (not snapping to the center)."""
+    ensure_waveform_visible(page)
+
+    labels = get_row_labels(page)
+    assert len(labels) >= 2
+
+    first_label = labels[0]
+    first_box = first_label.bounding_box()
+    assert first_box is not None
+
+    # Click near the bottom of the label
+    click_x = first_box["x"] + first_box["width"] / 2
+    click_y = first_box["y"] + first_box["height"] * 0.9  # 90% down
+
+    page.mouse.move(click_x, click_y)
+    page.mouse.down()
+    page.wait_for_timeout(100)
+
+    # Move down by 40px
+    page.mouse.move(click_x, click_y + 40, steps=5)
+    page.wait_for_timeout(300)
+
+    floating = get_floating_label(page)
+    assert floating.count() > 0
+
+    floating_box = floating.bounding_box()
+    assert floating_box is not None
+
+    # The floating label's top should be below the original label's top
+    # by roughly 40px (the Y movement), because the click point sticks.
+    expected_top = first_box["y"] + 40
+    assert abs(floating_box["y"] - expected_top) < 20, (
+        f"Floating label Y should follow cursor with click-point offset. "
+        f"Expected ~{expected_top:.0f}, got {floating_box['y']:.0f}"
+    )
+
+    page.mouse.up()
+    page.wait_for_timeout(200)
+
+
+def test_reorder_target_does_not_flicker(page: Page) -> None:
+    """The target insertion position should be stable when the cursor moves
+    smoothly past a divider — no jumping back and forth between two
+    different non-source positions."""
+    ensure_waveform_visible(page)
+
+    labels = get_row_labels(page)
+    assert len(labels) >= 3, (
+        "Need at least 3 rows, got {len(labels)}"
+    )
+
+    # Drag row 0 so cursor passes row 1 and enters row 2 area.
+    first_label = labels[0]
+    second_label = labels[1]
+    third_label = labels[2]
+
+    first_box = first_label.bounding_box()
+    second_box = second_label.bounding_box()
+    third_box = third_label.bounding_box()
+    assert first_box is not None and second_box is not None and third_box is not None
+
+    start_x = first_box["x"] + first_box["width"] / 2
+    start_y = first_box["y"] + first_box["height"] / 2
+
+    page.mouse.move(start_x, start_y)
+    page.mouse.down()
+
+    # Move down in small increments from row 1 area into row 2 area.
+    # We track the indicator Y; rapid back-and-forth between two distinct
+    # positions (not just appear/disappear) counts as flicker.
+    prev_y: float | None = None
+    y_changes = 0
+    for step in range(10, 200, 10):
+        page.mouse.move(start_x, start_y + step, steps=1)
+        page.wait_for_timeout(30)
+
+        indicator = get_amber_indicator(page)
+        if indicator is not None:
+            box = indicator.bounding_box()
+            if box is not None:
+                y = box["y"]
+                if prev_y is not None and abs(y - prev_y) > 3:
+                    y_changes += 1
+                prev_y = y
+
+    page.mouse.up()
+    page.wait_for_timeout(200)
+
+    # With smooth cursor motion, the indicator position should change at most
+    # a few times (once per row transition).  More than 5 distinct positions
+    # would indicate rapid flickering.
+    assert y_changes <= 5, (
+        f"Indicator position changed {y_changes} times — expected ≤ 5 for smooth "
+        f"transitions across 2 rows"
+    )
 
 
 def test_reorder_insert_at_top(page: Page) -> None:
@@ -433,21 +645,21 @@ def test_reorder_insert_at_top(page: Page) -> None:
 
     start_x = last_box["x"] + last_box["width"] / 2
     start_y = last_box["y"] + last_box["height"] / 2
-    # Target above the first label
-    target_y = first_box["y"] - 5
+    # Target just inside the first row (the body div must still capture
+    # onmousemove events).  compute_reorder_target will find the nearest
+    # gap — which is position 0 (above row 0).
+    target_y = first_box["y"] + 5
 
     page.mouse.move(start_x, start_y)
     page.mouse.down()
     page.mouse.move(start_x, target_y, steps=10)
-    page.wait_for_timeout(200)
+    page.wait_for_timeout(300)
 
-    # Top-edge indicator should be visible
-    top_edge = (
-        page.locator('[id^="labels-tab-"]')
-        .first.locator("div.z-20.pointer-events-none")
-    )
-    assert top_edge.count() > 0, (
-        "Expected top-edge amber indicator when dragging above first row"
+    # Top-edge indicator should be visible (expanded gap with dashed border)
+    indicator = get_amber_indicator(page)
+    assert indicator is not None, (
+        "Expected top-edge amber indicator when dragging above first row. "
+        f"first_box.y={first_box['y']:.0f}, target_y={target_y:.0f}"
     )
 
     page.mouse.up()

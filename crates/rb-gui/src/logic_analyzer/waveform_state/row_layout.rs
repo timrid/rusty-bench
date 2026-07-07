@@ -217,6 +217,75 @@ impl RowLayout {
         }
     }
 
+    /// Compute the target insertion position for a drag-and-drop reorder.
+    ///
+    /// `page_y` – page-level Y of the cursor (must be relative to the row
+    ///   area's page-level top, e.g. `page_y - labels_panel_page_y`).
+    /// `exclude_row` – the row being dragged (its space is preserved but it
+    ///   is excluded from the midpoint calculation).
+    ///
+    /// Returns the 0-based insertion index: 0 = before first row,
+    /// `rows.len()` = after last row.
+    ///
+    /// Uses the *original* row layout (un-expanded dividers) to compute
+    /// midpoints, so the result is flicker-free regardless of the visual
+    /// target-gap expansion.
+    pub fn compute_reorder_target(&self, y_px: f64, exclude_row: usize) -> usize {
+        let mut offset = 0.0;
+        let mut best_target = 0usize;
+        let mut best_dist = f64::MAX;
+
+        for (i, row) in self.rows.iter().enumerate() {
+            if !row.visible {
+                continue;
+            }
+            let h = row.total_height();
+            if h <= 0.0 {
+                continue;
+            }
+
+            // Gap above this row (distance from cursor to top of this row).
+            let gap_above_dist = (y_px - offset).abs();
+            if gap_above_dist < best_dist {
+                best_dist = gap_above_dist;
+                best_target = i;
+            }
+
+            offset += h;
+
+            // Divider zone (gap below this row).
+            let has_next_visible = self.rows[i + 1..].iter().any(|r| r.visible);
+            if has_next_visible {
+                let gap_below_dist = (y_px - offset).abs();
+                if gap_below_dist < best_dist {
+                    best_dist = gap_below_dist;
+                    best_target = i + 1;
+                }
+                offset += DIVIDER_H;
+            }
+        }
+
+        // Gap after the last visible row.
+        let gap_end_dist = (y_px - offset).abs();
+        if gap_end_dist < best_dist {
+            best_target = self.rows.len();
+        }
+
+        // Adjust target to avoid placing the row right back at its
+        // current position (that would be a no-op).
+        if best_target > exclude_row {
+            // The dragged row will be removed, so indices after it shift left.
+            // Target positions at or after exclude_row need adjustment.
+            best_target
+        } else if best_target == exclude_row {
+            // Cursor is near the source position.  Keep the target at
+            // the source (no gap, no move).
+            exclude_row
+        } else {
+            best_target
+        }
+    }
+
     /// Compute the total height of all visible Rows plus dividers between them.
     pub fn total_rows_height(&self) -> f64 {
         let visible_count = self.rows.iter().filter(|r| r.visible).count();

@@ -232,6 +232,16 @@ pub fn WaveformView(
         })
         .collect();
 
+    // ── Floating label info for drag-and-drop reorder ──────────────────
+    // When a reorder drag is active, extract the dragged row's label
+    // element and height so we can render a position:fixed clone.
+    let floating_label: Option<(VNode, f64)> = reorder.dragged_row_index().and_then(|ri| {
+        visible_rows.iter().find(|(idx, _, _, _, _)| *idx == ri)
+            .and_then(|(_, _, label_el, row_h, _)| {
+                label_el.clone().ok().map(|vnode| (vnode, *row_h))
+            })
+    });
+
     // ── Canvas drawing: only redraws when data_version or canvas size change ──
     let mut last_draw_key = use_signal(|| (0u64, 0u32));
     let draw_key = (_version, canvas_width_px().round() as u32);
@@ -298,6 +308,7 @@ pub fn WaveformView(
                     let mut data_version = data_version;
                     let mut reorder = reorder;
                     let scroll_y = scroll_y;
+                    let container_top = container_top;
                     move |evt| {
                         if dragging_divider() {
                             let dx = evt.data().coordinates().page().x - divider_start_x();
@@ -307,10 +318,11 @@ pub fn WaveformView(
                             data_version += 1;
                         } else if reorder.is_active() {
                             let coords = evt.data().coordinates();
-                            // element().y is relative to the body div; add scroll offset
-                            // to get the position relative to the row area.
-                            let adjusted_y = coords.element().y + scroll_y();
-                            reorder.handle_mousemove(adjusted_y, 0.0, wf_state);
+                            let page_x = coords.page().x;
+                            let page_y = coords.page().y;
+                            // Convert page-Y to unscrolled row-area Y for target calc.
+                            let unscrolled_y = page_y - container_top() + scroll_y();
+                            reorder.handle_mousemove(page_x, page_y, unscrolled_y, wf_state);
                         }
                     }
                 },
@@ -379,43 +391,67 @@ pub fn WaveformView(
                     // ── Label rows + divider spacers ──────────────────
                     {
                         let target = reorder.target_pos();
+                        // Only show the target gap when the insert position
+                        // actually differs from the dragged row.  Otherwise
+                        // the gap at the source position would push all rows
+                        // down by source_row_h pixels.
+                        let drag_idx = reorder.dragged_row_index();
+                        let gap_pos = target.filter(|&t| Some(t) != drag_idx);
                         let num_visible = visible_rows.len();
 
                         let row_items: Vec<_> = visible_rows.iter().enumerate().map(|(vi, (ri, _sid, lbl, rh, sh))| {
                             let ri = *ri;
                             let sh_val = resize.effective_sig_h(ri).unwrap_or(*sh);
-                            let eff_h = if resize.is_resizing(ri) {
+                            let reordering = reorder.is_dragging(ri);
+                            // Only collapse the source row when there is a target
+                            // gap to compensate.  Otherwise keep full height so
+                            // the total stays constant in all drag states.
+                            let eff_h = if reordering && gap_pos.is_some() {
+                                DIVIDER_H
+                            } else if reordering {
+                                *rh
+                            } else if resize.is_resizing(ri) {
                                 sh_val + 2.0 * MEASUREMENT_ZONE_H
                             } else { *rh };
-                            let reordering = reorder.is_dragging(ri);
                             let last = vi == num_visible - 1;
-                            let drop_here = target.map(|t| t == ri + 1).unwrap_or(false);
-                            (ri, lbl.clone(), sh_val, eff_h, reordering, last, drop_here)
+                            let drop_here = gap_pos.map(|t| t == ri + 1).unwrap_or(false);
+                            (ri, lbl.clone(), sh_val, eff_h, reordering, last, drop_here, *rh)
                         }).collect();
 
+                        let source_row_h = reorder.source_row_height();
+
                         let last_row_data: Option<(usize, f64)> = row_items.last()
-                            .map(|&(ri, _, sh_val, _, _, _, _)| (ri, sh_val));
+                            .map(|&(ri, _, sh_val, _, _, _, _, _)| (ri, sh_val));
 
                         rsx! {
-                            if target == Some(0) {
+                            if gap_pos == Some(0) {
                                 div {
-                                    class: "relative z-20 pointer-events-none flex-shrink-0",
-                                    style: "height: 2px; background: #f59e0b; box-shadow: 0 0 4px #f59e0b;"
+                                    class: "relative z-20 pointer-events-none flex-shrink-0 transition-all duration-150",
+                                    style: "height: {source_row_h}px; border: 1px dashed #f59e0b; margin: 0 2px;"
                                 }
                             }
 
-                            for (ri, lbl, sh_val, eff_h, reordering, last, drop_here) in row_items {
+                            for (ri, lbl, sh_val, eff_h, reordering, last, drop_here, _total_h) in row_items {
                                 div {
                                     class: "flex items-center px-1 select-none cursor-grab active:cursor-grabbing flex-shrink-0",
-                                    class: if reordering { "opacity-50" },
+                                    class: if reordering { "invisible" },
                                     style: "height: {eff_h}px",
                                     onmousedown: {
                                         let ri = ri;
+                                        let eff_h = eff_h;
                                         let mut reorder = reorder;
                                         move |evt| {
                                             evt.prevent_default();
                                             evt.stop_propagation();
-                                            reorder.begin(ri);
+                                            let coords = evt.data().coordinates();
+                                            reorder.begin(
+                                                ri,
+                                                coords.element().x,
+                                                coords.element().y,
+                                                coords.page().x,
+                                                coords.page().y,
+                                                eff_h,
+                                            );
                                         }
                                     },
                                     oncontextmenu: {
@@ -432,12 +468,20 @@ pub fn WaveformView(
 
                                 if !last {
                                     div {
-                                        class: "relative flex-shrink-0",
+                                        class: "relative flex-shrink-0 transition-all duration-150",
                                         class: if drop_here { "z-20" },
-                                        style: "height: {DIVIDER_H}px",
+                                        style: if drop_here { "height: {source_row_h}px" } else { "height: {DIVIDER_H}px" },
+                                        // When this is the drop target, show an expanded gap with a dashed border
+                                        // to indicate where the row will land.
+                                        if drop_here {
+                                            div {
+                                                class: "absolute left-0 right-0 top-0 bottom-0 border border-dashed border-amber-400",
+                                                style: "margin: 2px;"
+                                            }
+                                        }
                                         div {
-                                            class: if drop_here { "absolute left-0 right-0 bg-amber-400" } else { "absolute left-0 right-0 bg-gray-300/60 dark:bg-zinc-600/40" },
-                                            style: if drop_here { "height: 2px; top: {DIVIDER_H / 2.0}px; box-shadow: 0 0 4px #f59e0b;" } else { "height: 1px; top: {DIVIDER_H / 2.0}px;" },
+                                            class: "absolute left-0 right-0 bg-gray-300/60 dark:bg-zinc-600/40",
+                                            style: "height: 1px; top: {DIVIDER_H / 2.0}px;",
                                         }
                                         div {
                                             class: "absolute left-0 right-0 cursor-ns-resize group",
@@ -455,10 +499,10 @@ pub fn WaveformView(
                                 }
                             }
 
-                            if target == Some(wf_state.read().row_layout.rows.len()) {
+                            if gap_pos == Some(wf_state.read().row_layout.rows.len()) {
                                 div {
-                                    class: "relative z-20 pointer-events-none flex-shrink-0",
-                                    style: "height: 2px; background: #f59e0b; box-shadow: 0 0 4px #f59e0b;"
+                                    class: "relative z-20 pointer-events-none flex-shrink-0 transition-all duration-150",
+                                    style: "height: {source_row_h}px; border: 1px dashed #f59e0b; margin: 0 2px;"
                                 }
                             }
 
@@ -621,21 +665,32 @@ pub fn WaveformView(
                     // ── Signal rows: canvases + dividers ─────────────────
                     {
                         let num_visible = visible_rows.len();
+                        // Only collapse canvas when there's a target gap to
+                        // compensate (same logic as the label panel).
+                        let canvas_collapse = reorder.target_pos()
+                            .filter(|&t| Some(t) != reorder.dragged_row_index())
+                            .is_some();
                         let row_items: Vec<_> = visible_rows.iter().enumerate().map(|(vi, (ri, sid, _lbl, _rh, sh))| {
                             let ri = *ri;
                             let sh_val = resize.effective_sig_h(ri).unwrap_or(*sh);
+                            let reordering = reorder.is_dragging(ri) && canvas_collapse;
                             let last = vi == num_visible - 1;
-                            (ri, sid.clone(), sh_val, last)
+                            (ri, sid.clone(), sh_val, reordering, last)
                         }).collect();
 
                         rsx! {
-                            for (_ri, sid, sh_val, last) in row_items {
+                            for (_ri, sid, sh_val, reordering, last) in row_items {
                                 canvas {
                                     id: "{sid}",
                                     class: "pointer-events-none min-w-0",
-                                    style: "width: 100%; height: {sh_val}px; margin-top: {MEASUREMENT_ZONE_H}px; margin-bottom: {MEASUREMENT_ZONE_H}px",
+                                    style: if reordering {
+                                        // Collapse to keep total height constant
+                                        "width: 100%; height: 0px; margin-top: 0px; margin-bottom: 0px"
+                                    } else {
+                                        "width: 100%; height: {sh_val}px; margin-top: {MEASUREMENT_ZONE_H}px; margin-bottom: {MEASUREMENT_ZONE_H}px"
+                                    },
                                     width: "100%",
-                                    height: "{sh_val}",
+                                    height: if reordering { "0" } else { "{sh_val}" },
                                 }
 
                                 if !last {
@@ -688,6 +743,28 @@ pub fn WaveformView(
                                     if live { "\u{25CF} Live" } else { "\u{25CB} Live" }
                                 }
                             }
+                        }
+                    }
+
+                    // ── Floating label clone (drag-and-drop reorder) ─────
+                    {
+                        if let Some((ref lbl_el, row_h)) = floating_label {
+                            let left = reorder.cursor_page_x() - reorder.click_offset_x();
+                            let top = reorder.cursor_page_y() - reorder.click_offset_y();
+                            let lw = label_width();
+                            rsx! {
+                                div {
+                                    class: "fixed z-50 pointer-events-none",
+                                    style: "left: {left}px; top: {top}px; width: {lw}px; height: {row_h}px",
+                                    div {
+                                        class: "flex items-center px-1 select-none bg-gray-100/90 dark:bg-[#0a0e14]/90 border border-amber-400 shadow-lg rounded-sm",
+                                        style: "height: {row_h}px",
+                                        {lbl_el.clone()}
+                                    }
+                                }
+                            }
+                        } else {
+                            rsx! {}
                         }
                     }
                 }

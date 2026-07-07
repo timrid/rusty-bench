@@ -28,10 +28,10 @@ GUI that runs **natively and in the browser**.
 
 ```sh
 # Desktop
-dx serve --platform desktop
+dx serve --package rb-gui --platform desktop
 
 # Web
-dx serve --platform web
+dx serve --package rb-gui --platform web
 
 # Verify wasm compatibility of the whole workspace
 cargo build --workspace --exclude rb-cli --target wasm32-unknown-unknown
