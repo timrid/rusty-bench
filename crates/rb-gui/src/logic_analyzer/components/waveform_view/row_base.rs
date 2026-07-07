@@ -177,9 +177,9 @@ pub struct RowReorderState {
     click_offset_x: Signal<f64>,
     /// Y offset within the label element where the click happened.
     click_offset_y: Signal<f64>,
-    /// Current page-X of the cursor (for positioning the floating label).
+    /// Current page-X of the cursor (for positioning the floating clone).
     cursor_page_x: Signal<f64>,
-    /// Current page-Y of the cursor (for positioning the floating label).
+    /// Current page-Y of the cursor (for positioning the floating clone).
     cursor_page_y: Signal<f64>,
     /// Total height of the dragged row (for gap visualization).
     source_row_height: Signal<f64>,
@@ -203,9 +203,9 @@ impl RowReorderState {
     ///
     /// `row_idx` – which row is being dragged.
     /// `click_element_x` / `click_element_y` – offset within the label where
-    ///   the click happened (makes the floating label "stick" to the cursor).
+    ///   the click happened (makes the floating clone "stick" to the cursor).
     /// `page_x` / `page_y` – page-level cursor coordinates at the moment
-    ///   of the click (so the floating label appears at the cursor immediately,
+    ///   of the click (so the floating clone appears at the cursor immediately,
     ///   not at (0,0)).
     /// `row_height` – total height of the row (for the target gap).
     pub fn begin(
@@ -220,7 +220,7 @@ impl RowReorderState {
         self.drag_row.set(Some(row_idx));
         self.click_offset_x.set(click_element_x);
         self.click_offset_y.set(click_element_y);
-        // Position the floating label at the cursor immediately.
+        // Position the floating clone at the cursor immediately.
         self.cursor_page_x.set(page_x);
         self.cursor_page_y.set(page_y);
         self.source_row_height.set(row_height);
@@ -332,6 +332,8 @@ impl RowReorderState {
     pub fn source_row_height(&self) -> f64 {
         *self.source_row_height.read()
     }
+
+
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
