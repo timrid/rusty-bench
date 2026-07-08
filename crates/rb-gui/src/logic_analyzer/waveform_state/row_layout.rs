@@ -211,7 +211,11 @@ impl RowLayout {
     pub fn move_row(&mut self, from: usize, to: usize) {
         if from < self.rows.len() && to <= self.rows.len() && from != to {
             let row = self.rows.remove(from);
-            let insert_pos = to.min(self.rows.len());
+            // When removing an element BEFORE the target, the target
+            // index shifts left by one. Compensate so the row lands
+            // exactly where the visual drop gap appeared.
+            let insert_pos = if from < to { to.saturating_sub(1) } else { to };
+            let insert_pos = insert_pos.min(self.rows.len());
             self.rows.insert(insert_pos, row);
         }
     }
@@ -244,17 +248,22 @@ impl RowLayout {
             }
 
             // Gap above this row (distance from cursor to top of this row).
-            let gap_above_dist = (y_px - offset).abs();
-            if gap_above_dist < best_dist {
-                best_dist = gap_above_dist;
-                best_target = i;
+            // Skip the gap above the excluded row — we never want to
+            // target the dragged row's own position.
+            if i != exclude_row {
+                let gap_above_dist = (y_px - offset).abs();
+                if gap_above_dist < best_dist {
+                    best_dist = gap_above_dist;
+                    best_target = i;
+                }
             }
 
             offset += h;
 
             // Divider zone (gap below this row).
+            // Also skip when the target (i+1) would be the excluded row.
             let has_next_visible = self.rows[i + 1..].iter().any(|r| r.visible);
-            if has_next_visible {
+            if has_next_visible && i + 1 != exclude_row {
                 let gap_below_dist = (y_px - offset).abs();
                 if gap_below_dist < best_dist {
                     best_dist = gap_below_dist;
@@ -270,19 +279,9 @@ impl RowLayout {
             best_target = self.rows.len();
         }
 
-        // Adjust target to avoid placing the row right back at its
-        // current position (that would be a no-op).
-        if best_target > exclude_row {
-            // The dragged row will be removed, so indices after it shift left.
-            // Target positions at or after exclude_row need adjustment.
-            best_target
-        } else if best_target == exclude_row {
-            // Cursor is near the source position.  Keep the target at
-            // the source (no gap, no move).
-            exclude_row
-        } else {
-            best_target
-        }
+        // best_target can never equal exclude_row because we skipped
+        // both the gap-above and gap-below positions that would produce it.
+        best_target
     }
 
     /// Compute the total height of all visible Rows plus dividers between them.

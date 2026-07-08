@@ -548,30 +548,15 @@ pub fn WaveformView(
                     },
                     id: "row-scroll-{short_id}",
 
-                    // ── Drop gap at top (before first row) ────────────────
-                    {
-                        let target = reorder.target_pos();
-                        let drag_idx = reorder.dragged_row_index();
-                        let gap_pos = target.filter(|&t| Some(t) != drag_idx);
-                        let source_row_h = reorder.source_row_height();
-
-                        rsx! {
-                            if gap_pos == Some(0) {
-                                div {
-                                    class: "relative z-20 pointer-events-none flex-shrink-0 transition-all duration-150",
-                                    style: "height: {source_row_h}px; border: 1px dashed #f59e0b; margin: 0 2px;"
-                                }
-                            }
-                        }
-                    }
-
-                    // ── Row loop ──────────────────────────────────────────────
+                    // ── Reorder state (shared by gap + row loop) ──────────
                     {
                         let target = reorder.target_pos();
                         let drag_idx = reorder.dragged_row_index();
                         let gap_pos = target.filter(|&t| Some(t) != drag_idx);
                         let num_visible = visible_rows.len();
                         let source_row_h = reorder.source_row_height();
+
+                        // ── Row items (pre-computed for rendering) ────────
 
                         let row_items: Vec<_> = visible_rows.iter().enumerate().map(|(vi, (row_idx, canvas_id, label_el, row_height, base_sig_height))| {
                             let row_idx = *row_idx;
@@ -605,6 +590,15 @@ pub fn WaveformView(
                         let has_rows = !row_items.is_empty();
 
                         rsx! {
+                            // ── Drop gap at top (before first row) ────
+                            if gap_pos == Some(0) {
+                                div {
+                                    class: "relative z-20 pointer-events-none flex-shrink-0 transition-all duration-150",
+                                    style: "height: {source_row_h}px; border: 1px dashed #f59e0b; margin: 0 2px;"
+                                }
+                            }
+
+                            // ── Row loop ──────────────────────────────
                             for (row_idx, canvas_id, label_el, sig_height, effective_height, original_row_height, reordering, is_last, drop_here, translate_x, translate_y, collapsed) in row_items {
                                 // ── Row wrapper ─────────────────────────
                                 div {
