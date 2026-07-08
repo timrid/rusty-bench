@@ -581,7 +581,19 @@ pub fn WaveformView(
                             let drop_here = gap_pos.map(|t| t == row_idx + 1).unwrap_or(false);
                             let effective_height = *row_height;
                             let translate_x = if reordering { reorder.drag_offset_x() } else { 0.0 };
-                            let translate_y = if reordering { reorder.drag_offset_y() } else { 0.0 };
+                            let translate_y = if reordering {
+                                let raw = reorder.drag_offset_y();
+                                // When the drop gap appears above the source row,
+                                // the source row's DOM position shifts down by
+                                // the gap height. Compensate the transform offset.
+                                if gap_pos.is_some_and(|gp| gp < row_idx) {
+                                    raw - reorder.source_row_height()
+                                } else {
+                                    raw
+                                }
+                            } else {
+                                0.0
+                            };
                             // When there's a target gap, collapse the source row
                             // out of the flow so the total height stays constant.
                             // overflow:visible + transform keeps it visible at cursor.
