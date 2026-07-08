@@ -206,14 +206,13 @@ impl RowLayout {
 
     /// Move a row from `from` index to `to` index.
     /// `to` is the 0-based position in the array BEFORE removal.
-    /// After removal, elements at indices > `from` shift left, so when
-    /// `to > from` we insert at `to - 1`.
+    /// After removal, elements at indices > `from` shift left.
+    /// `to.min(len)` handles both in-bounds and end-of-array targets.
     pub fn move_row(&mut self, from: usize, to: usize) {
         if from < self.rows.len() && to <= self.rows.len() && from != to {
             let row = self.rows.remove(from);
-            let insert_pos = if to > from { to - 1 } else { to };
+            let insert_pos = to.min(self.rows.len());
             self.rows.insert(insert_pos, row);
-            self.rows_dirty = true;
         }
     }
 

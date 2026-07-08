@@ -177,9 +177,13 @@ pub struct RowReorderState {
     click_offset_x: Signal<f64>,
     /// Y offset within the label element where the click happened.
     click_offset_y: Signal<f64>,
-    /// Current page-X of the cursor (for positioning the floating clone).
+    /// Page-X of the cursor at drag start (for computing the transform offset).
+    start_page_x: Signal<f64>,
+    /// Page-Y of the cursor at drag start.
+    start_page_y: Signal<f64>,
+    /// Current page-X of the cursor (for computing transform + positioning).
     cursor_page_x: Signal<f64>,
-    /// Current page-Y of the cursor (for positioning the floating clone).
+    /// Current page-Y of the cursor.
     cursor_page_y: Signal<f64>,
     /// Total height of the dragged row (for gap visualization).
     source_row_height: Signal<f64>,
@@ -192,6 +196,8 @@ pub fn use_row_reorder() -> RowReorderState {
         insert_at: use_signal(|| None),
         click_offset_x: use_signal(|| 0.0),
         click_offset_y: use_signal(|| 0.0),
+        start_page_x: use_signal(|| 0.0),
+        start_page_y: use_signal(|| 0.0),
         cursor_page_x: use_signal(|| 0.0),
         cursor_page_y: use_signal(|| 0.0),
         source_row_height: use_signal(|| 0.0),
@@ -220,7 +226,8 @@ impl RowReorderState {
         self.drag_row.set(Some(row_idx));
         self.click_offset_x.set(click_element_x);
         self.click_offset_y.set(click_element_y);
-        // Position the floating clone at the cursor immediately.
+        self.start_page_x.set(page_x);
+        self.start_page_y.set(page_y);
         self.cursor_page_x.set(page_x);
         self.cursor_page_y.set(page_y);
         self.source_row_height.set(row_height);
@@ -258,15 +265,22 @@ impl RowReorderState {
     ) {
         let from = *self.drag_row.read();
         let to = *self.insert_at.read();
+        // Clear drag state FIRST so no intermediate render sees a
+        // mismatched (drag_row, rows) pair after move_row triggers
+        // a wf_state write.
+        self.drag_row.set(None);
+        self.insert_at.set(None);
         if let (Some(from), Some(to)) = (from, to) {
             if from != to {
                 wf_state.write().row_layout.move_row(from, to);
+                // Force re-render after row order change.
+                data_version += 1;
             }
         }
-        self.drag_row.set(None);
-        self.insert_at.set(None);
         self.click_offset_x.set(0.0);
         self.click_offset_y.set(0.0);
+        self.start_page_x.set(0.0);
+        self.start_page_y.set(0.0);
         self.cursor_page_x.set(0.0);
         self.cursor_page_y.set(0.0);
         self.source_row_height.set(0.0);
@@ -279,6 +293,8 @@ impl RowReorderState {
         self.insert_at.set(None);
         self.click_offset_x.set(0.0);
         self.click_offset_y.set(0.0);
+        self.start_page_x.set(0.0);
+        self.start_page_y.set(0.0);
         self.cursor_page_x.set(0.0);
         self.cursor_page_y.set(0.0);
         self.source_row_height.set(0.0);
@@ -333,7 +349,15 @@ impl RowReorderState {
         *self.source_row_height.read()
     }
 
+    /// Horizontal transform offset for the dragged row = cursor_x - start_x.
+    pub fn drag_offset_x(&self) -> f64 {
+        *self.cursor_page_x.read() - *self.start_page_x.read()
+    }
 
+    /// Vertical transform offset for the dragged row = cursor_y - start_y.
+    pub fn drag_offset_y(&self) -> f64 {
+        *self.cursor_page_y.read() - *self.start_page_y.read()
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

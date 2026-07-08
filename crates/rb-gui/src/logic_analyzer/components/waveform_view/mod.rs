@@ -233,17 +233,6 @@ pub fn WaveformView(
         })
         .collect();
 
-    // ── Floating full-row clone data for drag-and-drop reorder ────────
-    // Extract the dragged row's label VNode, total height, and signal
-    // height so we can render a position:fixed clone (label + divider +
-    // canvas + measurement zones).
-    let floating_row: Option<(VNode, f64, f64)> = reorder.dragged_row_index().and_then(|ri| {
-        visible_rows.iter().find(|(idx, _, _, _, _)| *idx == ri)
-            .and_then(|(_, _, label_el, row_h, sig_h)| {
-                label_el.clone().ok().map(|vnode| (vnode, *row_h, *sig_h))
-            })
-    });
-
     // ── Canvas drawing: only redraws when data_version or canvas size change ──
     let mut last_draw_key = use_signal(|| (0u64, 0u32));
     let draw_key = (_version, canvas_width_px().round() as u32);
@@ -435,13 +424,11 @@ pub fn WaveformView(
                         }
                     },
                     onmouseup: {
+                        let mut dragging_divider = dragging_divider;
                         let mut pan = pan;
-                        let mut resize = resize;
-                        let wf_state = wf_state;
-                        let data_version = data_version;
                         move |evt| {
                             evt.prevent_default();
-                            resize.commit(wf_state, data_version);
+                            dragging_divider.set(false);
                             pan.end();
                         }
                     },
@@ -488,29 +475,31 @@ pub fn WaveformView(
                             let reordering = reorder.is_dragging(ri);
                             let last = vi == num_visible - 1;
                             let drop_here = gap_pos.map(|t| t == ri + 1).unwrap_or(false);
-                            // Only collapse the source row when there is a target
-                            // gap to compensate.  Otherwise keep full height so
-                            // the total stays constant in all drag states.
-                            let eff_h = if reordering && gap_pos.is_some() {
-                                0.0
-                            } else if reordering {
-                                *rh
-                            } else { *rh };
-                            (ri, sid.clone(), lbl.clone(), sh_val, eff_h, *rh, reordering, last, drop_here)
+                            let eff_h = *rh;
+                            let tx = if reordering { reorder.drag_offset_x() } else { 0.0 };
+                            let ty = if reordering { reorder.drag_offset_y() } else { 0.0 };
+                            // When there's a target gap, collapse the source row
+                            // out of the flow so the total height stays constant.
+                            // overflow:visible + transform keeps it visible at cursor.
+                            let collapsed = reordering && gap_pos.is_some();
+                            (ri, sid.clone(), lbl.clone(), sh_val, eff_h, *rh, reordering, last, drop_here, tx, ty, collapsed)
                         }).collect();
 
                         let last_row_data: Option<(usize, f64)> = row_items.last()
-                            .map(|&(ri, _, _, sh_val, _, _, _, _, _)| (ri, sh_val));
+                            .map(|&(ri, _, _, sh_val, _, _, _, _, _, _, _, _)| (ri, sh_val));
 
                         let lw = label_width();
 
                         rsx! {
-                            for (ri, sid, lbl, sh_val, eff_h, orig_rh, reordering, last, drop_here) in row_items {
-                                // ── Unified row div ────────────────────────
+                            for (ri, sid, lbl, sh_val, eff_h, orig_rh, reordering, last, drop_here, tx, ty, collapsed) in row_items {
+                                // ── Row wrapper ─────────────────────────
                                 div {
-                                    class: "flex-shrink-0",
-                                    class: if reordering && eff_h == 0.0 { "invisible" },
-                                    style: "height: {eff_h}px",
+                                    class: if reordering { "flex-shrink-0 z-50 relative pointer-events-none" } else { "flex-shrink-0" },
+                                    style: if collapsed {
+                                        "height: 0px; overflow: visible; transform: translate({tx}px, {ty}px)"
+                                    } else {
+                                        "height: {eff_h}px; transform: translate({tx}px, {ty}px)"
+                                    },
 
                                     div {
                                         class: "flex relative",
@@ -637,8 +626,7 @@ pub fn WaveformView(
                                 // ── Full-width 1px separator (between rows) ──
                                 if !last {
                                     div {
-                                        class: "relative flex-shrink-0",
-                                        class: if drop_here { "z-20" },
+                                        class: if drop_here { "relative flex-shrink-0 z-20" } else { "relative flex-shrink-0" },
                                         style: if drop_here {
                                             "height: {source_row_h}px"
                                         } else {
@@ -717,64 +705,6 @@ pub fn WaveformView(
             }
 
             // ═══════════════════════════════════════════════════════════════
-            //  FLOATING ROW CLONE (drag-and-drop reorder)
-            // ═══════════════════════════════════════════════════════════════
-            {
-                if let Some((ref lbl_el, row_h, sig_h)) = floating_row {
-                    let left = reorder.cursor_page_x() - reorder.click_offset_x();
-                    let top = reorder.cursor_page_y() - reorder.click_offset_y();
-                    let lw = label_width();
-                    // Use canvas_width_px for the clone's right-side width
-                    let right_w = canvas_width_px();
-                    let clone_w = lw + right_w;
-                    let mz_h = MEASUREMENT_ZONE_H;
-                    rsx! {
-                        div {
-                            class: "fixed z-50 pointer-events-none",
-                            style: "left: {left}px; top: {top}px; width: {clone_w}px; height: {row_h}px",
-                            div {
-                                class: "flex shadow-xl rounded-sm overflow-hidden border border-amber-400",
-                                style: "height: {row_h}px",
-                                // Left: label clone
-                                div {
-                                    class: "flex items-center px-1 select-none bg-gray-100/95 dark:bg-[#0a0e14]/95 flex-shrink-0",
-                                    style: "width: {lw}px; height: {row_h}px",
-                                    {lbl_el.clone()}
-                                }
-                                // Middle: divider line (absolute overlay)
-                                div {
-                                    class: "absolute left-0 right-0 top-0 bottom-0 pointer-events-none",
-                                    style: "padding-left: {lw}px",
-                                    div {
-                                        class: "w-px h-full bg-blue-400"
-                                    }
-                                }
-                                // Right: canvas + MZ placeholder
-                                div {
-                                    class: "flex-1 flex flex-col",
-                                    style: "height: {row_h}px",
-                                    div {
-                                        class: "flex-shrink-0 bg-white/70 dark:bg-[#0d1117]/70",
-                                        style: "height: {mz_h}px",
-                                    }
-                                    div {
-                                        class: "flex-1 bg-white/80 dark:bg-[#0d1117]/80 border-l border-gray-300/30 dark:border-zinc-600/30",
-                                        style: "height: {sig_h}px",
-                                    }
-                                    div {
-                                        class: "flex-shrink-0 bg-white/70 dark:bg-[#0d1117]/70",
-                                        style: "height: {mz_h}px",
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    rsx! {}
-                }
-            }
-
-            // ═══════════════════════════════════════════════════════════════
             //  DRAG OVERLAY (full-viewport, only during drag interactions)
             //  Covers the entire viewport so mousemove/mouseup fire even
             //  when the cursor leaves the waveform component bounds.
@@ -818,7 +748,9 @@ pub fn WaveformView(
                         let mut resize = resize;
                         let wf_state = wf_state;
                         let data_version = data_version;
-                        move |_| {
+                        move |evt| {
+                            evt.prevent_default();
+                            evt.stop_propagation();
                             dragging_divider.set(false);
                             reorder.commit(wf_state, data_version);
                             resize.commit(wf_state, data_version);
