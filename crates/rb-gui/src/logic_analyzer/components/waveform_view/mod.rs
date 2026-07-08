@@ -129,6 +129,41 @@ fn compute_ticks(
     elements
 }
 
+// ── CursorTracker – reusable cursor-position update logic ────────────────────
+
+#[derive(Clone, Copy)]
+struct CursorTracker {
+    sample_pos: Signal<Option<u64>>,
+    px: Signal<Option<f64>>,
+    label: Signal<String>,
+}
+
+impl CursorTracker {
+    fn update(
+        &mut self,
+        page_x: f64,
+        container_left: f64,
+        label_width_px: f64,
+        wf_state: Signal<WaveformState>,
+        canvas_width_px: f64,
+        sample_count: usize,
+    ) {
+        let el_x = page_x - container_left;
+        let canvas_x = el_x - label_width_px;
+        let v = wf_state.read();
+        let rs = v.viewport.view_start;
+        let re = (v.viewport.view_start + v.viewport.view_samples).min(sample_count);
+        let rl = (re - rs).max(1) as f64;
+        let cw = canvas_width_px;
+        let sp = rs as u64 + ((canvas_x / cw.max(1.0)).clamp(0.0, 1.0) * rl) as u64;
+        drop(v);
+        let in_label = el_x < label_width_px;
+        self.px.set(if in_label { None } else { Some(el_x) });
+        self.sample_pos.set(if in_label { None } else { Some(sp) });
+        self.label.set(fmt_time_ns((sp as f64 / 1_000_000.0) * 1e9));
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 //  Main component
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -190,11 +225,17 @@ pub fn WaveformView(
     let mut resize = use_row_resize();
     let reorder = use_row_reorder();
     let pan = use_canvas_pan();
+    let pan_active = use_signal(|| false);
     let scroll_y = use_signal(|| 0.0f64);
     let container_top = use_signal(|| 0.0f64);
     let container_left = use_signal(|| 0.0f64);
     let cursor_px = use_signal(|| None::<f64>);
     let cursor_label = use_signal(|| String::new());
+    let cursor_tracker = CursorTracker {
+        sample_pos: cursor_sample_pos,
+        px: cursor_px,
+        label: cursor_label,
+    };
 
     // ── Label panel width (dynamic, draggable divider) ────────────────
     let label_width = use_signal(|| wf_state.read().row_layout.label_width);
@@ -251,7 +292,7 @@ pub fn WaveformView(
     // ═══════════════════════════════════════════════════════════════════════
 
     // ── Compute whether any drag interaction is active ────────────────
-    let drag_active = reorder.is_active() || resize.is_active() || dragging_divider();
+    let drag_active = reorder.is_active() || resize.is_active() || dragging_divider() || pan_active();
 
     rsx! {
         div { class: "flex flex-col h-full bg-white dark:bg-[#0d1117]",
@@ -377,69 +418,34 @@ pub fn WaveformView(
                         let mut pan = pan;
                         let canvas_width_px = canvas_width_px;
                         let wf_state = wf_state;
+                        let mut pan_active = pan_active;
                         move |evt| {
+                            evt.prevent_default();
+                            evt.stop_propagation();
                             // Only handle pan on the canvas area (right side),
                             // not on labels or dividers.
                             let coords = evt.data().coordinates();
                             pan.begin(coords.element().x, canvas_width_px(), wf_state);
+                            pan_active.set(true);
                         }
                     },
                     onmousemove: {
-                        let mut pan = pan;
+                        let container_left = container_left;
+                        let label_width = label_width;
+                        let mut cursor_tracker = cursor_tracker;
                         let wf_state = wf_state;
-                        let data_version = data_version;
                         let canvas_width_px = canvas_width_px;
                         let sample_count = sample_count;
-                        let mut cursor_sample_pos = cursor_sample_pos;
-                        let mut cursor_px = cursor_px;
-                        let mut cursor_label = cursor_label;
-                        let container_left = container_left;
-                        let lw_sig = label_width;
                         move |evt| {
-                            let coords = evt.data().coordinates();
-                            // Page-relative X minus container left edge = position
-                            // within the scrollable area (works regardless of which
-                            // child element received the event).
-                            let page_x = coords.page().x;
-                            let el_x = page_x - container_left();
-                            // Canvas-relative for pan and sample calc.
-                            let canvas_x = el_x - lw_sig();
-
-                            if pan.is_active() {
-                                pan.handle_mousemove(canvas_x, canvas_width_px(), wf_state, sample_count, data_version);
-                            }
-
-                            let v = wf_state.read();
-                            let rs = v.viewport.view_start;
-                            let re = (v.viewport.view_start + v.viewport.view_samples).min(sample_count);
-                            let rl = (re - rs).max(1) as f64;
-                            let cw = canvas_width_px();
-                            let sp = rs as u64 + ((canvas_x / cw.max(1.0)).clamp(0.0, 1.0) * rl) as u64;
-                            drop(v);
-                            // Hide cursor line when mouse is in the label area.
-                            let in_label = el_x < lw_sig();
-                            cursor_px.set(if in_label { None } else { Some(el_x) });
-                            cursor_sample_pos.set(if in_label { None } else { Some(sp) });
-                            cursor_label.set(fmt_time_ns((sp as f64 / 1_000_000.0) * 1e9));
-                        }
-                    },
-                    onmouseup: {
-                        let mut dragging_divider = dragging_divider;
-                        let mut pan = pan;
-                        move |evt| {
-                            evt.prevent_default();
-                            dragging_divider.set(false);
-                            pan.end();
-                        }
-                    },
-                    onmouseleave: {
-                        let mut pan = pan;
-                        let mut cursor_sample_pos = cursor_sample_pos;
-                        let mut cursor_px = cursor_px;
-                        move |_| {
-                            pan.end();
-                            cursor_sample_pos.set(None);
-                            cursor_px.set(None);
+                            let page_x = evt.data().coordinates().page().x;
+                            cursor_tracker.update(
+                                page_x,
+                                container_left(),
+                                label_width(),
+                                wf_state,
+                                canvas_width_px(),
+                                sample_count,
+                            );
                         }
                     },
                     id: "row-scroll-{short_id}",
@@ -722,9 +728,15 @@ pub fn WaveformView(
                         let mut data_version = data_version;
                         let mut reorder = reorder;
                         let mut resize = resize;
+                        let mut pan = pan;
                         let scroll_y = scroll_y;
                         let container_top = container_top;
+                        let container_left = container_left;
+                        let canvas_width_px = canvas_width_px;
+                        let sample_count = sample_count;
+                        let mut cursor_tracker = cursor_tracker;
                         move |evt| {
+                            evt.prevent_default();
                             if dragging_divider() {
                                 let dx = evt.data().coordinates().page().x - divider_start_x();
                                 let new_w = (divider_start_width() + dx).clamp(20.0, 200.0);
@@ -739,13 +751,28 @@ pub fn WaveformView(
                                 let page_y = coords.page().y;
                                 let unscrolled_y = page_y - container_top() + scroll_y();
                                 reorder.handle_mousemove(page_x, page_y, unscrolled_y, wf_state);
+                            } else if pan.is_active() {
+                                let coords = evt.data().coordinates();
+                                let canvas_x = coords.page().x - container_left() - label_width();
+                                pan.handle_mousemove(canvas_x, canvas_width_px(), wf_state, sample_count, data_version);
                             }
+                            // Always update cursor position (overlay blocks scrollable onmousemove)
+                            cursor_tracker.update(
+                                evt.data().coordinates().page().x,
+                                container_left(),
+                                label_width(),
+                                wf_state,
+                                canvas_width_px(),
+                                sample_count,
+                            );
                         }
                     },
                     onmouseup: {
                         let mut dragging_divider = dragging_divider;
                         let mut reorder = reorder;
                         let mut resize = resize;
+                        let mut pan = pan;
+                        let mut pan_active = pan_active;
                         let wf_state = wf_state;
                         let data_version = data_version;
                         move |evt| {
@@ -754,6 +781,8 @@ pub fn WaveformView(
                             dragging_divider.set(false);
                             reorder.commit(wf_state, data_version);
                             resize.commit(wf_state, data_version);
+                            pan.end();
+                            pan_active.set(false);
                         }
                     },
                 }

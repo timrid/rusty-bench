@@ -400,7 +400,8 @@ impl CanvasPanState {
     }
 
     /// Call from the container's `onmousemove`.  Pans the view so the
-    /// grab sample follows the mouse 1:1.
+    /// grab sample follows the mouse 1:1, even when the cursor leaves
+    /// the canvas area (element_x may be negative or > canvas_width).
     pub fn handle_mousemove(
         &mut self,
         element_x: f64,
@@ -414,12 +415,12 @@ impl CanvasPanState {
         }
         if let Some(gs) = *self.grab_sample.read() {
             let cw = canvas_width.max(1.0);
-            let frac = (element_x / cw).clamp(0.0, 1.0);
-            let offset = (frac * wf_state.read().viewport.view_samples as f64) as u64;
-            let new_vs = gs.saturating_sub(offset);
+            let frac = element_x / cw;
+            let view_samples = wf_state.read().viewport.view_samples;
+            let offset = (frac * view_samples as f64) as i64;
+            let new_vs = (gs as i64 - offset).clamp(0, sample_count.saturating_sub(view_samples) as i64) as usize;
             let mut v = wf_state.write();
-            let max_vs = sample_count.saturating_sub(v.viewport.view_samples);
-            v.viewport.view_start = (new_vs as usize).min(max_vs);
+            v.viewport.view_start = new_vs;
             v.viewport.auto_scroll = false;
             data_version += 1;
         }
