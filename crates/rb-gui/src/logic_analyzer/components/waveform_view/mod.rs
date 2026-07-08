@@ -25,7 +25,7 @@ pub use row_base::use_canvas_pan;
 
 use cursor_line::CursorLine;
 use marker_bar::MarkerBar;
-use row_base::{use_row_reorder, use_row_resize, DARK_COLORS, LIGHT_COLORS};
+use row_base::{use_row_reorder, use_row_resize, RowReorderState, RowResizeState, DARK_COLORS, LIGHT_COLORS};
 use time_ruler::TimeRuler;
 
 use dioxus::prelude::*;
@@ -164,6 +164,104 @@ impl CursorTracker {
     }
 }
 
+// ── Row rendering helpers ────────────────────────────────────────────────────
+
+fn row_inner(
+    row_idx: usize,
+    canvas_id: String,
+    label_el: Element,
+    sig_height: f64,
+    effective_height: f64,
+    original_row_height: f64,
+    label_width_px: f64,
+    mut reorder: RowReorderState,
+    mut wf_state: Signal<WaveformState>,
+    mut resize: RowResizeState,
+    label_width: Signal<f64>,
+    mut divider_start_x: Signal<f64>,
+    mut divider_start_width: Signal<f64>,
+    mut dragging_divider: Signal<bool>,
+) -> Element {
+    rsx! {
+        div {
+            class: "flex relative",
+            style: "height: {effective_height}px",
+
+            // ── LEFT: Label area ───────────────
+            div {
+                class: "flex flex-col flex-shrink-0 bg-gray-100 dark:bg-[#0a0e14]",
+                style: "width: {label_width_px}px; height: {effective_height}px; position: relative",
+
+                // Label text (clickable, draggable)
+                div {
+                    class: "flex-1 flex items-center px-1 select-none cursor-grab active:cursor-grabbing",
+                    style: "height: {effective_height}px",
+                    onmousedown: move |evt| {
+                        evt.prevent_default();
+                        evt.stop_propagation();
+                        let coords = evt.data().coordinates();
+                        reorder.begin(row_idx, coords.element().x, coords.element().y, coords.page().x, coords.page().y, original_row_height);
+                    },
+                    oncontextmenu: move |evt| {
+                        evt.prevent_default();
+                        evt.stop_propagation();
+                        wf_state.write().row_layout.toggle_row_visible(row_idx);
+                    },
+                    {label_el}
+                }
+
+                // Resize handle
+                div {
+                    class: "absolute left-0 right-0 cursor-ns-resize group z-10",
+                    style: "top: {effective_height - DIVIDER_H}px; height: {DIVIDER_H * 2.0}px",
+                    onmousedown: move |evt| {
+                        evt.stop_propagation();
+                        resize.begin(row_idx, sig_height, evt.data().coordinates().page().y);
+                    },
+                    div {
+                        class: "absolute left-0 right-0 bg-gray-300/60 dark:bg-zinc-600/40",
+                        style: "height: 1px; top: {DIVIDER_H}px",
+                    }
+                }
+            }
+
+            // ── Vertical divider overlay ──
+            div {
+                class: "absolute top-0 bottom-0 cursor-col-resize group z-10",
+                style: "left: {label_width_px - DIVIDER_H}px; width: {DIVIDER_H * 2.0}px",
+                onmousedown: move |evt| {
+                    evt.prevent_default();
+                    evt.stop_propagation();
+                    divider_start_x.set(evt.data().coordinates().page().x);
+                    divider_start_width.set(label_width());
+                    dragging_divider.set(true);
+                },
+                div {
+                    class: "absolute left-1/2 -translate-x-1/2 top-0 bottom-0 w-px bg-gray-300 dark:bg-zinc-600"
+                }
+            }
+
+            // ── RIGHT: Canvas + Measurement Zones ──
+            div {
+                class: "flex-1 flex flex-col min-w-0",
+                style: "height: {effective_height}px",
+
+                div { class: "flex-shrink-0", style: "height: {MEASUREMENT_ZONE_H}px" }
+
+                canvas {
+                    id: "{canvas_id}",
+                    class: "pointer-events-none min-w-0",
+                    style: "width: 100%; height: {sig_height}px",
+                    width: "100%",
+                    height: "{sig_height}",
+                }
+
+                div { class: "flex-shrink-0", style: "height: {MEASUREMENT_ZONE_H}px" }
+            }
+        }
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 //  Main component
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -222,7 +320,7 @@ pub fn WaveformView(
     let short_id = format!("tab-{}", tab_id.0);
 
     // ── Interaction hooks ────────────────────────────────────────────
-    let mut resize = use_row_resize();
+    let resize = use_row_resize();
     let reorder = use_row_reorder();
     let pan = use_canvas_pan();
     let pan_active = use_signal(|| false);
@@ -475,162 +573,47 @@ pub fn WaveformView(
                         let num_visible = visible_rows.len();
                         let source_row_h = reorder.source_row_height();
 
-                        let row_items: Vec<_> = visible_rows.iter().enumerate().map(|(vi, (ri, sid, lbl, rh, sh))| {
-                            let ri = *ri;
-                            let sh_val = resize.effective_sig_h(ri).unwrap_or(*sh);
-                            let reordering = reorder.is_dragging(ri);
-                            let last = vi == num_visible - 1;
-                            let drop_here = gap_pos.map(|t| t == ri + 1).unwrap_or(false);
-                            let eff_h = *rh;
-                            let tx = if reordering { reorder.drag_offset_x() } else { 0.0 };
-                            let ty = if reordering { reorder.drag_offset_y() } else { 0.0 };
+                        let row_items: Vec<_> = visible_rows.iter().enumerate().map(|(vi, (row_idx, canvas_id, label_el, row_height, base_sig_height))| {
+                            let row_idx = *row_idx;
+                            let sig_height = resize.effective_sig_h(row_idx).unwrap_or(*base_sig_height);
+                            let reordering = reorder.is_dragging(row_idx);
+                            let is_last = vi == num_visible - 1;
+                            let drop_here = gap_pos.map(|t| t == row_idx + 1).unwrap_or(false);
+                            let effective_height = *row_height;
+                            let translate_x = if reordering { reorder.drag_offset_x() } else { 0.0 };
+                            let translate_y = if reordering { reorder.drag_offset_y() } else { 0.0 };
                             // When there's a target gap, collapse the source row
                             // out of the flow so the total height stays constant.
                             // overflow:visible + transform keeps it visible at cursor.
                             let collapsed = reordering && gap_pos.is_some();
-                            (ri, sid.clone(), lbl.clone(), sh_val, eff_h, *rh, reordering, last, drop_here, tx, ty, collapsed)
+                            (row_idx, canvas_id.clone(), label_el.clone(), sig_height, effective_height, *row_height, reordering, is_last, drop_here, translate_x, translate_y, collapsed)
                         }).collect();
 
-                        let last_row_data: Option<(usize, f64)> = row_items.last()
-                            .map(|&(ri, _, _, sh_val, _, _, _, _, _, _, _, _)| (ri, sh_val));
-
-                        let lw = label_width();
+                        let label_width_px = label_width();
+                        let has_rows = !row_items.is_empty();
 
                         rsx! {
-                            for (ri, sid, lbl, sh_val, eff_h, orig_rh, reordering, last, drop_here, tx, ty, collapsed) in row_items {
+                            for (row_idx, canvas_id, label_el, sig_height, effective_height, original_row_height, reordering, is_last, drop_here, translate_x, translate_y, collapsed) in row_items {
                                 // ── Row wrapper ─────────────────────────
                                 div {
                                     class: if reordering { "flex-shrink-0 z-50 relative pointer-events-none" } else { "flex-shrink-0" },
                                     style: if collapsed {
-                                        "height: 0px; overflow: visible; transform: translate({tx}px, {ty}px)"
+                                        "height: 0px; overflow: visible; transform: translate({translate_x}px, {translate_y}px)"
                                     } else {
-                                        "height: {eff_h}px; transform: translate({tx}px, {ty}px)"
+                                        "height: {effective_height}px; transform: translate({translate_x}px, {translate_y}px)"
                                     },
 
-                                    div {
-                                        class: "flex relative",
-                                        style: "height: {eff_h}px",
+                                    {row_inner(
+                                        row_idx, canvas_id, label_el, sig_height, effective_height, original_row_height, label_width_px,
+                                        reorder, wf_state, resize,
+                                        label_width, divider_start_x,
+                                        divider_start_width, dragging_divider,
+                                    )}
 
-                                        // ── LEFT: Label area ───────────────
-                                        div {
-                                            class: "flex flex-col flex-shrink-0 bg-gray-100 dark:bg-[#0a0e14]",
-                                            style: "width: {lw}px; height: {eff_h}px; position: relative",
-
-                                            // Label text (clickable, draggable)
-                                            div {
-                                                class: "flex-1 flex items-center px-1 select-none cursor-grab active:cursor-grabbing",
-                                                style: "height: {eff_h}px",
-                                                onmousedown: {
-                                                    let ri = ri;
-                                                    let orig_rh = orig_rh;
-                                                    let mut reorder = reorder;
-                                                    move |evt| {
-                                                        evt.prevent_default();
-                                                        evt.stop_propagation();
-                                                        let coords = evt.data().coordinates();
-                                                        reorder.begin(
-                                                            ri,
-                                                            coords.element().x,
-                                                            coords.element().y,
-                                                            coords.page().x,
-                                                            coords.page().y,
-                                                            orig_rh,
-                                                        );
-                                                    }
-                                                },
-                                                oncontextmenu: {
-                                                    let mut wf_state = wf_state;
-                                                    let ri = ri;
-                                                    move |evt| {
-                                                        evt.prevent_default();
-                                                        evt.stop_propagation();
-                                                        wf_state.write().row_layout.toggle_row_visible(ri);
-                                                    }
-                                                },
-                                                {lbl}
-                                            }
-
-                                            // Resize handle: 10px tall (5px above + 5px below
-                                            // the row boundary) on all rows except the last,
-                                            // where it's only 5px to avoid overflow scrollbar.
-                                            // Completely transparent — only the 1px line inside
-                                            // changes colour on hover.
-                                            div {
-                                                class: "absolute left-0 right-0 cursor-ns-resize group z-10",
-                                                style: "top: {eff_h - DIVIDER_H}px; height: {DIVIDER_H * 2.0}px",
-                                                onmousedown: {
-                                                    let ri = ri;
-                                                    let sh_val = sh_val;
-                                                    move |evt| {
-                                                        evt.stop_propagation();
-                                                        resize.begin(ri, sh_val, evt.data().coordinates().page().y);
-                                                    }
-                                                },
-                                                // 1px grab line — only visible element,
-                                                // changes to blue on hover
-                                                div {
-                                                    class: "absolute left-0 right-0 bg-gray-300/60 dark:bg-zinc-600/40",
-                                                    style: "height: 1px; top: {DIVIDER_H}px",
-                                                }
-                                            }
-                                        }
-
-                                        // ── Vertical divider overlay (transparent, 10px wide) ──
-                                        // Absolutely positioned between label and canvas so it
-                                        // doesn't consume layout space.  Only the 1px line inside
-                                        // is visible.
-                                        div {
-                                            class: "absolute top-0 bottom-0 cursor-col-resize group z-10",
-                                            style: "left: {lw - DIVIDER_H}px; width: {DIVIDER_H * 2.0}px",
-                                            onmousedown: {
-                                                let label_width = label_width;
-                                                let mut divider_start_x = divider_start_x;
-                                                let mut divider_start_width = divider_start_width;
-                                                let mut dragging_divider = dragging_divider;
-                                                move |evt| {
-                                                    evt.prevent_default();
-                                                    evt.stop_propagation();
-                                                    divider_start_x.set(evt.data().coordinates().page().x);
-                                                    divider_start_width.set(label_width());
-                                                    dragging_divider.set(true);
-                                                }
-                                            },
-                                            div {
-                                                class: "absolute left-1/2 -translate-x-1/2 top-0 bottom-0 w-px bg-gray-300 dark:bg-zinc-600"
-                                            }
-                                        }
-
-                                        // ── RIGHT: Canvas + Measurement Zones ──
-                                        div {
-                                            class: "flex-1 flex flex-col min-w-0",
-                                            style: "height: {eff_h}px",
-
-                                            // MZ top
-                                            div {
-                                                class: "flex-shrink-0",
-                                                style: "height: {MEASUREMENT_ZONE_H}px",
-                                            }
-
-                                            // Canvas
-                                            canvas {
-                                                id: "{sid}",
-                                                class: "pointer-events-none min-w-0",
-                                                style: "width: 100%; height: {sh_val}px",
-                                                width: "100%",
-                                                height: "{sh_val}",
-                                            }
-
-                                            // MZ bottom
-                                            div {
-                                                class: "flex-shrink-0",
-                                                style: "height: {MEASUREMENT_ZONE_H}px",
-                                            }
-                                        }
-                                    }
                                 }
 
                                 // ── Full-width 1px separator (between rows) ──
-                                if !last {
+                                if !is_last {
                                     div {
                                         class: if drop_here { "relative flex-shrink-0 z-20" } else { "relative flex-shrink-0" },
                                         style: if drop_here {
@@ -660,8 +643,8 @@ pub fn WaveformView(
                                 }
                             }
 
-                            // Last row also gets a 1px line (no drag handle below)
-                            if let Some((_last_ri, _last_sh)) = last_row_data {
+                            // Cosmetic 1px line below the last row (no resize handle needed)
+                            if has_rows {
                                 div {
                                     class: "relative flex-shrink-0",
                                     style: "height: 1px",
