@@ -311,10 +311,7 @@ impl AppState {
         let Some(tab) = self.active_tab_state() else {
             return false;
         };
-        let handle = tab
-            .assigned_device_id()
-            .and_then(|did| self.device_manager.device_handle(did));
-        tab.content.as_ref().is_some_and(|c| c.has_data(handle))
+        tab.content.as_ref().is_some_and(|c| c.has_data())
     }
 
     pub fn device_label(&self, id: &DeviceId) -> String {
@@ -421,7 +418,7 @@ mod tests {
         assert_eq!(app.tabs.len(), 1);
         let active = app.active_tab_state().unwrap();
         assert!(active.assigned_device_id().is_none());
-        assert!(active.logic_analyzer().acquisition.as_ref().is_none());
+        assert!(active.logic_analyzer().acq_state == logic_analyzer::AcquisitionState::Idle);
         assert!(app.device_manager.known_devices().is_empty());
     }
 
@@ -459,7 +456,7 @@ mod tests {
         control::start_sync(&mut app, tab_id);
 
         let active = app.active_tab_state().unwrap();
-        assert!(active.logic_analyzer().acquisition.as_ref().is_some());
+        assert!(active.logic_analyzer().acq_state == logic_analyzer::AcquisitionState::Running);
 
         // Drive the pool repeatedly.
         for _ in 0..10 {
@@ -469,14 +466,9 @@ mod tests {
 
         // Drain data.
         if let Some(active) = app.tabs.get_mut(&tab_id) {
-            if let Some(acq) = active.logic_analyzer_mut().acquisition.as_mut() {
-                acq.drain();
-            }
-        }
-
-        let active = app.active_tab_state().unwrap();
-        if let Some(acq) = active.logic_analyzer().acquisition.as_ref() {
-            assert!(acq.sample_count() > 0, "expected samples after pump, got {}", acq.sample_count());
+            // Data arrives via the drain task; just check sample_count.
+            let la = active.logic_analyzer();
+            assert!(la.sample_count > 0, "expected samples after pump, got {}", la.sample_count);
         }
     }
 

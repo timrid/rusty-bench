@@ -30,10 +30,10 @@ use time_ruler::TimeRuler;
 
 use dioxus::prelude::*;
 use rb_canvas::JsCanvasRenderer;
-use rb_core::AcquisitionState;
 use rb_model::{AnalogTrace, DigitalTrace};
 
 use crate::logic_analyzer::decoder::DecoderConfig;
+use crate::logic_analyzer::AcquisitionState;
 use crate::logic_analyzer::waveform_state::{
     row_layout::{DIVIDER_H, LABEL_W, MARKER_BAR_H, MEASUREMENT_ZONE_H, RowKind, TIME_RULER_H},
     WaveformState,

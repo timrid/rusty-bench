@@ -5,8 +5,9 @@ use std::io;
 use futures::StreamExt;
 use futures::executor::block_on;
 use futures::task::LocalSpawnExt;
-use rb_core::{AcquisitionCommand, DeviceHandle};
+use rb_core::DeviceHandle;
 use rb_io::{AnalogCapture, DeviceCapture, DigitalCapture};
+use rb_model::{AnalogTrace, DigitalTrace, Timebase};
 
 use crate::types::{OutputFormat, RecordBounds, RecordOpts};
 use crate::util::find_and_connect;
@@ -21,19 +22,38 @@ pub fn run_record(opts: RecordOpts, writer: &mut dyn io::Write) -> anyhow::Resul
     let device = find_and_connect(&opts.address)?;
     let mut handle = DeviceHandle::new(device);
 
-    if let Some(rate) = opts.rate {
-        block_on(handle.apply(AcquisitionCommand::SetSampleRate(rate)))?;
+    // Resolve sample rate from device capabilities.
+    let sample_rate = resolve_sample_rate(&handle);
+    let rate = opts.rate.unwrap_or(sample_rate);
+
+    // Apply sample rate.
+    if let Some(la) = handle.device_mut().as_logic_analyzer_mut() {
+        block_on(la.set_sample_rate_hz(rate))?;
+    }
+    if let Some(scope) = handle.device_mut().as_oscilloscope_mut() {
+        block_on(scope.set_sample_rate_hz(rate))?;
     }
 
-    // Apply device-specific config options.
-    // For now, config is a forward-looking API; the demo driver ignores them.
-    // Real drivers will parse their own config keys.
-    for _cfg in &opts.config {
-        // TODO: apply config to device capabilities
-    }
+    // Build traces on the CLI side.
+    let timebase = Timebase::new(if rate > 0.0 { rate } else { 1.0 }, 0.0);
+    let mut analog: Vec<AnalogTrace> = handle
+        .device()
+        .as_oscilloscope()
+        .map(|s| {
+            s.channels()
+                .iter()
+                .map(|ch| AnalogTrace::new(ch.clone(), timebase))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut digital: Option<DigitalTrace> = handle
+        .device()
+        .as_logic_analyzer()
+        .filter(|la| !la.channels().is_empty())
+        .map(|la| DigitalTrace::new(la.channels().to_vec(), timebase));
 
     // Validate format before starting acquisition.
-    if opts.format == OutputFormat::Vcd && handle.digital_trace().is_none() {
+    if opts.format == OutputFormat::Vcd && digital.is_none() {
         anyhow::bail!(
             "VCD format requires a device with digital channels, but {} has none",
             opts.address
@@ -41,9 +61,6 @@ pub fn run_record(opts: RecordOpts, writer: &mut dyn io::Write) -> anyhow::Resul
     }
 
     // Compute effective sample target.
-    // When `--time` is given, convert it to a sample count using the device's
-    // sample rate so that the bound works even for instant (demo) sources.
-    let sample_rate = resolve_sample_rate(&handle);
     let mut target_samples = match &opts.bounds {
         RecordBounds::Finite { samples, .. } => samples.unwrap_or(usize::MAX),
         RecordBounds::Continuous => {
@@ -51,33 +68,93 @@ pub fn run_record(opts: RecordOpts, writer: &mut dyn io::Write) -> anyhow::Resul
         }
     };
     if let RecordBounds::Finite { time: Some(t), .. } = &opts.bounds {
-        let from_time = (sample_rate * t).round() as usize;
+        let from_time = (rate * t).round() as usize;
         target_samples = target_samples.min(from_time);
     }
 
+    let mut sample_count = 0usize;
+
     if target_samples > 0 {
-        let (read_loop, mut data_rx) = block_on(handle.start_streaming())?;
+        // Arm the device.
+        if let Some(la) = handle.device_mut().as_logic_analyzer_mut() {
+            block_on(la.arm())?;
+        }
+        if let Some(scope) = handle.device_mut().as_oscilloscope_mut() {
+            block_on(scope.arm())?;
+        }
+
+        // Start streaming.
+        let (data_tx, data_rx) = futures::channel::mpsc::unbounded();
+        let (gui_tx, mut gui_rx) = futures::channel::mpsc::unbounded();
+        let read_loop = block_on(
+            handle
+                .device_mut()
+                .as_acquisition_source_mut()
+                .ok_or_else(|| anyhow::anyhow!("device has no acquisition source"))?
+                .start_streaming(data_tx),
+        )?;
 
         let mut pool = futures::executor::LocalPool::new();
         pool.spawner()
-            .spawn_local(read_loop)
+            .spawn_local(rb_core::run_acquisition(read_loop, data_rx, Some(gui_tx)))
             .map_err(|e| anyhow::anyhow!("failed to spawn read loop: {e}"))?;
 
-        while handle.sample_count() < target_samples {
-            let chunk = pool.run_until(data_rx.next());
+        // Drain data into local traces.
+        while sample_count < target_samples {
+            let chunk = pool.run_until(gui_rx.next());
             match chunk {
                 Some(chunk) => {
-                    handle.ingest_chunk(&chunk);
+                    for (i, trace) in analog.iter_mut().enumerate() {
+                        if let Some(samples) = chunk.analog_channel(i) {
+                            trace.push_raw(samples);
+                        }
+                    }
+                    if let Some(ref mut dt) = digital {
+                        if !chunk.logic().is_empty() {
+                            dt.push_words(chunk.logic());
+                        }
+                    }
+                    sample_count += chunk.sample_count();
                 }
-                None => break, // streaming stopped
+                None => break,
             }
         }
-        block_on(handle.apply(AcquisitionCommand::Stop))?;
-        drop(data_rx);
+
+        // Stop streaming.
+        drop(gui_rx);
+        if let Some(src) = handle.device_mut().as_acquisition_source_mut() {
+            block_on(src.stop_streaming())?;
+        }
+        if let Some(la) = handle.device_mut().as_logic_analyzer_mut() {
+            block_on(la.stop())?;
+        }
+        if let Some(scope) = handle.device_mut().as_oscilloscope_mut() {
+            block_on(scope.stop())?;
+        }
         pool.run_until_stalled();
     }
 
-    let capture = capture_from_handle(&handle);
+    // Build capture from local traces.
+    let info = handle.device().info().clone();
+    let analog_captures: Vec<AnalogCapture> = analog
+        .iter()
+        .map(|t| AnalogCapture {
+            channel: t.channel().clone(),
+            timebase: *t.timebase(),
+            samples: t.store().raw().to_vec(),
+        })
+        .collect();
+    let digital_capture = digital.map(|dt| DigitalCapture {
+        channels: dt.channels().to_vec(),
+        timebase: *dt.timebase(),
+        words: dt.store().words().to_vec(),
+    });
+
+    let capture = DeviceCapture {
+        info,
+        analog: analog_captures,
+        digital: digital_capture,
+    };
 
     match opts.format {
         OutputFormat::Csv => rb_io::write_csv(&capture, writer)?,
@@ -91,37 +168,8 @@ pub fn run_record(opts: RecordOpts, writer: &mut dyn io::Write) -> anyhow::Resul
     Ok(())
 }
 
-// ── Internal helpers ──────────────────────────────────────────────────────────
-
-/// Snapshots a [`DeviceHandle`]'s stores into a [`DeviceCapture`] for export.
-fn capture_from_handle(handle: &DeviceHandle) -> DeviceCapture {
-    let info = handle.device().info().clone();
-
-    let analog = handle
-        .analog_traces()
-        .iter()
-        .map(|t| AnalogCapture {
-            channel: t.channel().clone(),
-            timebase: *t.timebase(),
-            samples: t.store().raw().to_vec(),
-        })
-        .collect();
-
-    let digital = handle.digital_trace().map(|dt| DigitalCapture {
-        channels: dt.channels().to_vec(),
-        timebase: *dt.timebase(),
-        words: dt.store().words().to_vec(),
-    });
-
-    DeviceCapture {
-        info,
-        analog,
-        digital,
-    }
-}
-
 /// Returns the device's current sample rate, reading from whichever acquirable
-/// capability (oscilloscope, logic analyzer, SDR) is available.
+/// capability is available.
 fn resolve_sample_rate(handle: &DeviceHandle) -> f64 {
     if let Some(scope) = handle.device().as_oscilloscope() {
         return scope.sample_rate_hz();

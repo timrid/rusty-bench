@@ -7,7 +7,6 @@
 //! The UI widget for editing the config lives in
 //! [`components::decoder_setup`](crate::logic_analyzer::components::decoder_setup::DecoderSetup).
 
-use rb_core::DeviceHandle;
 use rb_decode::{Annotation, Decoder, I2cConfig, I2cDecoder, SpiConfig, SpiDecoder, UartConfig, UartDecoder};
 use rb_model::DigitalTrace;
 
@@ -137,12 +136,12 @@ impl DecoderConfig {
         }
     }
 
-    /// Convenience: feed the decoder from a `DeviceHandle`'s digital trace.
-    pub fn update_from_handle(&mut self, handle: &DeviceHandle) {
+    /// Convenience: feed the decoder from a tab's digital trace.
+    pub fn update_from_tab(&mut self, digital: Option<&DigitalTrace>) {
         if self.dirty {
             self.rebuild();
         }
-        if let Some(dt) = handle.digital_trace() {
+        if let Some(dt) = digital {
             self.feed(dt);
         }
     }

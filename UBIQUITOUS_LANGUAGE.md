@@ -14,6 +14,7 @@ and an egui GUI that runs natively and in the browser.
 | **Device Class**   | A category of capability: Logic Analyzer, Multimeter, Oscilloscope, Power Supply, Waveform Generator, SDR Receiver, Spectrum Analyzer, Electronic Load | Device type, mode |
 | **Multi-class device** | A single device that exposes capabilities from more than one Device Class                    | Combo device, hybrid         |
 | **Driver Registry** | The explicit, statically-linked catalogue of available drivers, gated per build target          | Plugin registry              |
+| **Device Handle**   | An exclusive access token for a connected **Device**. Only one consumer (Tab, CLI) can hold the handle at a time — all device access (acquisition, configuration, firmware updates) requires it. The handle carries no sample data and no acquisition state. | Device lock, device guard |
 
 ## Connectivity
 
@@ -39,7 +40,8 @@ and an egui GUI that runs natively and in the browser.
 | **Sample**           | A single measured value on a channel at one point in time                                     | Reading, point, datum         |
 | **Sample Rate**      | How many samples per second a channel is acquired at                                          | Speed, frequency              |
 | **Timebase**         | The time reference (start time + sample rate) that maps samples to wall-clock time            | Clock, time axis              |
-| **Sample Store**     | The per-device structure holding acquired samples plus their multi-resolution aggregation     | Buffer, cache, data store     |
+| **Sample Store**     | The append-only structure holding acquired samples plus their multi-resolution aggregation (**Mip-Map**). Owned by the **Tab** (or CLI session), not by the **Device**. Each Tab builds its own stores when acquisition starts. | Buffer, cache, data store     |
+| **Acquisition State** | The lifecycle state of an acquisition: `Idle` (no acquisition), `Running` (streaming), `Stopped` (clean stop), or `Error` (fault). Lives in the **Tab Content**, not in the **Device Handle**. | Status, run state |
 | **Mip-Map**          | The multi-resolution pyramid over a channel (min/max per bucket for analog, edge index for digital) used for display | LOD, pyramid, downsample |
 
 ## Decoding
@@ -82,7 +84,9 @@ and an egui GUI that runs natively and in the browser.
 - **Connect** turns a **Known Device** into a live **Device**; **Disconnect** releases it back to a not-connected **Known Device**.
 - Each **Capability** corresponds to one **Device Class**; a **Multi-class device** has several.
 - A **Driver** talks to its device over a **Transport**; the same driver is unavailable on a platform that lacks its required **Transport**.
-- A **Device** performs **Acquisitions** that fill its **Sample Store**; the store maintains a **Mip-Map** per **Channel**.
+- A **Device** is a pure data producer: it streams **Sample Chunks** during an **Acquisition** but stores nothing itself.
+- A **Tab** (or CLI session) owns its own **Sample Store** per **Channel**; the store maintains a **Mip-Map** per **Channel**.
+- A **Device Handle** grants exclusive access to a **Device**; only the holder can start/stop acquisition or change configuration.
 - A persisted **Acquisition** is a **Capture**.
 - A **Decoder** consumes **Channels** (or another **Decoder** via **Stacking**) and emits **Annotations**.
 - A **Tab** presents one **Device**'s **Capabilities** and reads from its **Sample Store**; it may also display an imported **Capture** without any live **Device**.

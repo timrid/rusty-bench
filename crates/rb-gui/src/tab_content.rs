@@ -49,26 +49,21 @@ impl TabContent {
         }
     }
 
-    /// Stops any running acquisition/generation and clears the active handle.
+    /// Stops any running acquisition/generation.
     /// Safe to call even if nothing is running.
     pub fn stop(&mut self) {
         match self {
             TabContent::LogicAnalyzer(la) => {
-                if let Some(acq) = la.acquisition.as_mut() {
-                    acq.send_command(rb_core::AcquisitionCommand::Stop);
-                }
-                la.acquisition = None;
+                la.data_tx = None;
+                la.acq_state = crate::logic_analyzer::AcquisitionState::Stopped;
             }
         }
     }
 
     /// Whether this content currently holds acquired sample data.
-    ///
-    /// `device_handle` is the optional [`DeviceHandle`](rb_core::DeviceHandle)
-    /// from the device pool (may be absent while acquisition is running).
-    pub fn has_data(&self, device_handle: Option<&rb_core::DeviceHandle>) -> bool {
+    pub fn has_data(&self) -> bool {
         match self {
-            TabContent::LogicAnalyzer(la) => la.has_data(device_handle),
+            TabContent::LogicAnalyzer(la) => la.has_data(),
         }
     }
 }

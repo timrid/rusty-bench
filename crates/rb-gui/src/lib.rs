@@ -24,7 +24,7 @@ pub(crate) mod app_state;
 pub(crate) mod title_bar;
 
 pub use app_state::AppState;
-pub use logic_analyzer::acquisition::{AcquisitionConfig, DeviceAcquisition};
+pub use logic_analyzer::acquisition::AcquisitionConfig;
 pub use logic_analyzer::decoder::DecoderConfig;
 pub use logic_analyzer::waveform_state::WaveformState;
 pub use tab_content::{LogicAnalyzerContent, TabContent};

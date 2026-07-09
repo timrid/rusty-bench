@@ -2,8 +2,8 @@
 //! Sits directly above the waveform display.
 
 use dioxus::prelude::*;
-use rb_core::AcquisitionState;
 
+use crate::logic_analyzer::AcquisitionState;
 use crate::logic_analyzer::control;
 use crate::logic_analyzer::waveform_state::WaveformState;
 use crate::components::app::AppStateRef;
@@ -21,13 +21,10 @@ pub fn CanvasToolbar(
 
     let (acq_state, _sample_count) = {
         let s = state.borrow();
-        if let Some(acq) = control::acq_for_tab(&s, tab_id) {
-            (acq.state().clone(), acq.sample_count())
-        } else if let Some(handle) = s.handle_for_tab(tab_id) {
-            (handle.state().clone(), handle.sample_count())
-        } else {
-            (AcquisitionState::Idle, 0)
-        }
+        let la = s.active_tab_state().map(|t| t.logic_analyzer());
+        let st = la.map(|l| l.acq_state.clone()).unwrap_or(AcquisitionState::Idle);
+        let sc = la.map(|l| l.sample_count).unwrap_or(0);
+        (st, sc)
     };
 
     let is_running = matches!(acq_state, AcquisitionState::Running);

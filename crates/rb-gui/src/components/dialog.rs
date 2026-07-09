@@ -85,7 +85,6 @@ pub fn Dialog(data_version: Signal<u64>) -> Element {
                                 // Clear stale traces from the device handle
                                 // so the WaveformView shows fresh channels.
                                 if let Some(h) = s.device_manager.device_handle_mut(target_did) {
-                                    h.discard_samples();
                                     let content = crate::logic_analyzer::init_content(h.device());
                                     if let Some(tab) = s.tabs.get_mut(&tab_id) {
                                         tab.content = Some(crate::tab_content::TabContent::LogicAnalyzer(content));

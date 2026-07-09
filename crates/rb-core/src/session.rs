@@ -77,9 +77,6 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::StreamExt;
-    use futures::executor::block_on;
-    use futures::task::LocalSpawnExt;
     use rb_drivers::demo::{DemoConfig, DemoDevice};
 
     fn add_demo(session: &mut Session, id: &str) -> DeviceId {
@@ -100,23 +97,13 @@ mod tests {
     }
 
     #[test]
-    fn start_streaming_fills_store() {
+    fn device_handle_provides_access_to_device() {
         let mut session = Session::new();
         let id = add_demo(&mut session, "demo:0");
 
-        let handle = session.device_mut(&id).unwrap();
-        let (read_loop, mut data_rx) = block_on(handle.start_streaming()).unwrap();
-
-        let mut pool = futures::executor::LocalPool::new();
-        pool.spawner().spawn_local(read_loop).unwrap();
-
-        let chunk = pool.run_until(data_rx.next()).unwrap();
-        handle.ingest_chunk(&chunk);
-
-        drop(data_rx);
-        pool.run_until_stalled();
-
         let handle = session.device(&id).unwrap();
-        assert!(handle.sample_count() > 0);
+        assert!(handle.device().as_oscilloscope().is_some());
+        assert!(handle.device().as_logic_analyzer().is_some());
+        assert_eq!(handle.id().to_string(), "demo:0");
     }
 }

@@ -35,9 +35,4 @@ pub enum SessionError {
     /// process/tab survived but this device's capture was lost.
     #[error("acquisition task panicked")]
     AcquisitionPanicked,
-
-    /// The acquisition task has already finished, so the command was not
-    /// delivered.
-    #[error("acquisition task is no longer running")]
-    TaskClosed,
 }

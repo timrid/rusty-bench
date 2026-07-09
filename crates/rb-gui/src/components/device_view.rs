@@ -15,7 +15,6 @@ use super::app::AppStateRef;
 use crate::logic_analyzer::components::{
     AcquisitionSetup, CanvasToolbar, DecoderSetup, WaveformData, WaveformView,
 };
-use crate::logic_analyzer::control;
 
 /// The main content view for the active session.
 #[component]
@@ -62,23 +61,17 @@ pub fn DeviceView(data_version: Signal<u64>) -> Element {
     // Device connected — show full view.
     let theme: Signal<crate::app_state::Theme> = use_context();
 
-    // Compute WaveformData from AppState for the active tab (synchronous, same as before refactoring).
+    // Compute WaveformData from tab's own traces.
     let mut waveform_data = use_signal(WaveformData::empty);
     {
         let Ok(s) = state.try_borrow() else { return prev_frame(); };
-        let wd = if let Some(acq) = control::acq_for_tab(&s, active_tab) {
+        let wd = if let Some(tab) = s.active_tab_state() {
+            let la = tab.logic_analyzer();
             WaveformData {
-                acq_state: acq.state().clone(),
-                analog: acq.analog_traces().to_vec(),
-                digital: acq.digital_trace().cloned(),
-                sample_count: acq.sample_count(),
-            }
-        } else if let Some(h) = s.handle_for_tab(active_tab) {
-            WaveformData {
-                acq_state: h.state().clone(),
-                analog: h.analog_traces().to_vec(),
-                digital: h.digital_trace().cloned(),
-                sample_count: h.sample_count(),
+                acq_state: la.acq_state.clone(),
+                analog: la.analog.clone(),
+                digital: la.digital.clone(),
+                sample_count: la.sample_count,
             }
         } else {
             WaveformData::empty()
@@ -151,14 +144,11 @@ pub fn DeviceView(data_version: Signal<u64>) -> Element {
         }
     }
 
-    // Update sample_count from the active tab's acquisition.
+    // Update sample_count from the active tab's traces.
     {
         let Ok(s) = state.try_borrow() else { return prev_frame(); };
         if let Some(tab) = s.active_tab_state() {
-            let sc = tab.logic_analyzer().acquisition.as_ref()
-                .map(|a| a.sample_count() as u64)
-                .unwrap_or(0);
-            sample_count_signal.set(sc);
+            sample_count_signal.set(tab.logic_analyzer().sample_count as u64);
         }
     }
 
@@ -181,9 +171,7 @@ pub fn DeviceView(data_version: Signal<u64>) -> Element {
                     on_sample_rate_change: Callback::new(move |hz| {
                         let Ok(mut s) = state.try_borrow_mut() else { return; };
                         if let Some(tab) = s.tabs.get_mut(&active_tab) {
-                            if let Some(acq) = tab.logic_analyzer_mut().acquisition.as_mut() {
-                                acq.send_command(rb_core::AcquisitionCommand::SetSampleRate(hz));
-                            }
+                            tab.logic_analyzer_mut().acquisition_config.sample_rate_hz = hz;
                         }
                     }),
                 }

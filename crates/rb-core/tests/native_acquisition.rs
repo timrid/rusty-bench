@@ -14,26 +14,61 @@ use futures::StreamExt;
 use futures::channel::mpsc;
 use futures::task::LocalSpawnExt;
 
+use rb_core::Session;
 use rb_core::runtime::native::AcquisitionController;
-use rb_core::{AcquisitionCommand, DeviceHandle, Session};
+use rb_core::DeviceHandle;
 use rb_device::{AcquisitionSource, Device, DeviceId, DeviceInfo, DeviceResult, Oscilloscope};
 use rb_drivers::demo::{DemoConfig, DemoDevice};
-use rb_model::{AnalogChannel, SampleChunk};
+use rb_model::{AnalogChannel, AnalogTrace, SampleChunk, Timebase};
 
 #[tokio::test]
-async fn spawned_task_acquires_via_command_channel() {
+async fn spawned_acquisition_produces_samples() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
             let device = DemoDevice::new(DeviceId::new("demo:0"), DemoConfig::default());
-            let handle = DeviceHandle::new(Box::new(device));
+            let mut handle = DeviceHandle::new(Box::new(device));
 
-            let controller = AcquisitionController::spawn(handle);
-            controller.send(AcquisitionCommand::Start).unwrap();
+            // Arm and set sample rate.
+            if let Some(scope) = handle.device().as_oscilloscope_mut() {
+                scope.arm().await.unwrap();
+            }
+            if let Some(la) = handle.device().as_logic_analyzer_mut() {
+                la.arm().await.unwrap();
+            }
+
+            // Start streaming.
+            let (data_tx, data_rx) = mpsc::unbounded::<SampleChunk>();
+            let (gui_tx, mut gui_rx) = mpsc::unbounded::<SampleChunk>();
+            let read_loop = handle
+                .device()
+                .as_acquisition_source_mut()
+                .unwrap()
+                .start_streaming(data_tx)
+                .await
+                .unwrap();
+
+            let controller = AcquisitionController::spawn(read_loop, data_rx, Some(gui_tx), gui_tx.clone());
             tokio::time::sleep(Duration::from_millis(100)).await;
 
-            let handle = controller.finish().await.unwrap();
-            assert!(handle.sample_count() > 0, "expected the store to fill");
+            // Read some chunks.
+            let mut count = 0;
+            while let Ok(Some(_chunk)) =
+                tokio::time::timeout(Duration::from_millis(50), gui_rx.next()).await
+            {
+                count += 1;
+                if count >= 3 {
+                    break;
+                }
+            }
+
+            controller.finish().await;
+            assert!(count > 0, "expected at least one chunk");
+
+            // Clean stop.
+            if let Some(src) = handle.device().as_acquisition_source_mut() {
+                src.stop_streaming().await.unwrap();
+            }
         })
         .await;
 }
@@ -120,33 +155,38 @@ async fn a_panicking_device_is_isolated_from_the_session() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let handle = DeviceHandle::new(Box::new(PanicDevice::new()));
-            let controller = AcquisitionController::spawn(handle);
-            controller.send(AcquisitionCommand::Start).unwrap();
+            let mut handle = DeviceHandle::new(Box::new(PanicDevice::new()));
+
+            // Arm the device (this succeeds).
+            if let Some(scope) = handle.device().as_oscilloscope_mut() {
+                scope.arm().await.unwrap();
+            }
+
+            // Start streaming — this will panic inside the spawned task.
+            let (data_tx, data_rx) = mpsc::unbounded::<SampleChunk>();
+            let (gui_tx, _gui_rx) = mpsc::unbounded::<SampleChunk>();
+
+            // Spawn the acquisition in a task. The panic should be contained.
+            let join = tokio::task::spawn_local(async move {
+                if let Some(src) = handle.device().as_acquisition_source_mut() {
+                    // This panics inside start_streaming.
+                    let _ = src.start_streaming(data_tx).await;
+                }
+            });
+
+            // The spawned task should panic, not the test.
             tokio::time::sleep(Duration::from_millis(15)).await;
+            let result = join.await;
+            assert!(result.is_err(), "expected the spawned task to panic");
 
-            // The task panicked, but the process survived and the error is surfaced.
-            let outcome = controller.finish().await;
-            assert!(matches!(
-                outcome,
-                Err(rb_core::SessionError::AcquisitionPanicked)
-            ));
+            drop(gui_tx);
+            drop(data_rx);
 
-            // The session is still fully usable: a fresh device works.
+            // A fresh device still works.
             let mut session = Session::new();
             let device = DemoDevice::new(DeviceId::new("demo:0"), DemoConfig::default());
-            let id = session.add_device(Box::new(device));
-            let handle = session.device_mut(&id).unwrap();
-            let (read_loop, mut data_rx) = handle.start_streaming().await.unwrap();
-
-            let mut pool = futures::executor::LocalPool::new();
-            pool.spawner().spawn_local(read_loop).unwrap();
-            let chunk = pool.run_until(data_rx.next()).unwrap();
-            handle.ingest_chunk(&chunk);
-            assert!(handle.sample_count() > 0);
-
-            drop(data_rx);
-            pool.run_until_stalled();
+            session.add_device(Box::new(device));
+            assert_eq!(session.len(), 1);
         })
         .await;
 }
