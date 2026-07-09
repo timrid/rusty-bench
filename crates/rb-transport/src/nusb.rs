@@ -121,7 +121,7 @@ impl UsbTransport for NusbTransport {
             .status
             .map_err(|e| TransportError::Io(format!("USB bulk IN: {e}")))?;
         log::debug!("nusb: bulk IN completed, len={}", completed.buffer.len());
-        Ok(completed.buffer.to_vec())
+        Ok(completed.buffer.into_vec())
     }
 
     // ── Bulk OUT ───────────────────────────────────────────────────────────
@@ -148,7 +148,7 @@ impl UsbTransport for NusbTransport {
         completed
             .status
             .map_err(|e| TransportError::Io(format!("USB bulk OUT: {e}")))?;
-        Ok(completed.buffer.to_vec())
+        Ok(completed.buffer.into_vec())
     }
 
     // ── Control ────────────────────────────────────────────────────────────

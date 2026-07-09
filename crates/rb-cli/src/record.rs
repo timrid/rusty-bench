@@ -147,7 +147,7 @@ pub fn run_record(opts: RecordOpts, writer: &mut dyn io::Write) -> anyhow::Resul
     let digital_capture = digital.map(|dt| DigitalCapture {
         channels: dt.channels().to_vec(),
         timebase: *dt.timebase(),
-        words: dt.store().words().to_vec(),
+        words: dt.store().words_to_vec(),
     });
 
     let capture = DeviceCapture {

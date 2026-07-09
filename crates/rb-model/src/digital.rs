@@ -17,11 +17,131 @@ pub type LogicWord = u64;
 /// Maximum number of digital channels in a single logic group.
 pub const MAX_DIGITAL_CHANNELS: u8 = 64;
 
+// ── Width-optimised backing storage ──────────────────────────────────────────
+
+/// Width-optimised backing storage for digital samples.
+///
+/// Automatically picks the smallest integer type that holds the device's channel
+/// count: 1–8 ch → u8, 9–16 ch → u16, 17–32 ch → u32, 33–64 ch → u64.
+/// The public API always operates on [`LogicWord`] (u64); conversion is
+/// transparent.
+#[derive(Clone, Debug)]
+enum WordStorage {
+    /// 1–8 channels, 1 byte per sample.
+    U8(Vec<u8>),
+    /// 9–16 channels, 2 bytes per sample.
+    U16(Vec<u16>),
+    /// 17–32 channels, 4 bytes per sample.
+    U32(Vec<u32>),
+    /// 33–64 channels, 8 bytes per sample (same as LogicWord).
+    U64(Vec<u64>),
+}
+
+impl WordStorage {
+    /// Creates an empty store of the appropriate width.
+    fn for_channel_count(count: u8) -> Self {
+        match count {
+            1..=8 => Self::U8(Vec::new()),
+            9..=16 => Self::U16(Vec::new()),
+            17..=32 => Self::U32(Vec::new()),
+            _ => Self::U64(Vec::new()),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::U8(v) => v.len(),
+            Self::U16(v) => v.len(),
+            Self::U32(v) => v.len(),
+            Self::U64(v) => v.len(),
+        }
+    }
+
+    fn push(&mut self, word: LogicWord) {
+        match self {
+            Self::U8(v) => v.push(word as u8),
+            Self::U16(v) => v.push(word as u16),
+            Self::U32(v) => v.push(word as u32),
+            Self::U64(v) => v.push(word),
+        }
+    }
+
+    fn extend_from_slice(&mut self, words: &[LogicWord]) {
+        match self {
+            Self::U8(v) => v.extend(words.iter().map(|&w| w as u8)),
+            Self::U16(v) => v.extend(words.iter().map(|&w| w as u16)),
+            Self::U32(v) => v.extend(words.iter().map(|&w| w as u32)),
+            Self::U64(v) => v.extend_from_slice(words),
+        }
+    }
+
+    fn get(&self, index: usize) -> LogicWord {
+        match self {
+            Self::U8(v) => u64::from(v[index]),
+            Self::U16(v) => u64::from(v[index]),
+            Self::U32(v) => u64::from(v[index]),
+            Self::U64(v) => v[index],
+        }
+    }
+
+    fn bit(&self, bit: u8, index: usize) -> bool {
+        (self.get(index) >> bit) & 1 != 0
+    }
+
+    /// Calls `f(index, word)` for each word from `start` to the end.
+    /// The match is outside the hot loop, so per-sample dispatch is avoided.
+    fn for_each_from(&self, start: usize, mut f: impl FnMut(usize, LogicWord)) {
+        match self {
+            Self::U8(v) => {
+                for idx in start..v.len() {
+                    f(idx, u64::from(v[idx]));
+                }
+            }
+            Self::U16(v) => {
+                for idx in start..v.len() {
+                    f(idx, u64::from(v[idx]));
+                }
+            }
+            Self::U32(v) => {
+                for idx in start..v.len() {
+                    f(idx, u64::from(v[idx]));
+                }
+            }
+            Self::U64(v) => {
+                for idx in start..v.len() {
+                    f(idx, v[idx]);
+                }
+            }
+        }
+    }
+
+    /// Reads a range and returns an owned `Vec<LogicWord>`.
+    fn read_range(&self, range: Range<usize>) -> Vec<LogicWord> {
+        let start = range.start.min(self.len());
+        let end = range.end.min(self.len());
+        if start >= end {
+            return Vec::new();
+        }
+        match self {
+            Self::U8(v) => v[start..end].iter().map(|&b| u64::from(b)).collect(),
+            Self::U16(v) => v[start..end].iter().map(|&w| u64::from(w)).collect(),
+            Self::U32(v) => v[start..end].iter().map(|&w| u64::from(w)).collect(),
+            Self::U64(v) => v[start..end].to_vec(),
+        }
+    }
+}
+
+// ── DigitalStore ─────────────────────────────────────────────────────────────
+
 /// Append-only bit-packed logic samples for a channel group.
+///
+/// Samples are stored in the smallest integer type that fits the device's
+/// channel count (u8 for ≤8 ch, u16 for ≤16 ch, etc.).  The public API
+/// always uses [`LogicWord`] (u64).
 #[derive(Clone, Debug)]
 pub struct DigitalStore {
     channel_count: u8,
-    words: Vec<LogicWord>,
+    inner: WordStorage,
 }
 
 impl DigitalStore {
@@ -37,7 +157,7 @@ impl DigitalStore {
         );
         Self {
             channel_count,
-            words: Vec::new(),
+            inner: WordStorage::for_channel_count(channel_count),
         }
     }
 
@@ -50,40 +170,55 @@ impl DigitalStore {
     /// Number of samples stored.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.words.len()
+        self.inner.len()
     }
 
     /// Whether the store holds no samples.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.words.is_empty()
+        self.inner.len() == 0
     }
 
     /// Appends a single logic word.
     pub fn push(&mut self, word: LogicWord) {
-        self.words.push(word);
+        self.inner.push(word);
     }
 
     /// Appends a slice of logic words.
     pub fn extend_from_slice(&mut self, words: &[LogicWord]) {
-        self.words.extend_from_slice(words);
+        self.inner.extend_from_slice(words);
     }
 
-    /// All logic words.
+    /// All logic words as an owned `Vec`.
+    ///
+    /// This allocates.  For iteration without allocation, use
+    /// [`for_each_word_from`](Self::for_each_word_from).
     #[must_use]
-    pub fn words(&self) -> &[LogicWord] {
-        &self.words
+    pub fn words_to_vec(&self) -> Vec<LogicWord> {
+        self.inner.read_range(0..self.inner.len())
     }
 
-    /// A consistent read slice for `range`, clamped to the available samples.
+    /// Logic words in `range` as an owned `Vec`.
+    ///
+    /// Only the requested range is allocated.  Prefer this over
+    /// [`words_to_vec`](Self::words_to_vec) when you only need a subset.
     #[must_use]
-    pub fn read(&self, range: Range<usize>) -> &[LogicWord] {
-        let start = range.start.min(self.words.len());
-        let end = range.end.min(self.words.len());
-        if start >= end {
-            return &[];
-        }
-        &self.words[start..end]
+    pub fn words_range(&self, range: Range<usize>) -> Vec<LogicWord> {
+        self.inner.read_range(range)
+    }
+
+    /// Calls `f(index, word)` for each word from `start` to the end.
+    ///
+    /// This is the zero-allocation iteration primitive used by
+    /// [`DigitalMipMap::extend`].
+    pub fn for_each_word_from(&self, start: usize, f: impl FnMut(usize, LogicWord)) {
+        self.inner.for_each_from(start, f);
+    }
+
+    /// A consistent read slice for `range`, returned as an owned `Vec`.
+    #[must_use]
+    pub fn read(&self, range: Range<usize>) -> Vec<LogicWord> {
+        self.inner.read_range(range)
     }
 
     /// State of `bit` at sample `index`.
@@ -92,7 +227,7 @@ impl DigitalStore {
     /// Panics if `index` is out of bounds.
     #[must_use]
     pub fn state(&self, bit: u8, index: usize) -> bool {
-        (self.words[index] >> bit) & 1 != 0
+        self.inner.bit(bit, index)
     }
 }
 
@@ -163,7 +298,20 @@ impl DigitalMipMap {
     #[must_use]
     pub fn build(words: &[LogicWord], channel_count: u8) -> Self {
         let mut m = Self::new(channel_count);
-        m.extend(words);
+        for (idx, &word) in words.iter().enumerate() {
+            for ch in 0..channel_count as usize {
+                let v = (word >> ch) & 1 != 0;
+                if idx == 0 {
+                    m.initial[ch] = v;
+                    m.last[ch] = v;
+                } else if v != m.last[ch] {
+                    m.transitions[ch].push(idx as u64);
+                    m.last[ch] = v;
+                }
+            }
+        }
+        m.base_len = words.len();
+        m.rebuild_pyramid(0);
         m
     }
 
@@ -179,22 +327,21 @@ impl DigitalMipMap {
         self.base_len
     }
 
-    /// Brings the index and pyramid up to date with `words`.
+    /// Brings the index and pyramid up to date from a [`DigitalStore`].
     ///
-    /// `words` is the full, append-only logic word slice.  Only newly
-    /// appended samples are scanned; repeated calls are cheap and match
-    /// a single [`DigitalMipMap::build`].
-    pub fn extend(&mut self, words: &[LogicWord]) {
+    /// Only newly appended samples are scanned; repeated calls are cheap
+    /// and match a single [`DigitalMipMap::build`].
+    pub fn extend(&mut self, store: &DigitalStore) {
         debug_assert!(
-            words.len() >= self.base_len,
+            store.len() >= self.base_len,
             "DigitalMipMap base is append-only"
         );
-        let radix = DIGITAL_RADIX;
         let prev_base_len = self.base_len;
+        let channel_count = self.channel_count;
 
         // ── Update transitions ─────────────────────────────────────────
-        for (idx, &word) in words.iter().enumerate().skip(self.base_len) {
-            for ch in 0..self.channel_count as usize {
+        store.for_each_word_from(self.base_len, |idx, word| {
+            for ch in 0..channel_count as usize {
                 let v = (word >> ch) & 1 != 0;
                 if idx == 0 {
                     self.initial[ch] = v;
@@ -204,12 +351,17 @@ impl DigitalMipMap {
                     self.last[ch] = v;
                 }
             }
-        }
-        self.base_len = words.len();
+        });
+        self.base_len = store.len();
 
         // ── Rebuild pyramid levels ─────────────────────────────────────
-        // Same incremental strategy as the analog mip-map: only chunks
-        // affected by newly appended base samples are recomputed.
+        self.rebuild_pyramid(prev_base_len);
+    }
+
+    /// Rebuild the multi-resolution pyramid from `from_base` onward.
+    fn rebuild_pyramid(&mut self, prev_base_len: usize) {
+        let radix = DIGITAL_RADIX;
+
         for ch in 0..self.channel_count as usize {
             if self.levels[ch].is_empty() {
                 self.levels[ch].push(Vec::new());
@@ -447,7 +599,7 @@ impl DigitalTrace {
     /// Appends logic words and updates the transition index.
     pub fn push_words(&mut self, words: &[LogicWord]) {
         self.store.extend_from_slice(words);
-        self.mip.extend(self.store.words());
+        self.mip.extend(&self.store);
     }
 
     /// Number of samples in the trace.
@@ -505,8 +657,8 @@ mod tests {
         assert!(s.state(0, 0));
         assert!(s.state(1, 1));
         assert!(!s.state(0, 2));
-        assert_eq!(s.read(1..3), &[0b011, 0b010]);
-        assert_eq!(s.read(10..20), &[] as &[LogicWord]);
+        assert_eq!(s.read(1..3), vec![0b011, 0b010]);
+        assert_eq!(s.read(10..20), Vec::<LogicWord>::new());
     }
 
     #[test]
@@ -550,9 +702,14 @@ mod tests {
         let words: Vec<LogicWord> = (0..500u64).map(|i| (i ^ (i >> 1)) & 0xF).collect();
         let batch = DigitalMipMap::build(&words, 4);
 
+        let mut store = DigitalStore::new(4);
         let mut incr = DigitalMipMap::new(4);
         for chunk_end in [1usize, 3, 4, 9, 64, 199, 200, 499, 500] {
-            incr.extend(&words[..chunk_end]);
+            let prev = store.len();
+            if chunk_end > prev {
+                store.extend_from_slice(&words[prev..chunk_end]);
+            }
+            incr.extend(&store);
         }
         assert_eq!(incr.base_len(), batch.base_len());
         for ch in 0..4 {

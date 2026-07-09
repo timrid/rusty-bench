@@ -125,13 +125,14 @@ impl DecoderConfig {
             self.rebuild();
         }
         if let Some(dec) = &mut self.decoder {
-            let words = dt.store().words();
+            let store = dt.store();
             let rate = dt.timebase().sample_rate_hz();
-            if self.decoded_up_to < words.len() {
+            if self.decoded_up_to < store.len() {
+                let words = store.words_range(self.decoded_up_to..store.len());
                 let new_anns =
-                    dec.feed(&words[self.decoded_up_to..], self.decoded_up_to, rate);
+                    dec.feed(&words, self.decoded_up_to, rate);
                 self.annotations.extend(new_anns);
-                self.decoded_up_to = words.len();
+                self.decoded_up_to = store.len();
             }
         }
     }

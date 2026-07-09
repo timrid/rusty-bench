@@ -10,7 +10,7 @@
 //!    range with no gaps or overlaps.
 
 use proptest::prelude::*;
-use rb_model::{AnalogMipMap, DigitalMipMap, LogicWord};
+use rb_model::{AnalogMipMap, DigitalMipMap, DigitalStore, LogicWord};
 
 /// True min/max over a base range, the slow obvious way.
 fn true_minmax(base: &[i32], start: usize, end: usize) -> (i32, i32) {
@@ -112,13 +112,23 @@ proptest! {
 
         let batch = DigitalMipMap::build(&words, channel_count);
 
+        let mut store = DigitalStore::new(channel_count);
         let mut incr = DigitalMipMap::new(channel_count);
         let mut filled = 0usize;
         for &c in &chunks {
             filled = (filled + c).min(words.len());
-            incr.extend(&words[..filled]);
+            let prev = store.len();
+            if filled > prev {
+                store.extend_from_slice(&words[prev..filled]);
+            }
+            incr.extend(&store);
         }
-        incr.extend(&words);
+        // Ensure all samples are in.
+        let prev = store.len();
+        if words.len() > prev {
+            store.extend_from_slice(&words[prev..]);
+        }
+        incr.extend(&store);
 
         prop_assert_eq!(incr.base_len(), batch.base_len());
         for ch in 0..channel_count as usize {

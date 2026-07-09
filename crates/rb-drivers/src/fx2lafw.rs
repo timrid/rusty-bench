@@ -606,7 +606,9 @@ impl AcquisitionSource for Fx2lafwDevice {
         self.pending_transport = Some(return_rx);
 
         let fut = async move {
-            let mut buf = Vec::new();
+            // ── 8-bit mode: decode directly from transfer buffer, no accumulation.
+            //     Only 16-bit mode needs a single-byte stash for odd-length transfers.
+            let mut odd_byte: Option<u8> = None;
             let mut empty_transfer_count: usize = 0;
 
             // ── Submit transfers FIRST, BEFORE starting the GPIF engine ────
@@ -626,13 +628,11 @@ impl AcquisitionSource for Fx2lafwDevice {
 
             loop {
                 if !running.load(Ordering::SeqCst) {
-                    // Final drain: send remaining buffered samples.
-                    let sample_bytes = if sample_wide { 2 } else { 1 };
-                    let complete = (buf.len() / sample_bytes) * sample_bytes;
-                    if complete > 0 {
-                        let chunk =
-                            decode_samples(&buf[..complete], sample_wide, complete / sample_bytes);
-                        let _ = chunk_tx.unbounded_send(chunk);
+                    // Final drain: send the leftover odd byte if any (16-bit mode).
+                    if let Some(b) = odd_byte.take() {
+                        // A single odd byte without a partner is discarded –
+                        // it represents an incomplete sample at end of capture.
+                        log::debug!("fx2lafw: discarding odd trailing byte 0x{b:02X}");
                     }
                     break;
                 }
@@ -659,27 +659,50 @@ impl AcquisitionSource for Fx2lafwDevice {
                     }
                     Ok(data) => {
                         empty_transfer_count = 0;
-                        buf.extend_from_slice(&data);
-                        // Re-submit the SAME buffer (buffer reuse).
-                        // This reuses the buffer that just completed instead
-                        // of allocating a new `Vec<u8>` on every transfer.
-                        transport.submit_bulk_in(data);
 
-                        // Decode as many complete samples as possible and send.
-                        let sample_bytes = if sample_wide { 2 } else { 1 };
-                        let complete = (buf.len() / sample_bytes) * sample_bytes;
-                        if complete >= sample_bytes {
-                            let max = complete / sample_bytes;
-                            let chunk = decode_samples(&buf[..complete], sample_wide, max);
-                            let consumed = chunk.logic().len() * sample_bytes;
-                            buf.drain(..consumed);
+                        if sample_wide {
+                            // ── 16-bit mode ────────────────────────────
+                            let effective = if let Some(lo) = odd_byte.take() {
+                                // Prepend the leftover byte from the previous transfer.
+                                // We only need at most 1 byte, so use a small stack buffer.
+                                let mut combined = [lo, 0u8];
+                                combined[1..].copy_from_slice(&data[..data.len().min(1)]);
+                                // Decode the first sample from the combined bytes.
+                                let val = u64::from(u16::from_le_bytes(combined));
+                                let mut chunk = SampleChunk::new().with_logic(vec![val]);
+                                let _ = chunk_tx.unbounded_send(chunk);
+                                // Now process the rest (starting at byte 1).
+                                &data[1..]
+                            } else {
+                                &data[..]
+                            };
 
+                            let complete = (effective.len() / 2) * 2;
+                            if complete > 0 {
+                                let max = complete / 2;
+                                let chunk = decode_samples(&effective[..complete], true, max);
+                                if !chunk.is_empty() {
+                                    if chunk_tx.unbounded_send(chunk).is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                            // Stash trailing odd byte for next transfer.
+                            if effective.len() % 2 != 0 {
+                                odd_byte = Some(effective[effective.len() - 1]);
+                            }
+                        } else {
+                            // ── 8-bit mode: decode directly, zero copy ──
+                            let chunk = decode_samples(&data, false, data.len());
                             if !chunk.is_empty() {
                                 if chunk_tx.unbounded_send(chunk).is_err() {
-                                    break; // receiver dropped
+                                    break;
                                 }
                             }
                         }
+
+                        // Re-submit the SAME buffer (buffer reuse).
+                        transport.submit_bulk_in(data);
                     }
                 }
             }
