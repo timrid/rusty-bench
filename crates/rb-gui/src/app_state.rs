@@ -145,6 +145,55 @@ impl AppState {
         }
     }
 
+    /// Creates a new tab and copies the active tab's device assignment and
+    /// [`AcquisitionConfig`] (snapshot-on-create, afterwards independent).
+    ///
+    /// If the active tab is connected to a device, the new tab gets:
+    /// - The same `DeviceId` assignment
+    /// - A copy of the active tab's `AcquisitionConfig` (channel descriptors,
+    ///   enable flags, sample rate)
+    ///
+    /// Returns the new tab's [`TabId`].
+    pub fn create_tab_from_active(&mut self) -> TabId {
+        let assigned_device_id = self
+            .active_tab_state()
+            .and_then(|t| t.assigned_device_id().cloned());
+
+        // Snapshot the active tab's AcquisitionConfig (if LogicAnalyzer).
+        let config_snapshot = self
+            .active_tab_state()
+            .and_then(|t| t.content.as_ref())
+            .and_then(|c| match c {
+                crate::tab_content::TabContent::LogicAnalyzer(la) => {
+                    Some(la.acquisition_config.clone())
+                }
+            });
+
+        let id = TabId(self.next_tab_id);
+        self.next_tab_id += 1;
+        let label = format!("Session {}", self.next_session_num);
+        self.next_session_num += 1;
+
+        let mut tab = TabState::new(id, label);
+
+        if let Some(ref did) = assigned_device_id {
+            tab.source = TabSource::Device(did.clone());
+        }
+
+        // If we have a config snapshot, initialize the tab content with it.
+        if let Some(cfg) = config_snapshot {
+            let content = crate::logic_analyzer::LogicAnalyzerContent {
+                acquisition_config: cfg,
+                ..crate::logic_analyzer::LogicAnalyzerContent::default()
+            };
+            tab.content = Some(crate::tab_content::TabContent::LogicAnalyzer(content));
+        }
+
+        self.tabs.insert(id, tab);
+        self.active_tab = id;
+        id
+    }
+
     /// Assigns a device (by [`DeviceId`]) to a tab and updates the tab label.
     /// The caller is responsible for setting the appropriate [`TabContent`].
     pub fn assign_device_to_tab(&mut self, tab_id: TabId, device_id: DeviceId) {

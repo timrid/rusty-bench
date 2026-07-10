@@ -470,16 +470,8 @@ fn TabBar(
                 title: if is_locked { "Stop acquisition to create a new tab" } else { "New tab" },
                 onclick: move |_| {
                     if !is_locked {
-                        let state = state.clone();
-                        let assigned_device_id = state
-                            .borrow()
-                            .active_tab_state()
-                            .and_then(|t| t.assigned_device_id().cloned());
                         let mut s = state.borrow_mut();
-                        let new_id = s.create_tab("Untitled");
-                        if let Some(ref did) = assigned_device_id {
-                            s.assign_device_to_tab(new_id, did.clone());
-                        }
+                        s.create_tab_from_active();
                         data_version += 1;
                     }
                 },

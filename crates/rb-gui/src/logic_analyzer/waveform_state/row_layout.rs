@@ -102,9 +102,6 @@ impl RowDescriptor {
 pub struct RowLayout {
     /// Ordered list of Rows in the waveform canvas.
     pub rows: Vec<RowDescriptor>,
-    /// Whether the row list needs to be rebuilt from device channels.
-    /// Initialized to `true` so the first `rebuild_rows` creates rows.
-    pub rows_dirty: bool,
     /// Width of the left label panel in pixels (default [`LABEL_W`]).
     pub label_width: f64,
     /// Vertical scroll offset of the row area (below headers) in pixels.
@@ -115,7 +112,6 @@ impl Default for RowLayout {
     fn default() -> Self {
         Self {
             rows: Vec::new(),
-            rows_dirty: true,
             label_width: LABEL_W,
             scroll_y: 0.0,
         }
@@ -125,12 +121,12 @@ impl Default for RowLayout {
 impl RowLayout {
     // ── Row management ────────────────────────────────────────────────────
 
-    /// Rebuild the row list from device channels.  Call when a device connects
-    /// or when channel metadata changes.
+    /// Rebuild the row list from enabled device channels.
+    ///
+    /// Call when a device connects or when enabled channels change.
+    /// The caller is responsible for only invoking this when the counts
+    /// actually differ from the previous call (guard via layout version).
     pub fn rebuild_rows(&mut self, analog_count: usize, digital_ch_count: usize) {
-        if !self.rows_dirty {
-            return;
-        }
         // Preserve existing row heights where possible.
         let old_heights: Vec<(RowKind, usize, f64)> = self
             .rows
@@ -168,7 +164,6 @@ impl RowLayout {
                 decoder_kind: None,
             });
         }
-        self.rows_dirty = false;
     }
 
     /// Set the Signal Area height of a Row by its index in the row list.

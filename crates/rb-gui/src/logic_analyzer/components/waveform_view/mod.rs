@@ -32,6 +32,7 @@ use dioxus::prelude::*;
 use rb_canvas::JsCanvasRenderer;
 use rb_model::{AnalogTrace, DigitalTrace};
 
+use crate::logic_analyzer::acquisition::AcquisitionConfig;
 use crate::logic_analyzer::decoder::DecoderConfig;
 use crate::logic_analyzer::AcquisitionState;
 use crate::logic_analyzer::waveform_state::{
@@ -271,6 +272,7 @@ pub fn WaveformView(
     tab_id: crate::tab_state::TabId,
     data_version: Signal<u64>,
     mut wf_state: Signal<WaveformState>,
+    mut acquisition_config: Signal<AcquisitionConfig>,
     mut decoder_config: Signal<DecoderConfig>,
     mut cursor_sample_pos: Signal<Option<u64>>,
     waveform_data: Signal<WaveformData>,
@@ -293,15 +295,28 @@ pub fn WaveformView(
     // ── Update state (only when underlying data actually changes) ────────
     // Guarded by a layout version to avoid re-triggering parent re-renders
     // on every render, which causes an infinite loop on the web platform.
-    let mut last_layout_ver = use_signal(|| (0usize, 0usize, 0usize));
-    let dcc = digital.as_ref().map(|dt| dt.channels().len()).unwrap_or(0);
-    let layout_ver = (analog.len(), dcc, sample_count);
-    if last_layout_ver() != layout_ver {
-        last_layout_ver.set(layout_ver);
+    //
+    // Row layout is rebuilt from *enabled* channel counts in AcquisitionConfig,
+    // not from trace dimensions. This ensures rows appear immediately after
+    // device connect, before any acquisition has started.
+    //
+    // Two conditions trigger a rebuild:
+    // 1. Enabled channel counts changed (device connect, user toggle).
+    // 2. Actual row count doesn't match expected (tab switch to a fresh tab
+    //    that has the same channel counts but an empty row list).
+    let mut last_channel_counts = use_signal(|| (0usize, 0usize));
+    let cfg = acquisition_config.read();
+    let enabled_analog = cfg.analog_enabled.iter().filter(|e| **e).count();
+    let enabled_digital = cfg.digital_enabled.iter().filter(|e| **e).count();
+    let expected_rows = enabled_analog + enabled_digital;
+    let actual_rows = wf_state.read().row_layout.rows.len();
+    let counts = (enabled_analog, enabled_digital);
+    if last_channel_counts() != counts || actual_rows != expected_rows {
+        last_channel_counts.set(counts);
         {
             let mut ws = wf_state.write();
             ws.viewport.clamp_view(sample_count, is_running);
-            ws.row_layout.rebuild_rows(analog.len(), dcc);
+            ws.row_layout.rebuild_rows(enabled_analog, enabled_digital);
         }
         if let Some(ref dt) = digital {
             decoder_config.write().feed(dt);
@@ -372,18 +387,58 @@ pub fn WaveformView(
         })
         .collect();
 
-    // ── Canvas drawing: only redraws when data_version or canvas size change ──
-    let mut last_draw_key = use_signal(|| (0u64, 0u32));
-    let draw_key = (_version, canvas_width_px().round() as u32);
-    if last_draw_key() != draw_key {
-        last_draw_key.set(draw_key);
-        let colors = match theme() {
+    // ── Canvas drawing: runs via use_effect AFTER the DOM is committed ──
+    //
+    // Drawing must be deferred to a use_effect so that canvas DOM elements
+    // exist when the JS tries to find them via getElementById.  Without this,
+    // dioxus::document::eval runs during the render phase (before DOM commit)
+    // and produces "Canvas not found" warnings.
+    //
+    // All signal reads happen *inside* the effect closure so Dioxus
+    // re-subscribes and re-runs the effect when the data changes.
+    let mut last_draw_key = use_signal(|| (0u64, 0u64, 0u32));
+    let draw_short_id = short_id.clone();
+    let draw_range_start = range_start;
+    let draw_range_end = range_end;
+    let draw_range_len = range_len;
+
+    use_effect(move || {
+        let dv = data_version();
+        let wd = waveform_data.read();
+        let ws = wf_state.read();
+        let cw = canvas_width_px();
+        let t = theme();
+
+        // Only redraw when relevant properties actually change.
+        let key = (dv, wd.sample_count as u64, cw.round() as u32);
+        if last_draw_key() == key {
+            return;
+        }
+        last_draw_key.set(key);
+
+        let colors = match t {
             crate::app_state::Theme::Dark => &DARK_COLORS,
             _ => &LIGHT_COLORS,
         };
-        log::info!("Canvas draw triggered: dv={_version} cw={:.0} rows={} sc={sample_count}", canvas_width_px(), rows.len());
-        draw_all_canvases(&short_id, &analog, &digital, &rows, &[], range_start, range_end, range_len, canvas_width_px(), colors);
-    }
+        let rows = &ws.row_layout.rows;
+        log::info!(
+            "Canvas draw: dv={dv} cw={cw:.0} rows={} sc={}",
+            rows.len(),
+            wd.sample_count,
+        );
+        draw_all_canvases(
+            &draw_short_id,
+            &wd.analog,
+            &wd.digital,
+            rows,
+            &[],
+            draw_range_start,
+            draw_range_end,
+            draw_range_len,
+            cw,
+            colors,
+        );
+    });
 
     // ═══════════════════════════════════════════════════════════════════════
     //  Render
@@ -831,10 +886,10 @@ fn draw_all_canvases(
                 );
             }
         };
+        // Always emit JS for every visible row — finish() resizes the
+        // canvas which clears any stale pixel buffer from a previous tab.
         let row_js = renderer.finish(&cid, row.signal_height_px);
-        if !row_js.is_empty() {
-            all_js.push_str(&wrap_with_resize_observer(row_js));
-        }
+        all_js.push_str(&wrap_with_resize_observer(row_js));
     }
 
     log::info!(
@@ -1035,6 +1090,19 @@ mod tests {
         )
     }
 
+    /// Helper: create an [`AcquisitionConfig`] with the given number of enabled
+    /// analog and digital channels (for test use).
+    fn make_test_config(analog_count: usize, digital_count: usize) -> AcquisitionConfig {
+        use rb_model::{AnalogChannel, AnalogFormat, ChannelId, DigitalChannel};
+        AcquisitionConfig {
+            analog_channels: vec![AnalogChannel::new(ChannelId(0), "CH0", AnalogFormat::identity()); analog_count],
+            analog_enabled: vec![true; analog_count],
+            digital_channels: vec![DigitalChannel::new(ChannelId(0), "D0", 0); digital_count],
+            digital_enabled: vec![true; digital_count],
+            ..AcquisitionConfig::default()
+        }
+    }
+
     /// Shared state between the test and the wrapper component inside VirtualDom.
     #[derive(PartialEq)]
     struct TestSignals {
@@ -1047,6 +1115,7 @@ mod tests {
     fn TestWrapper(
         tab_id: crate::tab_state::TabId,
         initial_wf_state: WaveformState,
+        initial_acq_config: AcquisitionConfig,
         waveform_data: WaveformData,
         signals: Rc<TestSignals>,
     ) -> Element {
@@ -1060,12 +1129,14 @@ mod tests {
         let cursor_sample_pos = use_signal(|| None::<u64>);
         let theme = use_signal(|| crate::app_state::Theme::Light);
         let wd_signal = use_signal(move || waveform_data.clone());
+        let acq_config = use_signal(move || initial_acq_config.clone());
 
         rsx! {
             WaveformView {
                 tab_id,
                 data_version,
                 wf_state,
+                acquisition_config: acq_config,
                 decoder_config,
                 cursor_sample_pos,
                 waveform_data: wd_signal,
@@ -1078,6 +1149,7 @@ mod tests {
     fn render_waveform_view_mut(
         tab_id: crate::tab_state::TabId,
         initial_wf_state: WaveformState,
+        initial_acq_config: AcquisitionConfig,
         waveform_data: WaveformData,
     ) -> (String, VirtualDom, Rc<TestSignals>) {
         let signals = Rc::new(TestSignals {
@@ -1091,6 +1163,7 @@ mod tests {
                     TestWrapper {
                         tab_id: props.tab_id,
                         initial_wf_state: props.initial_wf_state,
+                        initial_acq_config: props.initial_acq_config,
                         waveform_data: props.waveform_data,
                         signals: props.signals,
                     }
@@ -1099,6 +1172,7 @@ mod tests {
             TestWrapperProps {
                 tab_id,
                 initial_wf_state,
+                initial_acq_config,
                 waveform_data,
                 signals: signals.clone(),
             },
@@ -1124,6 +1198,7 @@ mod tests {
         let (html, _vdom, _signals) = render_waveform_view_mut(
             crate::tab_state::TabId(1),
             wf_state,
+            make_test_config(1, 1),
             data,
         );
 
@@ -1154,6 +1229,7 @@ mod tests {
         let (html1, _vdom, _signals) = render_waveform_view_mut(
             crate::tab_state::TabId(1),
             wf_state.clone(),
+            make_test_config(1, 0),
             data.clone(),
         );
         assert!(html1.contains("height: 108px"), "initial height 108px missing");
@@ -1165,6 +1241,7 @@ mod tests {
         let (html2, _vdom2, _signals2) = render_waveform_view_mut(
             crate::tab_state::TabId(1),
             ws2,
+            make_test_config(1, 0),
             data,
         );
         // 55px signal + 28px measurement = 83px total
@@ -1193,6 +1270,7 @@ mod tests {
         let (html, _vdom, _signals) = render_waveform_view_mut(
             crate::tab_state::TabId(1),
             wf_state,
+            make_test_config(1, 1),
             data,
         );
 
@@ -1210,6 +1288,7 @@ mod tests {
         let (_, _vdom1, _signals1) = render_waveform_view_mut(
             crate::tab_state::TabId(1),
             WaveformState::default(),
+            make_test_config(1, 1),
             WaveformData {
                 acq_state: AcquisitionState::Idle,
                 analog: vec![make_test_analog("CH0")],
@@ -1225,6 +1304,7 @@ mod tests {
         let (html2, _vdom2, _signals2) = render_waveform_view_mut(
             crate::tab_state::TabId(1),
             WaveformState::default(),
+            make_test_config(1, 1),
             WaveformData {
                 acq_state: AcquisitionState::Stopped,
                 analog: vec![trace],

@@ -14,7 +14,7 @@ use rb_model::{AnalogChannel, AnalogChunkData, AnalogTrace, DigitalChannel, Digi
 /// Built once from device capabilities when a device is connected.
 /// Persists across Stop → Start cycles.  Channel metadata is stable;
 /// enabled flags and sample rate can be edited in the channel-config panel.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct AcquisitionConfig {
     /// Desired sample rate in Hz.
     pub sample_rate_hz: f64,

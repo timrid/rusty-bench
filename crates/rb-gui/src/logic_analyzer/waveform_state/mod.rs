@@ -23,7 +23,10 @@ pub struct WaveformState {
 }
 
 impl WaveformState {
-    /// Convenience: clamp view and rebuild rows from channel counts.
+    /// Convenience: clamp view and rebuild rows from enabled channel counts.
+    ///
+    /// `analog_count` and `digital_ch_count` should be the counts of
+    /// *acquisition-enabled* channels, not total device channels.
     pub fn clamp_and_rebuild(
         &mut self,
         sample_count: usize,

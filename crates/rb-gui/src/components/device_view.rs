@@ -180,6 +180,7 @@ pub fn DeviceView(data_version: Signal<u64>) -> Element {
                         tab_id: active_tab,
                         data_version,
                         wf_state: wf_state_signal,
+                        acquisition_config: config_signal,
                         decoder_config: decoder_config_signal,
                         cursor_sample_pos,
                         waveform_data,
