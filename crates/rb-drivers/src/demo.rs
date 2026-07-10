@@ -15,6 +15,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use async_trait::async_trait;
 use futures::channel::mpsc;
@@ -107,14 +108,23 @@ impl AcquisitionSource for DemoSource {
                 produced,
                 chunk_tx,
             };
+            let t0 = Instant::now();
             while running.load(Ordering::SeqCst) {
-                let chunk = state.generate_chunk(CHUNK_SIZE);
-                if state.chunk_tx.unbounded_send(chunk).is_err() {
-                    break;
+                // Wall-clock pacing: compute how many samples should exist
+                // at this instant and generate any deficit (up to CHUNK_SIZE).
+                let elapsed_s = t0.elapsed().as_secs_f64();
+                let target = (elapsed_s * config.sample_rate_hz) as u64;
+                let deficit = target.saturating_sub(state.produced);
+                if deficit > 0 {
+                    let n = (deficit as usize).min(CHUNK_SIZE);
+                    let chunk = state.generate_chunk(n);
+                    if state.chunk_tx.unbounded_send(chunk).is_err() {
+                        break;
+                    }
+                } else {
+                    // Ahead of schedule — yield to the executor.
+                    futures_timer::Delay::new(core::time::Duration::from_millis(1)).await;
                 }
-                // Rate-limit so cooperative executors don't busy-loop on
-                // pure-compute devices.  Real I/O devices suspend on I/O.
-                futures_timer::Delay::new(core::time::Duration::from_millis(1)).await;
             }
             running.store(false, Ordering::SeqCst);
         };

@@ -101,25 +101,25 @@ fn fmt_time_ns(ns: f64) -> String {
 // ── Tick computation ─────────────────────────────────────────────────────────
 
 fn compute_ticks(
-    range_start: usize,
-    range_end: usize,
-    range_len: f64,
-    sample_rate_hz: f64,
+    time_start_s: f64,
+    time_end_s: f64,
 ) -> Vec<(f64, String, Vec<f64>)> {
-    let view_dur = range_len / sample_rate_hz;
+    let view_dur = time_end_s - time_start_s;
+    if view_dur <= 0.0 {
+        return Vec::new();
+    }
     let (tick_s, minors) = adaptive_tick_spacing(view_dur);
-    let first_tick = (range_start as f64 / sample_rate_hz / tick_s).ceil() * tick_s;
-    let max_ts = range_end as f64 / sample_rate_hz;
+    let first_tick = (time_start_s / tick_s).ceil() * tick_s;
     let mut elements = Vec::new();
     let mut ts = first_tick;
-    while ts <= max_ts {
-        let pct = ((ts * sample_rate_hz - range_start as f64) / range_len * 100.0).clamp(0.0, 100.0);
+    while ts <= time_end_s {
+        let pct = ((ts - time_start_s) / view_dur * 100.0).clamp(0.0, 100.0);
         let label = fmt_tick(ts);
         let mut minor_els = Vec::new();
         for m in 1..minors {
             let ms = ts + m as f64 * tick_s / minors as f64;
             let mpct =
-                ((ms * sample_rate_hz - range_start as f64) / range_len * 100.0).clamp(0.0, 100.0);
+                ((ms - time_start_s) / view_dur * 100.0).clamp(0.0, 100.0);
             if mpct < 100.0 {
                 minor_els.push(mpct);
             }
@@ -137,6 +137,7 @@ struct CursorTracker {
     sample_pos: Signal<Option<u64>>,
     px: Signal<Option<f64>>,
     label: Signal<String>,
+    sample_rate_hz: f64,
 }
 
 impl CursorTracker {
@@ -161,7 +162,7 @@ impl CursorTracker {
         let in_label = el_x < label_width_px;
         self.px.set(if in_label { None } else { Some(el_x) });
         self.sample_pos.set(if in_label { None } else { Some(sp) });
-        self.label.set(fmt_time_ns((sp as f64 / 1_000_000.0) * 1e9));
+        self.label.set(fmt_time_ns(sp as f64 / self.sample_rate_hz * 1e9));
     }
 }
 
@@ -329,8 +330,16 @@ pub fn WaveformView(
     let range_end = (wf_state.read().viewport.view_start + wf_state.read().viewport.view_samples).min(sample_count);
     let range_len = (range_end - range_start).max(1) as f64;
 
-    let sample_rate_hz = 1_000_000.0; // TODO: real sample rate
-    let tick_elements = compute_ticks(range_start, range_end, range_len, sample_rate_hz);
+    // ── Extract sample rate from the first available trace ────────────────
+    let sample_rate_hz = analog.first()
+        .map(|t| t.timebase().sample_rate_hz())
+        .or_else(|| digital.as_ref().map(|dt| dt.timebase().sample_rate_hz()))
+        .unwrap_or(1.0);
+
+    // ── Convert sample range to time range for the time ruler ────────────
+    let time_start_s = range_start as f64 / sample_rate_hz;
+    let time_end_s = range_end as f64 / sample_rate_hz;
+    let tick_elements = compute_ticks(time_start_s, time_end_s);
 
     let short_id = format!("tab-{}", tab_id.0);
 
@@ -348,6 +357,7 @@ pub fn WaveformView(
         sample_pos: cursor_sample_pos,
         px: cursor_px,
         label: cursor_label,
+        sample_rate_hz,
     };
 
     // ── Label panel width (dynamic, draggable divider) ────────────────
@@ -1035,13 +1045,15 @@ mod tests {
 
     #[test]
     fn compute_ticks_non_empty() {
-        let ticks = compute_ticks(0, 1000, 1000.0, 1_000_000.0);
+        // 1000 samples at 1 MHz = 1 ms view
+        let ticks = compute_ticks(0.0, 0.001);
         assert!(!ticks.is_empty(), "should produce at least one tick");
     }
 
     #[test]
     fn compute_ticks_pct_in_range() {
-        let ticks = compute_ticks(0, 1000, 1000.0, 1_000_000.0);
+        // 1000 samples at 1 MHz = 1 ms view
+        let ticks = compute_ticks(0.0, 0.001);
         for (pct, _label, minors) in &ticks {
             assert!((0.0..=100.0).contains(pct), "pct {pct} out of range");
             for mpct in minors {
@@ -1052,7 +1064,8 @@ mod tests {
 
     #[test]
     fn compute_ticks_monotonic() {
-        let ticks = compute_ticks(0, 1000, 1000.0, 1_000_000.0);
+        // 1000 samples at 1 MHz = 1 ms view
+        let ticks = compute_ticks(0.0, 0.001);
         let mut last = -1.0;
         for (pct, _, _) in &ticks {
             assert!(*pct > last, "ticks must be monotonically increasing");
@@ -1061,11 +1074,19 @@ mod tests {
     }
 
     #[test]
-    fn compute_ticks_empty_range() {
-        let ticks = compute_ticks(0, 0, 1.0, 1_000_000.0);
-        // With range_len=1 and 0 samples, should still produce ticks or be empty
-        // Just ensure no panic.
-        let _ = ticks;
+    fn compute_ticks_zero_duration() {
+        let ticks = compute_ticks(0.0, 0.0);
+        assert!(ticks.is_empty(), "zero-duration view should produce no ticks");
+    }
+
+    #[test]
+    fn compute_ticks_long_duration() {
+        // 5 s view at any sample rate
+        let ticks = compute_ticks(0.0, 5.0);
+        assert!(!ticks.is_empty(), "5 s view should produce ticks");
+        for (pct, _label, _) in &ticks {
+            assert!((0.0..=100.0).contains(pct), "pct {pct} out of range");
+        }
     }
 
     // ── Integration: WaveformView with SSR ────────────────────────────────
