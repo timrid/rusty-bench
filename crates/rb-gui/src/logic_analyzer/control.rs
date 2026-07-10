@@ -8,8 +8,8 @@ use std::rc::Rc;
 
 use dioxus::prelude::{spawn as dioxus_spawn, Signal};
 use futures::channel::{mpsc, oneshot};
-use futures::StreamExt;
-use rb_core::{run_acquisition, DeviceHandle};
+use futures::{future, pin_mut, FutureExt, StreamExt};
+use rb_core::run_acquisition;
 use rb_device::DeviceId;
 use rb_model::SampleChunk;
 
@@ -113,11 +113,13 @@ pub fn start(app_ref: &AppStateRef, tab_id: TabId, data_version: Signal<u64>) {
     let (data_tx_device, data_rx_device) = mpsc::unbounded::<SampleChunk>();
     let (gui_tx, gui_rx) = mpsc::unbounded::<SampleChunk>();
     let (return_tx, return_rx) = oneshot::channel();
+    let (stop_tx, stop_rx) = oneshot::channel();
 
-    // Keep a clone of data_tx_device in the tab for stop signal.
+    // Keep a clone of data_tx_device and the stop sender in the tab.
     {
         let tab = app.tabs.get_mut(&tab_id).unwrap();
         tab.logic_analyzer_mut().data_tx = Some(data_tx_device.clone());
+        tab.logic_analyzer_mut().stop_tx = Some(stop_tx);
     }
 
     let sample_rate = config.sample_rate_hz;
@@ -148,17 +150,42 @@ pub fn start(app_ref: &AppStateRef, tab_id: TabId, data_version: Signal<u64>) {
         }
 
         // Start streaming: device pushes to data_tx_device.
-        if let Some(src) = handle.device_mut().as_acquisition_source_mut() {
-            if let Ok(read_loop) = src.start_streaming(data_tx_device).await {
-                // run_acquisition polls read_loop and forwards data_rx_device → gui_tx.
-                run_acquisition(read_loop, data_rx_device, Some(gui_tx)).await;
+        let read_loop = if let Some(src) = handle.device_mut().as_acquisition_source_mut() {
+            match src.start_streaming(data_tx_device).await {
+                Ok(rl) => Some(rl),
+                Err(e) => {
+                    log::error!("start_streaming failed: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        if let Some(read_loop) = read_loop {
+            // Race: acquisition vs stop signal.
+            let acq_fut = run_acquisition(read_loop, data_rx_device, Some(gui_tx)).fuse();
+            let stop_fut = stop_rx.fuse();
+            pin_mut!(acq_fut, stop_fut);
+
+            match future::select(acq_fut, stop_fut).await {
+                future::Either::Left(_) => {
+                    log::debug!("acquisition finished normally");
+                }
+                future::Either::Right(_) => {
+                    log::debug!("stop signal received, calling stop_streaming");
+                }
+            }
+
+            // Ensure the device is stopped regardless of exit path.
+            // (future::select consumed both futures; dropping acq_fut
+            //  dropped the read_loop and gui_tx, stopping the drain task.)
+            if let Some(src) = handle.device_mut().as_acquisition_source_mut() {
+                let _ = src.stop_streaming().await;
             }
         }
 
-        // After run_acquisition exits: clean stop.
-        if let Some(src) = handle.device_mut().as_acquisition_source_mut() {
-            let _ = src.stop_streaming().await;
-        }
+        // Clean stop handlers.
         if let Some(la) = handle.device_mut().as_logic_analyzer_mut() {
             let _ = la.stop().await;
         }
@@ -186,6 +213,10 @@ pub fn start(app_ref: &AppStateRef, tab_id: TabId, data_version: Signal<u64>) {
 pub fn stop(app: &mut AppState, tab_id: TabId) {
     if let Some(tab) = app.tabs.get_mut(&tab_id) {
         let la = tab.logic_analyzer_mut();
+        // Signal the acquisition task to stop the device.
+        if let Some(stop_tx) = la.stop_tx.take() {
+            let _ = stop_tx.send(());
+        }
         la.data_tx = None;
         if la.acq_state == AcquisitionState::Running {
             la.acq_state = AcquisitionState::Stopped;
@@ -197,6 +228,9 @@ pub fn stop(app: &mut AppState, tab_id: TabId) {
 pub fn clear_acquisition(app: &mut AppState, tab_id: TabId) {
     if let Some(tab) = app.tabs.get_mut(&tab_id) {
         let la = tab.logic_analyzer_mut();
+        if let Some(stop_tx) = la.stop_tx.take() {
+            let _ = stop_tx.send(());
+        }
         la.data_tx = None;
         la.acq_state = AcquisitionState::Idle;
         la.analog.clear();

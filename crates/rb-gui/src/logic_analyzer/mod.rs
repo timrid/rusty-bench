@@ -7,7 +7,7 @@ pub mod control;
 pub mod decoder;
 pub mod waveform_state;
 
-use futures::channel::mpsc;
+use futures::channel::{mpsc, oneshot};
 use rb_model::{AnalogTrace, DigitalTrace, SampleChunk};
 
 use acquisition::AcquisitionConfig;
@@ -49,6 +49,8 @@ pub struct LogicAnalyzerContent {
     /// Sender to stop the streaming source (drop to stop).
     /// `None` when not acquiring.
     pub data_tx: Option<mpsc::UnboundedSender<SampleChunk>>,
+    /// One-shot sender to signal the acquisition task to call stop_streaming.
+    pub stop_tx: Option<oneshot::Sender<()>>,
     /// Per-tab waveform pan/zoom, row layout, and marker state.
     pub waveform_state: WaveformState,
     /// Protocol decoder configuration and annotations.
@@ -97,6 +99,7 @@ impl Default for LogicAnalyzerContent {
             acq_state: AcquisitionState::default(),
             sample_count: 0,
             data_tx: None,
+            stop_tx: None,
             waveform_state: WaveformState::default(),
             decoder_config: DecoderConfig::default(),
             content_version: 0,
