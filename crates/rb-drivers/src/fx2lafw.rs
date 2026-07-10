@@ -669,7 +669,7 @@ impl AcquisitionSource for Fx2lafwDevice {
                                 combined[1..].copy_from_slice(&data[..data.len().min(1)]);
                                 // Decode the first sample from the combined bytes.
                                 let val = u64::from(u16::from_le_bytes(combined));
-                                let mut chunk = SampleChunk::new().with_logic(vec![val]);
+                                let chunk = SampleChunk::new().with_logic_words(vec![val]);
                                 let _ = chunk_tx.unbounded_send(chunk);
                                 // Now process the rest (starting at byte 1).
                                 &data[1..]
@@ -692,12 +692,13 @@ impl AcquisitionSource for Fx2lafwDevice {
                                 odd_byte = Some(effective[effective.len() - 1]);
                             }
                         } else {
-                            // ── 8-bit mode: decode directly, zero copy ──
-                            let chunk = decode_samples(&data, false, data.len());
-                            if !chunk.is_empty() {
-                                if chunk_tx.unbounded_send(chunk).is_err() {
-                                    break;
-                                }
+                            // ── 8-bit mode: raw bytes directly into chunk ──
+                            // Clone the USB buffer so we can re-submit the original.
+                            // The store copies these bytes directly (memcpy),
+                            // avoiding the u8→u64→u8 round-trip.
+                            let chunk = SampleChunk::new().with_logic_raw8(data.clone());
+                            if chunk_tx.unbounded_send(chunk).is_err() {
+                                break;
                             }
                         }
 
@@ -743,23 +744,21 @@ fn decode_samples(data: &[u8], sample_wide: bool, max_samples: usize) -> SampleC
     let mut logic = Vec::with_capacity(max_samples);
 
     if sample_wide {
-        // 16-bit samples: 2 bytes per sample, little-endian.
         for chunk in data.chunks_exact(2).take(max_samples) {
             let val = u64::from(u16::from_le_bytes([chunk[0], chunk[1]]));
             logic.push(val);
         }
     } else {
-        // 8-bit samples: 1 byte per sample.
         for &byte in data.iter().take(max_samples) {
             logic.push(u64::from(byte));
         }
     }
 
-    let mut chunk = SampleChunk::new();
-    if !logic.is_empty() {
-        chunk = chunk.with_logic(logic);
+    if logic.is_empty() {
+        SampleChunk::new()
+    } else {
+        SampleChunk::new().with_logic_words(logic)
     }
-    chunk
 }
 
 // ── Firmware upload ────────────────────────────────────────────────────────────
@@ -2013,7 +2012,7 @@ mod tests {
         pool.spawner().spawn_local(read_loop).unwrap();
 
         let chunk = pool.run_until(rx.next()).unwrap();
-        assert_eq!(chunk.logic(), &[0x0F, 0xF0, 0x55]);
+        assert_eq!(chunk.digital().unwrap().as_raw8().unwrap(), &[0x0F, 0xF0, 0x55]);
 
         drop(rx);
         pool.run_until_stalled();
@@ -2119,7 +2118,7 @@ mod tests {
         pool.spawner().spawn_local(read_loop).unwrap();
 
         let chunk = pool.run_until(rx.next()).unwrap();
-        assert_eq!(chunk.logic(), &[0xAA]);
+        assert_eq!(chunk.digital().unwrap().as_raw8().unwrap(), &[0xAA]);
 
         drop(rx);
         pool.run_until_stalled();
@@ -2141,7 +2140,7 @@ mod tests {
         pool.spawner().spawn_local(read_loop).unwrap();
 
         let chunk = pool.run_until(rx.next()).unwrap();
-        assert_eq!(chunk.logic(), &[0x01, 0x02]);
+        assert_eq!(chunk.digital().unwrap().as_raw8().unwrap(), &[0x01, 0x02]);
 
         // Stop via the running flag.
         block_on(dev.stop_streaming()).unwrap();

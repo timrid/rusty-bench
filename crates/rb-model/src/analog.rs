@@ -20,74 +20,239 @@ use crate::timebase::Timebase;
 /// A larger radix means fewer levels (less memory, coarser zoom granularity).
 pub const DEFAULT_RADIX: usize = 4;
 
+// ── Width-optimised backing storage ──────────────────────────────────────────
+
+/// Width-optimised backing storage for analog samples.
+///
+/// Automatically picks the smallest signed integer type that holds the ADC's
+/// bit depth: 1–8 bit → i8, 9–16 bit → i16, 17–32 bit → i32.
+/// The public API always operates on `i32`; conversion is transparent.
+#[derive(Clone, Debug)]
+enum SampleStorage {
+    /// 1–8 bit ADC, 1 byte per sample.
+    I8(Vec<i8>),
+    /// 9–16 bit ADC, 2 bytes per sample.
+    I16(Vec<i16>),
+    /// 17–32 bit ADC, 4 bytes per sample (current default).
+    I32(Vec<i32>),
+}
+
+impl Default for SampleStorage {
+    fn default() -> Self {
+        Self::I32(Vec::new())
+    }
+}
+
+impl SampleStorage {
+    /// Creates an empty store for the given ADC bit depth.
+    fn for_adc_bits(bits: u8) -> Self {
+        match bits {
+            1..=8 => Self::I8(Vec::new()),
+            9..=16 => Self::I16(Vec::new()),
+            _ => Self::I32(Vec::new()),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::I8(v) => v.len(),
+            Self::I16(v) => v.len(),
+            Self::I32(v) => v.len(),
+        }
+    }
+
+    fn push(&mut self, sample: i32) {
+        match self {
+            Self::I8(v) => v.push(sample as i8),
+            Self::I16(v) => v.push(sample as i16),
+            Self::I32(v) => v.push(sample),
+        }
+    }
+
+    fn extend_from_slice(&mut self, samples: &[i32]) {
+        match self {
+            Self::I8(v) => v.extend(samples.iter().map(|&s| s as i8)),
+            Self::I16(v) => v.extend(samples.iter().map(|&s| s as i16)),
+            Self::I32(v) => v.extend_from_slice(samples),
+        }
+    }
+
+    fn extend_i16(&mut self, samples: &[i16]) {
+        match self {
+            Self::I8(v) => v.extend(samples.iter().map(|&s| s as i8)),
+            Self::I16(v) => v.extend_from_slice(samples),
+            Self::I32(v) => v.extend(samples.iter().map(|&s| i32::from(s))),
+        }
+    }
+
+    fn extend_u16(&mut self, samples: &[u16]) {
+        match self {
+            Self::I8(v) => v.extend(samples.iter().map(|&s| s as i8)),
+            Self::I16(v) => v.extend(samples.iter().map(|&s| s as i16)),
+            Self::I32(v) => v.extend(samples.iter().map(|&s| i32::from(s))),
+        }
+    }
+
+    /// Appends samples from a narrower signed i8 ADC width.
+    /// For I8 stores this is a direct memcpy.
+    fn extend_i8(&mut self, samples: &[i8]) {
+        match self {
+            Self::I8(v) => v.extend_from_slice(samples),
+            Self::I16(v) => v.extend(samples.iter().map(|&s| i16::from(s))),
+            Self::I32(v) => v.extend(samples.iter().map(|&s| i32::from(s))),
+        }
+    }
+
+    /// Returns the sample at `index` as i32, sign-extending if narrower.
+    fn sample_at(&self, index: usize) -> i32 {
+        match self {
+            Self::I8(v) => i32::from(v[index]),
+            Self::I16(v) => i32::from(v[index]),
+            Self::I32(v) => v[index],
+        }
+    }
+
+    /// Calls `f(index, sample)` for each sample from `start` to the end.
+    /// The match is outside the hot loop.
+    fn for_each_from(&self, start: usize, mut f: impl FnMut(usize, i32)) {
+        match self {
+            Self::I8(v) => {
+                for idx in start..v.len() {
+                    f(idx, i32::from(v[idx]));
+                }
+            }
+            Self::I16(v) => {
+                for idx in start..v.len() {
+                    f(idx, i32::from(v[idx]));
+                }
+            }
+            Self::I32(v) => {
+                for idx in start..v.len() {
+                    f(idx, v[idx]);
+                }
+            }
+        }
+    }
+
+    /// Reads a range and returns an owned `Vec<i32>`.
+    fn read_range(&self, range: Range<usize>) -> Vec<i32> {
+        let start = range.start.min(self.len());
+        let end = range.end.min(self.len());
+        if start >= end {
+            return Vec::new();
+        }
+        match self {
+            Self::I8(v) => v[start..end].iter().map(|&b| i32::from(b)).collect(),
+            Self::I16(v) => v[start..end].iter().map(|&w| i32::from(w)).collect(),
+            Self::I32(v) => v[start..end].to_vec(),
+        }
+    }
+}
+
+// ── AnalogStore ───────────────────────────────────────────────────────────────
+
 /// Append-only raw analog samples for a single channel.
 ///
-/// Samples are stored as `i32`, which losslessly holds common ADC widths
-/// (`i16`/`u16`/`i24`/...). Physical values are obtained via the channel's
-/// [`AnalogFormat`]; the store itself is unit-agnostic.
+/// Samples are stored in the smallest integer type that fits the ADC's bit
+/// depth (i8 for ≤8 bit, i16 for ≤16 bit, i32 otherwise).  The public API
+/// always uses `i32`; conversion to physical units happens via the channel's
+/// [`AnalogFormat`].
 #[derive(Clone, Debug, Default)]
 pub struct AnalogStore {
-    raw: Vec<i32>,
+    inner: SampleStorage,
 }
 
 impl AnalogStore {
-    /// Creates an empty store.
+    /// Creates an empty store (i32 backing, for backward compatibility).
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            inner: SampleStorage::for_adc_bits(32),
+        }
+    }
+
+    /// Creates an empty store optimised for the given ADC bit depth.
+    #[must_use]
+    pub fn with_adc_bits(bits: u8) -> Self {
+        Self {
+            inner: SampleStorage::for_adc_bits(bits),
+        }
     }
 
     /// Number of samples stored.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.raw.len()
+        self.inner.len()
     }
 
     /// Whether the store holds no samples.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.raw.is_empty()
+        self.inner.len() == 0
     }
 
     /// Appends a single raw sample.
     pub fn push(&mut self, raw: i32) {
-        self.raw.push(raw);
+        self.inner.push(raw);
     }
 
     /// Appends a slice of raw `i32` samples.
     pub fn extend_from_slice(&mut self, raw: &[i32]) {
-        self.raw.extend_from_slice(raw);
+        self.inner.extend_from_slice(raw);
     }
 
     /// Appends samples from a narrower signed ADC width.
     pub fn extend_i16(&mut self, raw: &[i16]) {
-        self.raw.extend(raw.iter().map(|&v| i32::from(v)));
+        self.inner.extend_i16(raw);
     }
 
     /// Appends samples from a narrower unsigned ADC width.
     pub fn extend_u16(&mut self, raw: &[u16]) {
-        self.raw.extend(raw.iter().map(|&v| i32::from(v)));
+        self.inner.extend_u16(raw);
     }
 
-    /// All raw samples.
+    /// Appends samples from a narrower signed i8 ADC width.
+    /// For I8 stores this is a direct memcpy.
+    pub fn extend_i8(&mut self, raw: &[i8]) {
+        self.inner.extend_i8(raw);
+    }
+
+    /// All raw samples as an owned `Vec<i32>`.
     #[must_use]
-    pub fn raw(&self) -> &[i32] {
-        &self.raw
+    pub fn raw_to_vec(&self) -> Vec<i32> {
+        self.inner.read_range(0..self.inner.len())
     }
 
-    /// A consistent read slice for `range`, clamped to the available samples.
+    /// A single raw sample at `index`.
     ///
-    /// Returns the raw samples that lie within `[range.start, range.end)`
-    /// intersected with `[0, len())`. An out-of-order range yields an empty
-    /// slice.
+    /// # Panics
+    /// Panics if `index` is out of bounds.
     #[must_use]
-    pub fn read(&self, range: Range<usize>) -> &[i32] {
-        let start = range.start.min(self.raw.len());
-        let end = range.end.min(self.raw.len());
-        if start >= end {
-            return &[];
-        }
-        &self.raw[start..end]
+    pub fn sample_at(&self, index: usize) -> i32 {
+        self.inner.sample_at(index)
+    }
+
+    /// A consistent read range, returned as an owned `Vec<i32>`.
+    #[must_use]
+    pub fn read(&self, range: Range<usize>) -> Vec<i32> {
+        self.inner.read_range(range)
+    }
+
+    /// Calls `f(index, sample)` for each sample from `start` to the end.
+    /// Zero-allocation iteration primitive used by [`AnalogMipMap::extend`].
+    pub fn for_each_from(&self, start: usize, f: impl FnMut(usize, i32)) {
+        self.inner.for_each_from(start, f);
+    }
+
+    // ── Deprecated migration helpers ──────────────────────────────────────
+
+    /// Deprecated: use [`raw_to_vec`](Self::raw_to_vec) or
+    /// [`for_each_from`](Self::for_each_from).
+    #[deprecated(since = "0.2.0", note = "use `raw_to_vec()` or `for_each_from()` instead")]
+    #[must_use]
+    #[allow(dead_code)]
+    pub fn raw(&self) -> Vec<i32> {
+        self.raw_to_vec()
     }
 }
 
@@ -178,11 +343,19 @@ impl AnalogMipMap {
         }
     }
 
-    /// Builds a pyramid over `base` in one shot.
+    /// Builds a pyramid over `base` in one shot (convenience for tests).
     #[must_use]
     pub fn build(base: &[i32], radix: usize) -> Self {
+        let mut store = AnalogStore::new();
+        store.extend_from_slice(base);
+        Self::build_from_store(&store, radix)
+    }
+
+    /// Builds a pyramid from an [`AnalogStore`] in one shot.
+    #[must_use]
+    pub fn build_from_store(store: &AnalogStore, radix: usize) -> Self {
         let mut m = Self::new(radix);
-        m.extend(base);
+        m.extend(store);
         m
     }
 
@@ -204,36 +377,29 @@ impl AnalogMipMap {
         self.levels.len()
     }
 
-    /// Brings the pyramid up to date with `base`.
+    /// Brings the pyramid up to date from an [`AnalogStore`].
     ///
-    /// `base` is the full, append-only base sample slice (e.g.
-    /// [`AnalogStore::raw`]). Only the buckets affected by newly appended
-    /// samples are recomputed, so repeated calls are cheap and always yield the
-    /// same result as a single [`AnalogMipMap::build`] over the final data.
-    pub fn extend(&mut self, base: &[i32]) {
+    /// Only newly appended samples are scanned; repeated calls are cheap and
+    /// match a single [`AnalogMipMap::build_from_store`].
+    pub fn extend(&mut self, store: &AnalogStore) {
         debug_assert!(
-            base.len() >= self.base_len,
+            store.len() >= self.base_len,
             "AnalogMipMap base is append-only"
         );
         let radix = self.radix;
         let prev_base_len = self.base_len;
-        self.base_len = base.len();
+        self.base_len = store.len();
 
         if self.levels.is_empty() {
             self.levels.push(Vec::new());
         }
-        // The first base bucket that can change is the one holding the previously
-        // partial tail (and all newly appended samples). The first *changed*
-        // bucket index then cascades up the pyramid by dividing by the radix:
-        // every recomputed child may alter its parent.
         let mut from = prev_base_len / radix;
-        rebuild_level0(base, &mut self.levels[0], from, radix);
+        rebuild_level0(store, prev_base_len, &mut self.levels[0], radix);
 
         let mut l = 1;
         loop {
             let below_len = self.levels[l - 1].len();
             if below_len <= 1 {
-                // The level below already spans the whole capture in one bucket.
                 self.levels.truncate(l);
                 break;
             }
@@ -260,12 +426,12 @@ impl AnalogMipMap {
     #[must_use]
     pub fn query_envelope(
         &self,
-        base: &[i32],
+        store: &AnalogStore,
         range: Range<usize>,
         pixel_count: usize,
     ) -> Vec<Bucket> {
         assert!(pixel_count > 0, "pixel_count must be > 0");
-        let len = base.len();
+        let len = store.len();
         let start = range.start.min(len);
         let end = range.end.min(len);
         if start >= end {
@@ -276,9 +442,12 @@ impl AnalogMipMap {
         // Per-sample fallback: zoomed in far enough to draw individual samples.
         if span <= pixel_count {
             return (start..end)
-                .map(|i| Bucket {
-                    start: i, end: i + 1,
-                    min: base[i], max: base[i], avg: base[i] as f64,
+                .map(|i| {
+                    let v = store.sample_at(i);
+                    Bucket {
+                        start: i, end: i + 1,
+                        min: v, max: v, avg: v as f64,
+                    }
                 })
                 .collect();
         }
@@ -315,9 +484,10 @@ impl AnalogMipMap {
     }
 }
 
-fn rebuild_level0(base: &[i32], out: &mut Vec<MinMax>, from_bucket: usize, radix: usize) {
+fn rebuild_level0(store: &AnalogStore, prev_base_len: usize, out: &mut Vec<MinMax>, radix: usize) {
+    let from_bucket = prev_base_len / radix;
     out.truncate(from_bucket);
-    let n = base.len();
+    let n = store.len();
     let mut b = from_bucket;
     loop {
         let start = b * radix;
@@ -325,9 +495,10 @@ fn rebuild_level0(base: &[i32], out: &mut Vec<MinMax>, from_bucket: usize, radix
             break;
         }
         let end = (start + radix).min(n);
-        let mut mm = MinMax::point(base[start]);
-        for &v in &base[start + 1..end] {
-            mm.include(v);
+        let first = store.sample_at(start);
+        let mut mm = MinMax::point(first);
+        for i in start + 1..end {
+            mm.include(store.sample_at(i));
         }
         out.push(mm);
         b += 1;
@@ -386,7 +557,21 @@ impl AnalogTrace {
     /// Appends raw samples and updates the mip-map.
     pub fn push_raw(&mut self, raw: &[i32]) {
         self.store.extend_from_slice(raw);
-        self.mip.extend(self.store.raw());
+        self.mip.extend(&self.store);
+    }
+
+    /// Appends raw i16 samples directly (9–16 bit ADC).
+    /// For I16 stores this avoids the i32 expansion round-trip.
+    pub fn push_raw_i16(&mut self, raw: &[i16]) {
+        self.store.extend_i16(raw);
+        self.mip.extend(&self.store);
+    }
+
+    /// Appends raw i8 samples directly (1–8 bit ADC).
+    /// For I8 stores this is a direct memcpy.
+    pub fn push_raw_i8(&mut self, raw: &[i8]) {
+        self.store.extend_i8(raw);
+        self.mip.extend(&self.store);
     }
 
     /// Number of samples in the trace.
@@ -427,7 +612,7 @@ impl AnalogTrace {
         range: Range<usize>,
         pixel_count: usize,
     ) -> Vec<Bucket> {
-        self.mip.query_envelope(self.store.raw(), range, pixel_count)
+        self.mip.query_envelope(&self.store, range, pixel_count)
     }
 
     /// Converts a raw bucket value to a physical value via the channel format.
@@ -463,11 +648,11 @@ mod tests {
     fn store_read_clamps_range() {
         let mut s = AnalogStore::new();
         s.extend_from_slice(&[0, 1, 2, 3, 4]);
-        assert_eq!(s.read(1..3), &[1, 2]);
-        assert_eq!(s.read(3..100), &[3, 4]);
-        assert_eq!(s.read(10..20), &[] as &[i32]);
+        assert_eq!(s.read(1..3), vec![1, 2]);
+        assert_eq!(s.read(3..100), vec![3, 4]);
+        assert_eq!(s.read(10..20), Vec::<i32>::new());
         let inverted = core::ops::Range { start: 4, end: 2 };
-        assert_eq!(s.read(inverted), &[] as &[i32]);
+        assert_eq!(s.read(inverted), Vec::<i32>::new());
     }
 
     #[test]
@@ -475,7 +660,7 @@ mod tests {
         let mut s = AnalogStore::new();
         s.extend_i16(&[-1, 2, -3]);
         s.extend_u16(&[4, 5]);
-        assert_eq!(s.raw(), &[-1, 2, -3, 4, 5]);
+        assert_eq!(s.raw_to_vec(), vec![-1, 2, -3, 4, 5]);
     }
 
     #[test]
@@ -492,9 +677,11 @@ mod tests {
     #[test]
     fn envelope_buckets_cover_range_with_correct_minmax() {
         let base: Vec<i32> = (0..1000).map(|i| (i * 7 % 53) - 20).collect();
-        let m = AnalogMipMap::build(&base, 4);
+        let mut store = AnalogStore::new();
+        store.extend_from_slice(&base);
+        let m = AnalogMipMap::build_from_store(&store, 4);
         let range = 100..900;
-        let buckets = m.query_envelope(&base, range.clone(), 32);
+        let buckets = m.query_envelope(&store, range.clone(), 32);
         assert!(!buckets.is_empty());
 
         for w in buckets.windows(2) {
@@ -513,8 +700,10 @@ mod tests {
     #[test]
     fn envelope_per_sample_fallback() {
         let base: Vec<i32> = (0..100).collect();
-        let m = AnalogMipMap::build(&base, 4);
-        let buckets = m.query_envelope(&base, 10..15, 64);
+        let mut store = AnalogStore::new();
+        store.extend_from_slice(&base);
+        let m = AnalogMipMap::build_from_store(&store, 4);
+        let buckets = m.query_envelope(&store, 10..15, 64);
         assert_eq!(buckets.len(), 5);
         for (i, b) in buckets.iter().enumerate() {
             let idx = 10 + i;
@@ -528,11 +717,13 @@ mod tests {
     #[test]
     fn envelope_empty_or_inverted_range() {
         let base: Vec<i32> = (0..50).collect();
-        let m = AnalogMipMap::build(&base, 4);
-        assert!(m.query_envelope(&base, 30..30, 8).is_empty());
+        let mut store = AnalogStore::new();
+        store.extend_from_slice(&base);
+        let m = AnalogMipMap::build_from_store(&store, 4);
+        assert!(m.query_envelope(&store, 30..30, 8).is_empty());
         let inverted = core::ops::Range { start: 40, end: 10 };
-        assert!(m.query_envelope(&base, inverted, 8).is_empty());
-        assert!(m.query_envelope(&base, 100..200, 8).is_empty());
+        assert!(m.query_envelope(&store, inverted, 8).is_empty());
+        assert!(m.query_envelope(&store, 100..200, 8).is_empty());
     }
 
     #[test]
@@ -540,10 +731,14 @@ mod tests {
         let base: Vec<i32> = (0..777).map(|i| ((i * 13) % 31) - 15).collect();
         let batch = AnalogMipMap::build(&base, 3);
 
+        let mut store = AnalogStore::new();
         let mut incr = AnalogMipMap::new(3);
-        // Feed in irregular chunks.
         for chunk_end in [1usize, 2, 5, 6, 17, 64, 65, 300, 776, 777] {
-            incr.extend(&base[..chunk_end]);
+            let prev = store.len();
+            if chunk_end > prev {
+                store.extend_from_slice(&base[prev..chunk_end]);
+            }
+            incr.extend(&store);
         }
         assert_eq!(incr.level_count(), batch.level_count());
         assert_eq!(incr.base_len(), batch.base_len());
@@ -573,7 +768,6 @@ mod tests {
     fn dense_query_preserves_amplitude() {
         let n = 400_000usize;
         let amplitude = 20_000i32;
-        // Sine wave: full-scale swing every ~1 000 samples (1 kHz @ 1 MSa/s).
         let base: Vec<i32> = (0..n)
             .map(|i| {
                 let phase = i as f64 * 1_000.0 / 1_000_000.0 * 2.0 * std::f64::consts::PI;
@@ -581,8 +775,10 @@ mod tests {
             })
             .collect();
 
-        let m = AnalogMipMap::build(&base, 4);
-        let buckets = m.query_envelope(&base, 0..n, 1200);
+        let mut store = AnalogStore::new();
+        store.extend_from_slice(&base);
+        let m = AnalogMipMap::build_from_store(&store, 4);
+        let buckets = m.query_envelope(&store, 0..n, 1200);
         assert!(!buckets.is_empty());
         assert!(buckets.len() <= 9600 + 10);
 
@@ -596,7 +792,6 @@ mod tests {
             assert!(b.max >= truth.max, "max at [{}, {})", b.start, b.end);
         }
 
-        // The union of all bucket extents must cover the global amplitude.
         let union_min = buckets.iter().map(|b| b.min).min().unwrap();
         let union_max = buckets.iter().map(|b| b.max).max().unwrap();
         assert!(

@@ -5,7 +5,7 @@
 //! and drives trace creation — not the other way around.
 
 use rb_device::Device;
-use rb_model::{AnalogChannel, AnalogTrace, DigitalChannel, DigitalTrace, SampleChunk, Timebase};
+use rb_model::{AnalogChannel, AnalogChunkData, AnalogTrace, DigitalChannel, DigitalChunkData, DigitalTrace, SampleChunk, Timebase};
 
 // ── Acquisition configuration ─────────────────────────────────────────────────
 
@@ -126,19 +126,62 @@ pub fn push_chunk(
     config: &AcquisitionConfig,
 ) -> usize {
     let mut added = 0;
-    for (index, trace) in analog.iter_mut().enumerate() {
-        if !config.analog_enabled.get(index).copied().unwrap_or(true) {
-            continue;
-        }
-        if let Some(samples) = chunk.analog_channel(index) {
-            trace.push_raw(samples);
-            added += samples.len();
+
+    // ── Analog dispatch ──────────────────────────────────────────────────
+    if let Some(ref a) = chunk.analog() {
+        match a {
+            AnalogChunkData::I32(channels) => {
+                for (index, trace) in analog.iter_mut().enumerate() {
+                    if !config.analog_enabled.get(index).copied().unwrap_or(true) {
+                        continue;
+                    }
+                    if let Some(samples) = channels.get(index) {
+                        trace.push_raw(samples);
+                        added += samples.len();
+                    }
+                }
+            }
+            AnalogChunkData::I16(channels) => {
+                for (index, trace) in analog.iter_mut().enumerate() {
+                    if !config.analog_enabled.get(index).copied().unwrap_or(true) {
+                        continue;
+                    }
+                    if let Some(samples) = channels.get(index) {
+                        trace.push_raw_i16(samples);
+                        added += samples.len();
+                    }
+                }
+            }
+            AnalogChunkData::I8(channels) => {
+                for (index, trace) in analog.iter_mut().enumerate() {
+                    if !config.analog_enabled.get(index).copied().unwrap_or(true) {
+                        continue;
+                    }
+                    if let Some(samples) = channels.get(index) {
+                        trace.push_raw_i8(samples);
+                        added += samples.len();
+                    }
+                }
+            }
         }
     }
+
+    // ── Digital dispatch ─────────────────────────────────────────────────
     if let Some(dt) = digital {
-        if config.digital_enabled.iter().any(|e| *e) && !chunk.logic().is_empty() {
-            dt.push_words(chunk.logic());
-            added += chunk.logic().len();
+        if config.digital_enabled.iter().any(|e| *e) {
+            if let Some(ref data) = chunk.digital() {
+                match data {
+                    DigitalChunkData::Raw8(bytes) => {
+                        dt.push_raw_8bit(bytes);
+                        added += bytes.len();
+                    }
+                    DigitalChunkData::Words(words) if !words.is_empty() => {
+                        dt.push_words(words);
+                        added += words.len();
+                    }
+                    _ => {}
+                }
+            }
         }
     }
     added

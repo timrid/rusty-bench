@@ -129,6 +129,19 @@ impl WordStorage {
             Self::U64(v) => v[start..end].to_vec(),
         }
     }
+
+    /// Appends raw 8-bit USB sample bytes directly, bypassing u8→u64 decode.
+    ///
+    /// Only valid for 8-bit (non-wide) devices.  For a U8 store this is a
+    /// direct memcpy; for wider stores the bytes are zero-extended per sample.
+    fn extend_from_raw_8bit(&mut self, bytes: &[u8]) {
+        match self {
+            Self::U8(v) => v.extend_from_slice(bytes),
+            Self::U16(v) => v.extend(bytes.iter().map(|&b| u16::from(b))),
+            Self::U32(v) => v.extend(bytes.iter().map(|&b| u32::from(b))),
+            Self::U64(v) => v.extend(bytes.iter().map(|&b| u64::from(b))),
+        }
+    }
 }
 
 // ── DigitalStore ─────────────────────────────────────────────────────────────
@@ -187,6 +200,15 @@ impl DigitalStore {
     /// Appends a slice of logic words.
     pub fn extend_from_slice(&mut self, words: &[LogicWord]) {
         self.inner.extend_from_slice(words);
+    }
+
+    /// Appends raw 8-bit USB sample bytes directly into the store.
+    ///
+    /// For a U8 store (≤8 channels) this is a direct memcpy, avoiding the
+    /// u8→u64→u8 round-trip that [`extend_from_slice`](Self::extend_from_slice)
+    /// would incur.  For wider stores the bytes are zero-extended.
+    pub fn extend_from_raw_8bit(&mut self, bytes: &[u8]) {
+        self.inner.extend_from_raw_8bit(bytes);
     }
 
     /// All logic words as an owned `Vec`.
@@ -599,6 +621,15 @@ impl DigitalTrace {
     /// Appends logic words and updates the transition index.
     pub fn push_words(&mut self, words: &[LogicWord]) {
         self.store.extend_from_slice(words);
+        self.mip.extend(&self.store);
+    }
+
+    /// Appends raw 8-bit USB sample bytes and updates the transition index.
+    ///
+    /// For a U8 store (≤8 channels) this is a direct memcpy, avoiding the
+    /// u8→u64→u8 round-trip through [`push_words`](Self::push_words).
+    pub fn push_raw_8bit(&mut self, bytes: &[u8]) {
+        self.store.extend_from_raw_8bit(bytes);
         self.mip.extend(&self.store);
     }
 

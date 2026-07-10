@@ -7,7 +7,7 @@ use futures::executor::block_on;
 use futures::task::LocalSpawnExt;
 use rb_core::DeviceHandle;
 use rb_io::{AnalogCapture, DeviceCapture, DigitalCapture};
-use rb_model::{AnalogTrace, DigitalTrace, Timebase};
+use rb_model::{AnalogChunkData, AnalogTrace, DigitalChunkData, DigitalTrace, Timebase};
 
 use crate::types::{OutputFormat, RecordBounds, RecordOpts};
 use crate::util::find_and_connect;
@@ -104,14 +104,42 @@ pub fn run_record(opts: RecordOpts, writer: &mut dyn io::Write) -> anyhow::Resul
             let chunk = pool.run_until(gui_rx.next());
             match chunk {
                 Some(chunk) => {
-                    for (i, trace) in analog.iter_mut().enumerate() {
-                        if let Some(samples) = chunk.analog_channel(i) {
-                            trace.push_raw(samples);
+                    // ── Analog dispatch ──────────────────────────────
+                    if let Some(ref a) = chunk.analog() {
+                        match a {
+                            AnalogChunkData::I32(channels) => {
+                                for (i, trace) in analog.iter_mut().enumerate() {
+                                    if let Some(samples) = channels.get(i) {
+                                        trace.push_raw(samples);
+                                    }
+                                }
+                            }
+                            AnalogChunkData::I16(channels) => {
+                                for (i, trace) in analog.iter_mut().enumerate() {
+                                    if let Some(samples) = channels.get(i) {
+                                        trace.push_raw_i16(samples);
+                                    }
+                                }
+                            }
+                            AnalogChunkData::I8(channels) => {
+                                for (i, trace) in analog.iter_mut().enumerate() {
+                                    if let Some(samples) = channels.get(i) {
+                                        trace.push_raw_i8(samples);
+                                    }
+                                }
+                            }
                         }
                     }
+                    // ── Digital dispatch ─────────────────────────────
                     if let Some(ref mut dt) = digital {
-                        if !chunk.logic().is_empty() {
-                            dt.push_words(chunk.logic());
+                        if let Some(ref data) = chunk.digital() {
+                            match data {
+                                DigitalChunkData::Raw8(bytes) => dt.push_raw_8bit(bytes),
+                                DigitalChunkData::Words(words) if !words.is_empty() => {
+                                    dt.push_words(words);
+                                }
+                                _ => {}
+                            }
                         }
                     }
                     sample_count += chunk.sample_count();
@@ -141,7 +169,7 @@ pub fn run_record(opts: RecordOpts, writer: &mut dyn io::Write) -> anyhow::Resul
         .map(|t| AnalogCapture {
             channel: t.channel().clone(),
             timebase: *t.timebase(),
-            samples: t.store().raw().to_vec(),
+            samples: t.store().raw_to_vec(),
         })
         .collect();
     let digital_capture = digital.map(|dt| DigitalCapture {

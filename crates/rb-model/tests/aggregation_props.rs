@@ -10,7 +10,7 @@
 //!    range with no gaps or overlaps.
 
 use proptest::prelude::*;
-use rb_model::{AnalogMipMap, DigitalMipMap, DigitalStore, LogicWord};
+use rb_model::{AnalogMipMap, AnalogStore, DigitalMipMap, DigitalStore, LogicWord};
 
 /// True min/max over a base range, the slow obvious way.
 fn true_minmax(base: &[i32], start: usize, end: usize) -> (i32, i32) {
@@ -25,14 +25,22 @@ fn true_minmax(base: &[i32], start: usize, end: usize) -> (i32, i32) {
 
 /// Replays a base vector into a fresh mip-map using the given chunk sizes.
 fn build_incrementally(base: &[i32], radix: usize, chunks: &[usize]) -> AnalogMipMap {
+    let mut store = AnalogStore::new();
     let mut m = AnalogMipMap::new(radix);
     let mut filled = 0usize;
     for &c in chunks {
         filled = (filled + c).min(base.len());
-        m.extend(&base[..filled]);
+        let prev = store.len();
+        if filled > prev {
+            store.extend_from_slice(&base[prev..filled]);
+        }
+        m.extend(&store);
     }
-    // Ensure all samples are in, regardless of the chunk sizes drawn.
-    m.extend(base);
+    let prev = store.len();
+    if base.len() > prev {
+        store.extend_from_slice(&base[prev..]);
+    }
+    m.extend(&store);
     m
 }
 
@@ -51,12 +59,13 @@ proptest! {
 
         prop_assert_eq!(incr.base_len(), batch.base_len());
         prop_assert_eq!(incr.level_count(), batch.level_count());
-        // Compare via query_envelope at pixel counts proportional to level granularity.
+        let mut store = AnalogStore::new();
+        store.extend_from_slice(&base);
         let n = base.len().max(1);
         for l in 0..batch.level_count() {
             let pc = ((1usize << (l + 1)) / 8).max(1);
-            let a = incr.query_envelope(&base, 0..n, pc);
-            let b = batch.query_envelope(&base, 0..n, pc);
+            let a = incr.query_envelope(&store, 0..n, pc);
+            let b = batch.query_envelope(&store, 0..n, pc);
             prop_assert_eq!(a, b);
         }
     }
@@ -75,8 +84,10 @@ proptest! {
         let end = b.min(len);
         prop_assume!(start < end);
 
-        let m = AnalogMipMap::build(&base, radix);
-        let buckets = m.query_envelope(&base, start..end, pixel_count);
+        let mut store = AnalogStore::new();
+        store.extend_from_slice(&base);
+        let m = AnalogMipMap::build_from_store(&store, radix);
+        let buckets = m.query_envelope(&store, start..end, pixel_count);
         prop_assert!(!buckets.is_empty());
 
         // Contiguous, no gaps or overlaps.

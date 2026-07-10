@@ -53,7 +53,7 @@ fn build_analog_per_sample(
     colors: &CanvasColors,
 ) {
     let store = trace.store();
-    let raw = store.raw();
+    let raw = store.raw_to_vec();
     let r_start = range_start.min(raw.len());
     let r_end = range_end.min(raw.len());
     if r_start >= r_end {

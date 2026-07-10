@@ -170,7 +170,7 @@ impl ReadLoopState {
         }
 
         self.produced += count as u64;
-        SampleChunk::new().with_analog(analog).with_logic(logic)
+        SampleChunk::new().with_analog_i32(analog).with_logic_words(logic)
     }
 }
 
@@ -417,8 +417,8 @@ mod tests {
         // sin(0) == 0 at the very first sample.
         assert_eq!(chunk.analog_channel(0).unwrap()[0], 0);
         // D0..D3 counter: logic word == sample index & 0b1111.
-        assert_eq!(chunk.logic()[0], 0);
-        assert_eq!(chunk.logic()[1], 1);
+        assert_eq!(chunk.digital().unwrap().as_words().unwrap()[0], 0);
+        assert_eq!(chunk.digital().unwrap().as_words().unwrap()[1], 1);
 
         drop(rx);
         pool.run_until_stalled();
@@ -436,7 +436,7 @@ mod tests {
         let _ = pool.run_until(rx.next()).unwrap();
         let chunk2 = pool.run_until(rx.next()).unwrap();
         // Second chunk continues from sample 256.
-        assert_eq!(chunk2.logic()[0], 256 & 0b1111);
+        assert_eq!(chunk2.digital().unwrap().as_words().unwrap()[0], 256 & 0b1111);
 
         drop(rx);
         pool.run_until_stalled();
