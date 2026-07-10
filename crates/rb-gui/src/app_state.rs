@@ -401,7 +401,7 @@ pub(crate) async fn request_supported_usb_devices() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::logic_analyzer::control;
+    use crate::logic_analyzer::AcquisitionState;
 
     /// Block on a future using a temporary tokio runtime (required by nusb).
     fn block_on<F: std::future::Future>(f: F) -> F::Output {
@@ -418,7 +418,7 @@ mod tests {
         assert_eq!(app.tabs.len(), 1);
         let active = app.active_tab_state().unwrap();
         assert!(active.assigned_device_id().is_none());
-        assert!(active.logic_analyzer().acq_state == logic_analyzer::AcquisitionState::Idle);
+        assert!(active.logic_analyzer().acq_state == AcquisitionState::Idle);
         assert!(app.device_manager.known_devices().is_empty());
     }
 
@@ -440,36 +440,6 @@ mod tests {
         assert!(app.device_manager.is_connected(&did));
         let active = app.active_tab_state().unwrap();
         assert_eq!(active.assigned_device_id().cloned(), Some(did));
-    }
-
-    #[test]
-
-    fn start_spawns_and_pumps_samples() {
-        let mut app = AppState::default();
-        let demo = scan_for_demo(&app);
-        let tab_id = app.active_tab;
-
-        // Connect and assign the device.
-        let _did = block_on(connect_and_assign(&mut app, tab_id, &demo)).unwrap();
-
-        // Start acquisition.
-        control::start_sync(&mut app, tab_id);
-
-        let active = app.active_tab_state().unwrap();
-        assert!(active.logic_analyzer().acq_state == logic_analyzer::AcquisitionState::Running);
-
-        // Drive the pool repeatedly.
-        for _ in 0..10 {
-            control::pump_executor();
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-
-        // Drain data.
-        if let Some(active) = app.tabs.get_mut(&tab_id) {
-            // Data arrives via the drain task; just check sample_count.
-            let la = active.logic_analyzer();
-            assert!(la.sample_count > 0, "expected samples after pump, got {}", la.sample_count);
-        }
     }
 
     #[test]

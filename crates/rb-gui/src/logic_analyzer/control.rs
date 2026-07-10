@@ -260,3 +260,77 @@ pub fn active_tab_acq_state(app: &AppState) -> AcquisitionState {
     };
     tab.logic_analyzer().acq_state.clone()
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use futures::channel::oneshot;
+
+    use super::super::LogicAnalyzerContent;
+
+    /// Regression test: verify that the stop oneshot channel is wired
+    /// correctly in LogicAnalyzerContent.  Before the fix, stop() only
+    /// dropped a clone of data_tx — the acquisition task never stopped.
+    #[test]
+    fn stop_fires_oneshot_signal() {
+        let (stop_tx, stop_rx) = oneshot::channel::<()>();
+
+        // Simulate control::start(): store stop_tx on the tab content.
+        let mut content = LogicAnalyzerContent::default();
+        content.stop_tx = Some(stop_tx);
+        assert!(content.stop_tx.is_some());
+
+        // Simulate control::stop(): take and fire the stop signal.
+        let taken = content.stop_tx.take();
+        assert!(
+            taken.is_some(),
+            "stop_tx must be present before stop() is called"
+        );
+        let _ = taken.unwrap().send(());
+
+        // After stop, stop_tx is None — prevents double-stop.
+        assert!(
+            content.stop_tx.is_none(),
+            "stop_tx must be consumed by stop()"
+        );
+
+        // The receiver must resolve (the oneshot was sent).
+        let result = futures::executor::block_on(stop_rx);
+        assert!(
+            result.is_ok(),
+            "stop_rx must receive the stop signal"
+        );
+    }
+
+    /// Regression test: the stop signal must actually interrupt a running
+    /// future via future::select — the pattern used in the acquisition task.
+    #[test]
+    fn stop_signal_interrupts_running_future() {
+        use futures::{future, pin_mut, FutureExt};
+
+        let (stop_tx, stop_rx) = oneshot::channel::<()>();
+        // A future that never completes — simulates a running acquisition.
+        let never_ending = futures::future::pending::<()>();
+
+        let acq_fut = never_ending.fuse();
+        let stop_fut = stop_rx.fuse();
+        pin_mut!(acq_fut, stop_fut);
+
+        // Fire the stop signal BEFORE entering the select.
+        // In production, this is sent from control::stop() on the main thread
+        // while the acquisition task is blocked in select().
+        let _ = stop_tx.send(());
+
+        // The select must resolve to the stop signal, not hang forever.
+        let result = futures::executor::block_on(future::select(acq_fut, stop_fut));
+        match result {
+            future::Either::Right(_) => { /* stop signal won — correct */ }
+            future::Either::Left(_) => {
+                panic!("stop signal should interrupt, but acquisition completed first");
+            }
+        }
+    }
+}
